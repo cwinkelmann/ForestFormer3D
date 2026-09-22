@@ -51,7 +51,9 @@ write_list() {                # write_list <name> <file>
 
 [[ -f "$TEST_LIST_INIT" ]] || { echo "missing $TEST_LIST_INIT" >&2; exit 1; }
 
-run find "$DATA_ROOT/forainetv2_instance_data" -type f -name "*bluepoints*" -delete
+if [[ -d "$DATA_ROOT/forainetv2_instance_data" ]]; then
+    run find "$DATA_ROOT/forainetv2_instance_data" -type f -name "*bluepoints*" -delete
+fi
 
 while IFS= read -r scan_name || [[ -n "${scan_name:-}" ]]; do
     [[ -z "$scan_name" ]] && continue

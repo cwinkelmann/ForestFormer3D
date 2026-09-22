@@ -61,6 +61,26 @@ def test_binary_semantic_totals_are_summed_over_files(tmp_path):
     assert parse(log, 'Instance Segmentation F1 score') == pytest.approx(1.0)
 
 
+def test_rerun_overwrites_instead_of_accumulating(tmp_path):
+    # evaluation_total_test.txt must hold exactly one fresh result block per
+    # run: a re-run on the same output directory (which run_release_eval.sh
+    # does, at minimum across an old and a fixed pass sharing a dir, and
+    # routinely while debugging) must not leave a stale block from a
+    # previous run alongside the new one, or a naive "first match" reader
+    # (e.g. Phase 2's collect.py) would silently pick up stale numbers.
+    write_result_ply(tmp_path / 'a.ply',
+                     semantic_gt=[1] * 10, semantic_pred=[1] * 10,
+                     instance_gt=[1] * 5 + [2] * 5, instance_pred=[0] * 5 + [1] * 5)
+
+    for _ in range(2):
+        proc = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path)],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+    log = (tmp_path / 'evaluation_total_test.txt').read_text()
+    assert log.count('Instance Segmentation F1 score:') == 1, log
+
+
 def test_empty_directory_exits_with_message(tmp_path):
     proc = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path)],
                           capture_output=True, text=True)

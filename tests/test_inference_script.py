@@ -56,6 +56,26 @@ def test_dry_run_echoes_commands_without_touching_files(tmp_path):
     assert temp_lists_after - temp_lists_before == set()
 
 
+def test_dry_run_succeeds_without_instance_data_dir(tmp_path):
+    # Regression for the find -delete guard: under set -euo pipefail, `find`
+    # on a missing directory exits 1 and would abort the whole script before
+    # it processes any scan. A fresh checkout (or any DATA_ROOT override that
+    # has not been preprocessed yet) has no forainetv2_instance_data/ at all,
+    # so this layout must not create it.
+    work = tmp_path / 'repo'
+    (work / 'data' / 'ForAINetV2' / 'meta_data').mkdir(parents=True)
+    (work / 'data' / 'ForAINetV2' / 'test_data').mkdir()
+    (work / 'data' / 'ForAINetV2' / 'meta_data' / 'test_list_initial.txt').write_text('plot_7\n')
+    instance_data_dir = work / 'data' / 'ForAINetV2' / 'forainetv2_instance_data'
+    assert not instance_data_dir.exists()
+
+    env = {**os.environ, 'DRY_RUN': '1', 'WORK_DIR': str(work), 'ITERATIONS': '1',
+           'SCORE_TH': '0.35', 'MODEL_PATH': '/ckpt/epoch_3000_fix.pth'}
+    proc = subprocess.run(['bash', str(SCRIPT)], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert not instance_data_dir.exists()
+
+
 def test_caller_supplied_test_list_is_never_deleted(tmp_path):
     work = tmp_path / 'repo'
     (work / 'data' / 'ForAINetV2' / 'meta_data').mkdir(parents=True)

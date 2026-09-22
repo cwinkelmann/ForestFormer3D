@@ -35,6 +35,9 @@ def _floats(xs):
 
 #This file produces stats about the total average F1 score, the average F1 score per forest region, and packs all F1 score within a forest region together
 #and save these stats in a file called "Eval_F1_per_region"
+#Each run overwrites evaluation_total_test.txt in test_sem_path with a single fresh result
+#block, so re-running this script on the same directory never accumulates stale blocks from a
+#previous run (a naive "first match wins" reader of the file would otherwise pick up a stale run).
 if __name__ == '__main__':
     import sys
     test_sem_path = sys.argv[1]
@@ -59,7 +62,7 @@ if __name__ == '__main__':
         print(f'no .ply result files in {test_sem_path}', file=sys.stderr)
         sys.exit(1)
 
-    LOG_FOUT = open(test_sem_path + '/evaluation_total_test.txt', 'a')  # @Treeins: save evaluation file with name output_file_name
+    LOG_FOUT = open(test_sem_path + '/evaluation_total_test.txt', 'w')  # @Treeins: save evaluation file with name output_file_name; 'w' so each run writes one fresh block
 
     def log_string(out_str, file=None):
         if file:
