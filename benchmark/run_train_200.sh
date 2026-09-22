@@ -5,8 +5,11 @@
 #   bash benchmark/wait_idle.sh -- bash benchmark/run_train_200.sh old
 #
 # The script daemonizes itself (nohup) unless FF3D_FOREGROUND=1; the log path is printed.
-# Stages with markers: train (.done-train), prepare checkpoint, test (.done-test), eval
-# (.done-eval). Training is resumable: a re-run after a crash passes --resume auto so
+# Stages with markers, all inside the stage's own output dir: train
+# (work_dirs/bench-<variant>-200/.done-train), prepare checkpoint (epoch_<N>.layout), test
+# (work_dirs/bench-<variant>-200/test/.done-test), eval (.../test/.done-eval). A test stage
+# whose output dir already holds the full set of result PLYs is adopted rather than re-run;
+# FF3D_FORCE=1 overrides that and re-infers from scratch. Training is resumable: a re-run after a crash passes --resume auto so
 # mmengine continues from the last checkpoint in the work dir (the --resume flag and its
 # 'auto' behaviour are identical between the old and fixed tools/train.py -- verified
 # against git 6a75c37 and the current tree: both parse --resume the same way and set
@@ -90,11 +93,16 @@ if [ -n "${FF3D_EXTRA_CFG_OPTIONS:-}" ]; then
   # key=value tokens, each becoming its own --cfg-options item.
   CFG_OPTS+=(${FF3D_EXTRA_CFG_OPTIONS})
 fi
-N_TEST="$(grep -c . "$FF3D_DATA/meta_data/test_list.txt")"
 if [ "$VARIANT" = "old" ]; then RUNNER=ff3d_docker_old; else RUNNER=ff3d_docker; fi
 
 ff3d_log "train-${VARIANT}-200 start (root $FF3D_ROOT, image $FF3D_IMAGE, epochs $EPOCHS)"
 [ "$VARIANT" = "fixed" ] || [ -f "$FF3D_OLD/tools/test.py" ] || ff3d_die "missing old worktree (run benchmark/setup_old_worktree.sh)"
+# Preconditions first, then read the test list (run_release_eval.sh does the same): a missing
+# file used to die with a raw `grep: ...: No such file` and an EMPTY one made `grep -c` exit 1,
+# which set -e turned into a silent death with no message at all.
+[ -f "$FF3D_DATA/meta_data/test_list.txt" ] || ff3d_die "missing $FF3D_DATA/meta_data/test_list.txt"
+N_TEST="$(grep -c . "$FF3D_DATA/meta_data/test_list.txt" || true)"
+[ "${N_TEST:-0}" -gt 0 ] || ff3d_die "empty $FF3D_DATA/meta_data/test_list.txt (no test scans listed)"
 ff3d_preprocess
 ff3d_run mkdir -p "$FF3D_ROOT/$WORK"
 
@@ -126,17 +134,36 @@ ff3d_log "epoch_${EPOCHS}.pth layout: $layout"
 if [ "$VARIANT" = "old" ]; then CKPT="$WORK/epoch_${EPOCHS}_raw.pth"; else CKPT="$WORK/epoch_${EPOCHS}_converted.pth"; fi
 
 # 3. test split inference through the same path as run_release_eval.sh
+# Two old-variant asymmetries, identical to run_release_eval.sh's run_test_stage (see
+# docs/benchmarks/RUNBOOK-carrot.md section 7):
+#   - a NON-ZERO exit of the old tools/test.py is tolerated (its evaluator @ 6a75c37 always
+#     crashes with an IndexError AFTER every result .ply has been written); the N_TEST
+#     ply-count check stays the real postcondition. The fixed runner still dies on non-zero.
+#   - a $TEST_OUT that already holds exactly N_TEST .ply files is ADOPTED (marker written,
+#     stage skipped) instead of wiped and re-inferred; FF3D_FORCE=1 forces the rm + re-run.
 if [ -f "$FF3D_ROOT/$TEST_OUT/.done-test" ]; then
   ff3d_log "test.py already done ($TEST_OUT)"
+elif [ "$(ff3d_count_ply "$FF3D_ROOT/$TEST_OUT")" = "$N_TEST" ] && [ "${FF3D_FORCE:-0}" != "1" ]; then
+  if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
+    ff3d_log "DRY: (would adopt) $N_TEST existing ply files in $TEST_OUT -- stage would be skipped (FF3D_FORCE=1 to re-run)"
+  else
+    ff3d_log "test.py: adopting $N_TEST existing PLYs in $TEST_OUT (FF3D_FORCE=1 to re-run)"
+    ff3d_run touch "$FF3D_ROOT/$TEST_OUT/.done-test"
+  fi
 else
   ff3d_run mkdir -p "$FF3D_ROOT/$TEST_OUT"
   ff3d_run rm -f "$FF3D_ROOT/$TEST_OUT"/*.ply
   ff3d_log "tools/test.py ($VARIANT) $CKPT -> $TEST_OUT"
-  "$RUNNER" python tools/test.py "$FF3D_CONFIG" "$CKPT" --work-dir "$TEST_OUT"
+  rc=0
+  "$RUNNER" python tools/test.py "$FF3D_CONFIG" "$CKPT" --work-dir "$TEST_OUT" || rc=$?
+  if [ "$rc" != "0" ]; then
+    [ "$VARIANT" = "old" ] || ff3d_die "$VARIANT tools/test.py failed with exit $rc"
+    ff3d_log "WARNING: old tools/test.py exited $rc -- expected (its evaluator crashes after writing all PLYs); checking the ply count instead"
+  fi
   if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
     echo "DRY: (postcondition skipped) $FF3D_ROOT/$TEST_OUT/*.ply (expected $N_TEST)"
   else
-    n="$(find "$FF3D_ROOT/$TEST_OUT" -maxdepth 1 -name '*.ply' | wc -l | tr -d ' ')"
+    n="$(ff3d_count_ply "$FF3D_ROOT/$TEST_OUT")"
     [ "$n" = "$N_TEST" ] || ff3d_die "$VARIANT produced $n ply files, expected $N_TEST in $TEST_OUT"
   fi
   ff3d_run touch "$FF3D_ROOT/$TEST_OUT/.done-test"

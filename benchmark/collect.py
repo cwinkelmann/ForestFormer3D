@@ -11,7 +11,10 @@ Inputs (under --root, or given explicitly with --release-old/--release-fixed/--t
   work_dirs/bench-{old,fixed}-200/test/evaluation_total_test.txt
       The 200-epoch run's own test-split score (epoch_200), same file shape as above.
   work_dirs/bench-{old,fixed}-200/<timestamp>/vis_data/scalars.json
-      mmengine scalars, one JSON object per line: train records carry 'loss'/'epoch'/'iter'/
+      mmengine scalars of ONE run. When a work dir holds several <timestamp>/ run dirs (a
+      restart, or a --resume continuation), only the newest complete one is read and the
+      others are named in a WARNING on stderr -- see select_run_dir().
+      One JSON object per line: train records carry 'loss'/'epoch'/'iter'/
       'lr'/...; val records carry the metric keys (F1, mIoU, ...), optionally prefixed with
       '<dataset>/', plus 'step' (== epoch). Some metric keys may be absent on a given line;
       every reader here tolerates that instead of KeyError-ing.
@@ -147,10 +150,43 @@ def parse_log_wallclock(paths):
             'wall_s': wall, 'sec_per_epoch': (wall / spanned) if spanned > 0 else None}
 
 
+def select_run_dir(work_dir):
+    """Pick ONE mmengine run dir under <work_dir> -> (chosen, ignored).
+
+    mmengine creates a new <timestamp>/ per launch, so a work dir can hold several: a
+    from-scratch restart left beside the abandoned first attempt (the prep1000 runs would have
+    polluted the curves had they not been moved aside by hand), or a --resume continuation
+    beside the interrupted run it continues. Concatenating them all silently mixes two
+    different runs' curves, so this takes the NEWEST COMPLETE one -- newest by directory name,
+    which is mmengine's own sortable YYYYMMDD_HHMMSS timestamp; "complete" = its scalars.json
+    holds at least one parseable record -- and names the rest in a warning on stderr.
+
+    Caveat, deliberately not papered over: for a --resume continuation the earlier run dir's
+    epochs are NOT merged in, so the curve starts where the resumed run started. The warning
+    says which dirs were left out so the operator can decide.
+    """
+    work_dir = Path(work_dir)
+    runs = sorted({s.parent.parent for s in work_dir.glob('*/vis_data/scalars.json')},
+                  key=lambda p: p.name)
+    if not runs:
+        return None, []
+    complete = [r for r in runs if (r / 'vis_data' / 'scalars.json').read_text().strip()]
+    chosen = (complete or runs)[-1]
+    ignored = [r for r in runs if r != chosen]
+    if ignored:
+        print(f'WARNING: {work_dir} holds {len(runs)} mmengine run dirs; using {chosen.name}, '
+              f'ignoring {", ".join(r.name for r in ignored)} '
+              f'(a --resume continuation\'s earlier epochs are NOT merged in)', file=sys.stderr)
+    return chosen, ignored
+
+
 def summarize_training(work_dir):
     work_dir = Path(work_dir)
-    scalars = sorted(work_dir.glob('*/vis_data/scalars.json'))
-    logs = sorted(work_dir.glob('*/*.log'))
+    run_dir, _ignored = select_run_dir(work_dir)
+    if run_dir is None:
+        return None
+    scalars = sorted(run_dir.glob('vis_data/scalars.json'))
+    logs = sorted(run_dir.glob('*.log'))
     if not scalars:
         return None
     train, val = parse_scalars(scalars)

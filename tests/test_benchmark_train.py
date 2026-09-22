@@ -264,3 +264,177 @@ def test_dry_run_skips_completed_stages_and_creates_no_files(tmp_path, variant, 
     assert f"python tools/final_eval.py work_dirs/bench-{variant}-200/test" in out
     assert f"DRY: touch {test_out}/.done-eval" in out
     assert not (test_out / ".done-eval").exists()
+
+
+# --------------------------------------------------------------------------------------
+# Preconditions around the test list, and the REAL-run (non-dry-run) behaviour of the test
+# stage, driven by tests/benchmark_fakes.py's fake docker binary (no docker, no GPU, no
+# torch): marker writes, adopting an already-complete output dir, FF3D_FORCE, and the
+# tolerated non-zero exit of the old tools/test.py.
+# --------------------------------------------------------------------------------------
+from benchmark_fakes import write_fake_docker  # noqa: E402
+
+
+def test_missing_test_list_dies_with_a_clear_message(tmp_path):
+    """The test list used to be read (grep -c) BEFORE any precondition: a missing file died
+    with a raw `grep: ...: No such file or directory` and an empty one made grep exit 1,
+    which set -e turned into a silent death. Both are explicit ff3d_die messages now."""
+    root = tmp_path / "root"
+    (root / "data" / "ForAINetV2").mkdir(parents=True)
+    r = _run({"FF3D_ROOT": str(root), "FF3D_FOREGROUND": "1", "FF3D_DRY_RUN": "1"}, ["fixed"])
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert "ERROR: missing" in out and "test_list.txt" in out
+    assert "grep:" not in out
+
+
+def test_empty_test_list_dies_with_a_clear_message(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    (root / "data" / "ForAINetV2" / "meta_data" / "test_list.txt").write_text("\n\n")
+    r = _run({"FF3D_ROOT": str(root), "FF3D_FOREGROUND": "1", "FF3D_DRY_RUN": "1"}, ["fixed"])
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert "ERROR: empty" in out and "test_list.txt" in out
+
+
+def _run_real(root: Path, variant: str, tmp_path: Path, old_root: Path = None, env_extra=None):
+    fake = write_fake_docker(tmp_path)
+    env = {
+        "FF3D_ROOT": str(root),
+        "FF3D_FOREGROUND": "1",
+        "FF3D_DOCKER": str(fake),
+        "FAKE_LOG": str(tmp_path / "fake-docker.log"),
+        "FAKE_N_PLY": "1",       # == the single scan in _seed_common's test_list.txt
+    }
+    if old_root is not None:
+        env["FF3D_OLD_ROOT"] = str(old_root)
+    if env_extra:
+        env.update(env_extra)
+    env_full = dict(os.environ)
+    env_full.pop("FF3D_DRY_RUN", None)
+    env_full.update(env)
+    r = subprocess.run([BASH, str(SCRIPT), variant], capture_output=True, text=True,
+                       env=env_full, cwd=str(root))
+    log = tmp_path / "fake-docker.log"
+    return r, (log.read_text() if log.exists() else "")
+
+
+def _seed_old_worktree_runnable(old_root: Path):
+    _seed_old_worktree(old_root)
+    (old_root / "docker").mkdir(parents=True, exist_ok=True)
+    entry = old_root / "docker" / "entrypoint.sh"
+    entry.write_text('#!/bin/sh\nexec "$@"\n')
+    entry.chmod(0o755)
+
+
+def test_real_run_writes_every_marker_inside_its_output_dir(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    r, dockerlog = _run_real(root, "fixed", tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    work = root / "work_dirs" / "bench-fixed-200"
+    assert (work / ".done-train").exists()
+    assert (work / "test" / ".done-test").exists()
+    assert (work / "test" / ".done-eval").exists()
+    assert (work / "epoch_200.pth").exists()
+    assert dockerlog.count("tools/test.py") == 1
+
+
+def test_real_run_adopts_a_complete_test_dir_instead_of_re_inferring(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    work = root / "work_dirs" / "bench-fixed-200"
+    (work / "test").mkdir(parents=True)
+    (work / ".done-train").write_text("")
+    (work / "epoch_200.pth").write_text("")
+    (work / "test" / "scan_1.ply").write_text("original-1\n")
+
+    r, dockerlog = _run_real(root, "fixed", tmp_path)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "adopting 1 existing PLYs" in out, out
+    assert "tools/test.py" not in dockerlog, dockerlog
+    assert (work / "test" / "scan_1.ply").read_text() == "original-1\n"
+    assert (work / "test" / ".done-test").exists()
+
+
+def test_real_run_ff3d_force_re_runs_the_test_stage(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    work = root / "work_dirs" / "bench-fixed-200"
+    (work / "test").mkdir(parents=True)
+    (work / ".done-train").write_text("")
+    (work / "epoch_200.pth").write_text("")
+    (work / "test" / "scan_1.ply").write_text("original-1\n")
+
+    r, dockerlog = _run_real(root, "fixed", tmp_path, env_extra={"FF3D_FORCE": "1"})
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "adopting" not in out
+    assert dockerlog.count("tools/test.py") == 1, dockerlog
+    assert (work / "test" / "scan_1.ply").read_text() == "fresh-ply-1\n"
+
+
+def test_real_run_old_test_py_nonzero_exit_is_tolerated(tmp_path):
+    """Same rule as run_release_eval.sh: the old evaluator crashes after writing every ply,
+    so a non-zero exit is a WARNING and the ply count decides."""
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    old_root = tmp_path / "old"
+    _seed_old_worktree_runnable(old_root)
+
+    r, _ = _run_real(root, "old", tmp_path, old_root=old_root,
+                     env_extra={"FAKE_OLD_TEST_RC": "1"})
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "WARNING: old tools/test.py exited 1" in out, out
+    assert (root / "work_dirs" / "bench-old-200" / "test" / ".done-test").exists()
+
+
+def test_real_run_old_test_py_nonzero_exit_still_fails_on_a_short_ply_count(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    old_root = tmp_path / "old"
+    _seed_old_worktree_runnable(old_root)
+
+    r, _ = _run_real(root, "old", tmp_path, old_root=old_root,
+                     env_extra={"FAKE_OLD_TEST_RC": "1", "FAKE_N_PLY": "0"})
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert "produced 0 ply files, expected 1" in out
+    assert not (root / "work_dirs" / "bench-old-200" / "test" / ".done-test").exists()
+
+
+def test_real_run_fixed_test_py_nonzero_exit_is_fatal(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    r, _ = _run_real(root, "fixed", tmp_path, env_extra={"FAKE_TEST_RC": "1"})
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert "fixed tools/test.py failed with exit 1" in out
+    assert not (root / "work_dirs" / "bench-fixed-200" / "test" / ".done-test").exists()
+
+
+def test_dry_run_reports_the_adopt_decision_and_writes_nothing(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    work = root / "work_dirs" / "bench-fixed-200"
+    (work / "test").mkdir(parents=True)
+    (work / "test" / "scan_1.ply").write_text("original-1\n")
+    before = _snapshot(root)
+
+    r = _run(_base_env(root, "fixed"), ["fixed"], cwd=root)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "DRY: (would adopt) 1 existing ply files" in out, out
+    assert "python tools/test.py" not in out
+    assert _snapshot(root) == before

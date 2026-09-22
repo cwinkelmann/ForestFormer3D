@@ -41,7 +41,7 @@ mkdir -p work_dirs/logs
 # Zenodo record 16742708 (ForAINetV2 + epoch_3000_fix.pth), served from the local cache so
 # nothing is downloaded:
 FF3D_ZENODO_CACHE=/raid/cwinkelmann/zenodo-16742708 bash benchmark/fetch_zenodo.sh
-# ends with: "train_val_data: 61 ply", "test_data: 27 ply",
+# ends with: "train_val_data: 65 ply", "test_data: 29 ply",
 #            "checkpoint: .../work_dirs/clean_forestformer/epoch_3000_fix.pth"
 
 # Preprocessing (batch_load + create_data); this is also the first stage that
@@ -70,10 +70,10 @@ FF3D_GPU=2 bash benchmark/run_release_eval.sh
 tail -f work_dirs/logs/release-eval-*.log
 ```
 Stages logged in order: preprocessing (skipped if already done), `Zenodo checkpoint layout:
-converted|raw`, `fixed test.py` (27 test scans), `old test.py` (27 test scans), two
-`final_eval.py` runs, two `Instance Segmentation F1 score:` lines. Stage markers live under
-`work_dirs/bench-release/.done-{fixed,old,eval-fixed,eval-old}` — a re-run after an SSH drop
-skips whatever is already marked.
+converted|raw`, `fixed test.py` (28 test scans), `old test.py` (28 test scans), two
+`final_eval.py` runs, two `Instance Segmentation F1 score:` lines. Each stage's marker lives
+inside that stage's own output dir (`work_dirs/bench-release-fixed/.done-test` and so on — full
+table in section 7) — a re-run after an SSH drop skips whatever is already marked.
 
 Preview without running anything:
 ```bash
@@ -153,6 +153,10 @@ plain `docker run ... forestformer3d:cu118 python ...` without `--gpus` would fa
 Running it directly with the host's `python3` also works, as long as `numpy` is installed
 there. Drop `--allow-missing` once all four inputs (2 release `evaluation_total_test.txt`, 2
 training work dirs) are complete, to fail loudly instead of silently on a missing one.
+If a training work dir holds more than one mmengine `<timestamp>/` run dir (a restart, or a
+`--resume` continuation), `collect.py` reads only the newest complete one and prints a
+`WARNING: ... holds N mmengine run dirs` naming the ones it ignored — check that line before
+trusting the curves of a resumed run.
 
 ## 6. Bring the report home and commit
 
@@ -180,10 +184,59 @@ pgrep -af 'run_release_eval|run_train_200|wait_idle'  # still running?
 docker ps                                             # container of the current stage
 ```
 If the process died (reboot, OOM, preemption), re-run the exact same command with the same
-`FF3D_GPU`: stage markers (`.done-fixed`, `.done-old`, `.done-eval-fixed`, `.done-eval-old`,
-`.done-train`, `.done-test`, `.done-eval`, `.layout`, `.unpacked-<md5>`) skip finished stages,
-and `run_train_200.sh` resumes an interrupted training from `last_checkpoint` with
-`--resume auto` automatically (no flag to add — it's conditional on that file existing).
+`FF3D_GPU`: stage markers skip finished stages, and `run_train_200.sh` resumes an interrupted
+training from `last_checkpoint` with `--resume auto` automatically (no flag to add — it's
+conditional on that file existing).
+
+### Stage → marker path
+
+Every marker sits inside the output dir of the stage it guards (all paths relative to
+`/raid/cwinkelmann/ForestFormer3D`):
+
+| stage | marker |
+|---|---|
+| preprocessing (both scripts) | `data/ForAINetV2/forainetv2_oneformer3d_infos_test.pkl` (`FORCE_PREP=1` to redo) |
+| release: checkpoint prep | `work_dirs/clean_forestformer/epoch_3000.layout` |
+| release: fixed `test.py` | `work_dirs/bench-release-fixed/.done-test` |
+| release: old `test.py` | `work_dirs/bench-release-old/.done-test` |
+| release: fixed `final_eval.py` | `work_dirs/bench-release-fixed/.done-eval` |
+| release: old `final_eval.py` | `work_dirs/bench-release-old/.done-eval` |
+| 200-epoch: training | `work_dirs/bench-<variant>-200/.done-train` |
+| 200-epoch: checkpoint prep | `work_dirs/bench-<variant>-200/epoch_200.layout` |
+| 200-epoch: `test.py` | `work_dirs/bench-<variant>-200/test/.done-test` |
+| 200-epoch: `final_eval.py` | `work_dirs/bench-<variant>-200/test/.done-eval` |
+| Zenodo unpack | `<data dir>/.unpacked-<md5>` |
+
+Historical note: runs made before this change wrote the release markers into a third
+directory, `work_dirs/bench-release/.done-{fixed,old,eval-fixed,eval-old}`. Nothing reads
+those any more — the stages they marked are complete; delete or ignore them.
+
+### The old variant's stages finish by themselves now
+
+Two behaviours specific to `old` (both in `run_release_eval.sh`'s `run_test_stage` and in
+`run_train_200.sh`'s test stage), so no marker ever has to be written by hand again:
+
+- **A non-zero exit of the old `tools/test.py` is tolerated.** The old evaluator
+  (`unified_metric.py` @ 6a75c37) always crashes with an `IndexError` *after* full-plot
+  inference has written every result `.ply`. The script logs
+  `WARNING: old tools/test.py exited <rc> -- expected ...` and then checks the real
+  postcondition: exactly `N_TEST` (28) `.ply` files in the output dir. A non-zero exit of the
+  **fixed** runner still aborts the script.
+- **An already-complete output dir is adopted, never deleted.** Before running a test stage,
+  the script counts the `.ply` files in the output dir; if there are exactly `N_TEST` of them
+  and the marker is missing (crash, SSH drop, killed before the marker write), it logs
+  `adopting 28 existing PLYs` and just writes the marker — it does not `rm -f *.ply` and
+  re-infer 1–2.5 h of results.
+
+To deliberately throw away an existing output dir and re-infer it, set `FF3D_FORCE=1`:
+```bash
+FF3D_GPU=2 FF3D_FORCE=1 bash benchmark/run_release_eval.sh          # re-runs both test stages
+FF3D_GPU=3 FF3D_FORCE=1 bash benchmark/run_train_200.sh old         # re-runs the test stage
+```
+`FF3D_FORCE=1` only overrides the adopt branch; a stage whose marker file exists is still
+skipped, so delete the marker as well to force a stage that already completed. Under
+`FF3D_DRY_RUN=1` nothing is written at all: the adopt decision is printed as
+`DRY: (would adopt) ...` and no marker is created.
 
 ## Interpretation notes
 

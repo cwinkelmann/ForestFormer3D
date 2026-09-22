@@ -42,6 +42,14 @@ ff3d_run() {
   fi
 }
 
+# ff3d_count_ply <dir>: how many *.ply files sit directly in <dir> (0 if it does not exist).
+# Used both as the test-stage postcondition and as the "is this stage already complete?"
+# check that lets an interrupted run be adopted instead of re-inferred.
+ff3d_count_ply() {
+  [ -d "$1" ] || { echo 0; return 0; }
+  find "$1" -maxdepth 1 -name '*.ply' | wc -l | tr -d ' '
+}
+
 # Run <cmd...> inside the image with the main checkout mounted at /workspace.
 # --gpus "device=$FF3D_GPU" pins one explicit physical GPU (the server has 8, shared
 # with other users); never --gpus all with CUDA_VISIBLE_DEVICES masking, which still

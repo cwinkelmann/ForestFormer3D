@@ -28,6 +28,11 @@
 # in tests to point at a fake script that simulates idle/busy/failing output.
 set -u
 source "$(dirname "$0")/common.sh"
+# common.sh's own `set -euo pipefail` is in effect after the source above. This script wants
+# -u but NOT -e: it inspects the exit codes of nvidia-smi/docker/sample_once itself (a failed
+# query must become exit 2, not an abrupt death), so turn -e and pipefail back off here --
+# the `set -u` on the line above was silently overridden before.
+set +e +o pipefail
 
 FF3D_IDLE_SAMPLES="${FF3D_IDLE_SAMPLES:-3}"
 FF3D_IDLE_INTERVAL="${FF3D_IDLE_INTERVAL:-30}"
@@ -43,7 +48,9 @@ now() { date '+%Y-%m-%dT%H:%M:%S'; }   # portable (GNU and BSD date)
 # the host look idle.
 check_container_busy() {
   local cid="$1" devids
-  devids=$("$FF3D_DOCKER" inspect \
+  # $FF3D_DOCKER is deliberately UNQUOTED here and below, exactly as in common.sh
+  # (ff3d_docker/ff3d_docker_old): it may legitimately hold two words, "sudo docker".
+  devids=$($FF3D_DOCKER inspect \
     -f '{{range .HostConfig.DeviceRequests}}{{range .DeviceIDs}}{{.}},{{end}}{{end}}' \
     "$cid" 2>/dev/null) || return 0
   [ -n "$devids" ] || return 0
@@ -67,7 +74,7 @@ sample_once() {
     gpu_count=$(printf '%s\n' "$gpu_out" | grep -c .)
   fi
 
-  if ! docker_out=$("$FF3D_DOCKER" ps --format '{{.ID}}|{{.Image}}' 2>&1); then
+  if ! docker_out=$($FF3D_DOCKER ps --format '{{.ID}}|{{.Image}}' 2>&1); then
     echo "ERROR: docker ps failed: $docker_out" >&2
     return 2
   fi

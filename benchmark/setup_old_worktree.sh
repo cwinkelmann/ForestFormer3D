@@ -15,9 +15,6 @@
 #     /workspace/replace_mmdetection_files/transforms_3d.py into mmdet3d at container start.
 #   - loops.py / base_model.py: copied by benchmark/old_prelude.sh (mounted into the old
 #     container by ff3d_docker_old) because the fixed image entrypoint no longer copies them.
-#   See the WARNING this script prints below about whether the transforms_3d.py step can
-#   even run for ff3d_docker_old -- verified against this commit's tree, it looks like it
-#   can't (see task-3-report.md).
 # The old README also asked to run fix_spconv_checkpoint.py before test.py; the benchmark
 # instead feeds the old test.py the RAW layout (it permutes weights in memory) -- see
 # ff3d_prepare_checkpoint in common.sh / run_release_eval.sh.

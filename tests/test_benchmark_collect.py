@@ -71,11 +71,15 @@ def write_final_eval(d: Path, f1: float, miou: float = 0.81, oacc: float = 0.9, 
 
 
 def write_training(work: Path, epochs: int, loss0: float, f1s: dict, nan_at: int | None = None,
-                   inf_at: int | None = None, ts0="2026/09/23 00:00:00", sec_per_epoch=60):
+                   inf_at: int | None = None, ts0="2026/09/23 00:00:00", sec_per_epoch=60,
+                   run_name="20260923_000000"):
     """23 iterations per epoch, one train record per epoch (mmengine logs at end of epoch
-    when len(dataloader) <= logger interval), val record every 20 epochs with step=epoch."""
+    when len(dataloader) <= logger interval), val record every 20 epochs with step=epoch.
+
+    run_name is the mmengine <timestamp>/ run dir; a work dir can hold several of them (a
+    restart or a --resume continuation), which is what select_run_dir() has to disentangle."""
     import datetime as dt
-    ts_dir = work / "20260923_000000"
+    ts_dir = work / run_name
     vis = ts_dir / "vis_data"
     vis.mkdir(parents=True)
     t0 = dt.datetime.strptime(ts0, "%Y/%m/%d %H:%M:%S")
@@ -99,7 +103,7 @@ def write_training(work: Path, epochs: int, loss0: float, f1s: dict, nan_at: int
                             "data_time": 0.1, "time": 3.0, "step": e})
             log.append(f"{t:%Y/%m/%d %H:%M:%S} - mmengine - INFO - Epoch(val) [{e}][15/15]    F1: {f1s[e]:.4f}")
     (vis / "scalars.json").write_text("\n".join(json.dumps(s) for s in scalars) + "\n")
-    (ts_dir / "20260923_000000.log").write_text("\n".join(log) + "\n")
+    (ts_dir / f"{run_name}.log").write_text("\n".join(log) + "\n")
 
 
 @pytest.fixture
@@ -265,3 +269,58 @@ def test_main_missing_dir_fails_unless_allowed(tmp_path):
     assert "PENDING" in text
     assert "Released checkpoint: PENDING" in text
     assert "Fixed 200-epoch run: PENDING" in text
+
+
+# --------------------------------------------------------------------------------------
+# Several mmengine run dirs under one work dir (a from-scratch restart left in place, or a
+# --resume continuation): collect.py must read exactly ONE of them -- the newest complete
+# one -- and say out loud which ones it ignored, instead of silently concatenating two
+# different runs' curves.
+# --------------------------------------------------------------------------------------
+
+def test_several_run_dirs_uses_the_newest_and_warns(tmp_path, capsys):
+    work = tmp_path / "w"
+    # abandoned first attempt (would have dragged the curve down if concatenated)
+    write_training(work, 10, 99.0, {}, run_name="20260923_000000")
+    # the real run, relaunched
+    write_training(work, 200, 5.0, {200: 0.42}, ts0="2026/09/24 00:00:00",
+                   run_name="20260924_000000")
+
+    chosen, ignored = collect.select_run_dir(work)
+    assert chosen.name == "20260924_000000"
+    assert [d.name for d in ignored] == ["20260923_000000"]
+
+    s = collect.summarize_training(work)
+    assert s["epochs_done"] == 200
+    assert s["best_val"] == (200, pytest.approx(0.42))
+    # only the chosen run's log feeds the wall clock
+    assert s["wallclock"]["first_ts"].day == 24
+    err = capsys.readouterr().err
+    assert "holds 2 mmengine run dirs" in err
+    assert "using 20260924_000000" in err
+    assert "ignoring 20260923_000000" in err
+
+
+def test_an_empty_run_dir_is_not_counted_as_the_newest_complete_one(tmp_path, capsys):
+    work = tmp_path / "w"
+    write_training(work, 30, 5.0, {20: 0.3}, run_name="20260923_000000")
+    # a launch that died before writing a single scalar record
+    empty = work / "20260925_000000" / "vis_data"
+    empty.mkdir(parents=True)
+    (empty / "scalars.json").write_text("")
+
+    chosen, ignored = collect.select_run_dir(work)
+    assert chosen.name == "20260923_000000"
+    assert [d.name for d in ignored] == ["20260925_000000"]
+    s = collect.summarize_training(work)
+    assert s["epochs_done"] == 30
+    assert "holds 2 mmengine run dirs" in capsys.readouterr().err
+
+
+def test_single_run_dir_warns_about_nothing(tmp_path, capsys):
+    work = tmp_path / "w"
+    write_training(work, 5, 5.0, {})
+    chosen, ignored = collect.select_run_dir(work)
+    assert chosen.name == "20260923_000000" and ignored == []
+    collect.summarize_training(work)
+    assert capsys.readouterr().err == ""

@@ -1568,7 +1568,7 @@ If `docker` needs sudo on carrot: `export FF3D_DOCKER="sudo docker"` in every sh
 ```bash
 bash benchmark/fetch_zenodo.sh --list        # 3 lines: train_val_data.zip, test_data.zip, clean_forestformer.zip
 nohup bash benchmark/fetch_zenodo.sh > work_dirs/logs/fetch.log 2>&1 &   # mkdir -p work_dirs/logs first
-tail -f work_dirs/logs/fetch.log             # ends with "train_val_data: 61 ply", "test_data: 27 ply", "checkpoints: .../epoch_3000_fix.pth"
+tail -f work_dirs/logs/fetch.log             # ends with "train_val_data: 65 ply", "test_data: 29 ply", "checkpoints: .../epoch_3000_fix.pth"
 ```
 
 ## 2. Old-code worktree
@@ -1692,7 +1692,7 @@ Expected: `9 passed` (2 unfix + 7 collect; the container has torch, so the unfix
 
 - [ ] **Step 3: Fetch data and set up the worktree (runbook sections 1-2)**
 
-Run the section 1 and 2 commands. Expected final lines: `train_val_data: 61 ply`, `test_data: 27 ply`, `checkpoints: /raid/cwinkelmann/ForestFormer3D/work_dirs/clean_forestformer/epoch_3000_fix.pth`, `old worktree ready: ... @ 6a75c37`. If the PLY counts differ, inspect `downloads/` and the zip contents (`unzip -l downloads/test_data.zip | head`) before continuing.
+Run the section 1 and 2 commands. Expected final lines: `train_val_data: 65 ply`, `test_data: 29 ply`, `checkpoints: /raid/cwinkelmann/ForestFormer3D/work_dirs/clean_forestformer/epoch_3000_fix.pth`, `old worktree ready: ... @ 6a75c37`. If the PLY counts differ, inspect `downloads/` and the zip contents (`unzip -l downloads/test_data.zip | head`) before continuing.
 
 - [ ] **Step 4: Release evaluation (runbook section 3)**
 
