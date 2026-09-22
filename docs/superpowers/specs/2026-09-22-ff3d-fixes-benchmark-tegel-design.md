@@ -230,7 +230,7 @@ Pure Python (numpy, laspy, shapely, pyproj), no CUDA, tested on the Mac.
     as float64 in local coordinates (the pipeline's `.ply` reader expects local, small
     values), constant `semantic_seg=1`, `treeID=0`, and a JSON sidecar with origin, EPSG,
     scale/offset of the source, and the ALS `classification` array saved as `.npy` next to it.
-  - `results_to_las(result_ply, sidecar, out_las)`: LAS 1.4, point format 6, coordinates
+  - `results_to_las(result_ply, sidecar_path, offsets_npy, out_las)`: LAS 1.4, point format 6, coordinates
     restored to UTM with the source scale, extra dimensions `treeID` (int32, -1 = none),
     `semantic` (uint8: 0 ground, 1 wood, 2 leaf), `score` (float32), original ALS
     `classification` kept, CRS written as WKT VLR for the EPSG.

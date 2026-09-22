@@ -7,6 +7,7 @@ from pathlib import Path
 
 import laspy
 import numpy as np
+import pyproj
 from plyfile import PlyData, PlyElement
 
 from ff3d_geo.origin import parse_origin
@@ -92,3 +93,87 @@ def las_to_ply(
     }
     sidecar_path.write_text(json.dumps(sidecar, indent=2))
     return sidecar
+
+
+def results_to_las(result_ply, sidecar_path, offsets_npy, out_las) -> None:
+    """Georeference a ``tools/test.py`` result PLY into a LAS 1.4 / point format 6 file.
+
+    ``result_ply`` has vertex fields ``x y z`` (float32, coordinates centered by
+    ``batch_load``), ``semantic_pred`` (int32: 0 ground, 1 wood, 2 leaf, -1 for
+    points without any vote), ``instance_pred`` (int32, -1 = none) and ``score``
+    (float32, -1.0 without an instance). The centering shift is undone with
+    ``offsets_npy`` (``<scan>_offsets.npy``, float64 ``[mean_x, mean_y, min_z]``
+    that ``batch_load`` subtracted), and the sidecar's ``origin`` restores the
+    tile's UTM position: ``x = ply_x + offsets[0] + origin[0]``,
+    ``y = ply_y + offsets[1] + origin[1]``, ``z = ply_z + offsets[2]``.
+
+    The pipeline never reorders points, so ``result_ply`` is expected to have
+    exactly ``sidecar["n_points"]`` vertices in the original LAS order; a
+    mismatch raises ``ValueError`` rather than silently misaligning the
+    restored ALS ``classification``.
+
+    Extra dimensions written: ``treeID`` int32 (``instance_pred``, -1 = none),
+    ``semantic`` uint8 (``semantic_pred``, with the nodata sentinel 255 for
+    ``semantic_pred == -1`` since -1 cannot be represented as uint8), ``score``
+    float32. The ALS ``classification`` is restored from the sidecar's
+    ``classification_npy``; the CRS is written as a WKT VLR for the sidecar's
+    EPSG code.
+    """
+    sidecar = json.loads(Path(sidecar_path).read_text())
+    offsets = np.load(offsets_npy).astype(np.float64).reshape(-1)
+    if offsets.shape != (3,):
+        raise ValueError(f"{offsets_npy}: expected 3 offsets, got shape {offsets.shape}")
+
+    vertex = PlyData.read(str(result_ply))["vertex"].data
+    n_points = len(vertex)
+    if n_points != sidecar["n_points"]:
+        raise ValueError(
+            f"{result_ply} has {n_points} points but sidecar {sidecar_path} "
+            f"records {sidecar['n_points']} points; point order would not match"
+        )
+
+    classification = np.load(sidecar["classification_npy"])
+    if len(classification) != n_points:
+        raise ValueError(
+            f"classification has {len(classification)} entries but "
+            f"{result_ply} has {n_points} points"
+        )
+
+    origin_e, origin_n = sidecar["origin"]
+    x = vertex["x"].astype(np.float64) + offsets[0] + origin_e
+    y = vertex["y"].astype(np.float64) + offsets[1] + origin_n
+    z = vertex["z"].astype(np.float64) + offsets[2]
+
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.scales = np.array(sidecar["source_scale"], dtype=np.float64)
+    header.offsets = np.floor([x.min(), y.min(), z.min()])
+    header.add_extra_dim(
+        laspy.ExtraBytesParams(
+            name="treeID", type=np.int32, description="ForestFormer3D instance, -1 none"
+        )
+    )
+    header.add_extra_dim(
+        laspy.ExtraBytesParams(
+            name="semantic", type=np.uint8, description="0 ground 1 wood 2 leaf 255 n/a"
+        )
+    )
+    header.add_extra_dim(
+        laspy.ExtraBytesParams(name="score", type=np.float32, description="instance score")
+    )
+    header.add_crs(pyproj.CRS.from_epsg(int(sidecar["epsg"])))
+
+    las = laspy.LasData(header)
+    las.x = x
+    las.y = y
+    las.z = z
+    las.classification = classification.astype(np.uint8)
+    las.treeID = vertex["instance_pred"].astype(np.int32)
+    semantic_pred = vertex["semantic_pred"].astype(np.int64)
+    las.semantic = np.where(
+        semantic_pred < 0, SEMANTIC_UNLABELLED, semantic_pred
+    ).astype(np.uint8)
+    las.score = vertex["score"].astype(np.float32)
+
+    out_las = Path(out_las)
+    out_las.parent.mkdir(parents=True, exist_ok=True)
+    las.write(str(out_las))
