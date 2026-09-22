@@ -63,8 +63,18 @@ docker run --rm -it --gpus all --shm-size=64g -v "$PWD":/workspace forestformer3
 docker/smoke.sh
 ```
 
-Tests: `pytest` at the checkout root runs the CPU tests; `pytest -m gpu tests/gpu` runs
-the GPU tests and only works inside the image.
+Tests: `pytest` at the checkout root runs the CPU tests (pure-Python: tiling math, checkpoint
+converter, loader, config helpers). A few of them need optional packages (`plyfile`, `scipy`,
+`laspy`) that are not part of the base install; on a machine without CUDA, create a small venv
+for them once and skip the rest otherwise:
+
+```bash
+python3 -m venv .venv-cpu && .venv-cpu/bin/pip install -r tests/requirements-cpu.txt
+.venv-cpu/bin/python -m pytest -q tests            # tests skip cleanly if you don't do this
+```
+
+`pytest -m gpu tests/gpu` runs the GPU tests (model construction, tiling end to end, the
+smoke scenario below) and only works inside the image.
 
 ### Bringing the image up on a GPU host
 
@@ -208,23 +218,26 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs/oneformer3d_qs_radius16_qp3
 #### **Run testing**
 ##### Use your own trained Checkpoint
 ```bash
-#1. Fix the checkpoint file:
+#1. Convert the checkpoint once (the script refuses an already converted file with exit code 2):
 python tools/fix_spconv_checkpoint.py \
   --in-path work_dirs/oneformer3d_1xb4_forainetv2/trained.pth \
   --out-path work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth
 
-#2. Modify the output_path in function "predict" in class ForAINetV2OneFormer3D_XAwarequery in file oneformer3d/oneformer3d.py
-
-#3. Run the test script:
+#2. Run the test script; result .ply files (one per scan in meta_data/test_list.txt) land in --work-dir:
 CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
-  work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth
+  work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth --work-dir work_dirs/my_results
 
+# Optional: a different output folder or instance score threshold without editing the config
+#   --cfg-options model.test_cfg.output_dir=work_dirs/other model.test_cfg.score_th=0.3
 ```
 ##### Load pre-trained model
 ```bash
-# If you want to use the official pre-trained model, run:
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py work_dirs/clean_forestformer/epoch_3000_fix.pth
+# If you want to use the official pre-trained model (already converted), run:
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
+  work_dirs/clean_forestformer/epoch_3000_fix.pth --work-dir work_dirs/release_results
 
+# Offline evaluation of a results folder (appends evaluation_total_test.txt there):
+python tools/final_eval.py work_dirs/release_results
 ```
 
 ---
@@ -282,7 +295,8 @@ python tools/create_data_forainetv2.py forainetv2
 Once preprocessing is complete, you can run:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py work_dirs/clean_forestformer/epoch_3000_fix.pth
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
+  work_dirs/clean_forestformer/epoch_3000_fix.pth --work-dir work_dirs/my_results
 ```
 
 
@@ -347,24 +361,18 @@ pcd = read_laz(ply_file)
 
 ### 3. If test files do not have ground truth labels
 
-Still in `load_forainetv2_data.py`, locate the following lines:
+No code change is needed. Run the loader with `--unlabeled`; scans whose PLY has no
+`semantic_seg`/`treeID` fields get constant labels (semantic 0 = ground, instance -1) and
+the evaluation numbers printed for them are meaningless:
 
-```python
-semantic_seg = pcd["semantic_seg"].astype(np.int64)
-treeID = pcd["treeID"].astype(np.int64)
+```bash
+cd data/ForAINetV2
+python batch_load_ForAINetV2_data.py --unlabeled
+cd ../..
+python tools/create_data_forainetv2.py forainetv2
 ```
 
-If the test file lacks these labels, replace them with:
-
-```python
-semantic_seg = np.ones((points.shape[0],), dtype=np.int64)
-treeID = np.zeros((points.shape[0],), dtype=np.int64)
-# semantic_seg = pcd["semantic_seg"].astype(np.int64)
-# treeID = pcd["treeID"].astype(np.int64)
-```
-
-This will prevent errors when labels are missing in test data.
-
+`create_data_forainetv2.py` also works when only `test_data/` exists (train/val splits are skipped).
 
 **Recommendation**: The **easiest solution** is to convert your test files to `.ply` format in advance. This avoids having to change the code and ensures full compatibility with the pipeline.
 
@@ -416,54 +424,25 @@ This script re-runs inference on remaining "blue points" after the first round.
 bash tools/inference_bluepoint.sh
 ```
 
-3. Make the following adjustments before running:
+3. Put all your test file names in `data/ForAINetV2/meta_data/test_list_initial.txt` instead of
+   the default `test_list.txt`.
 
-- Put all your test file names in:
-
-```
-data/ForAINetV2/meta_data/test_list_initial.txt
-```
-
-instead of the default `test_list.txt`.
-
-- Modify `BLUEPOINTS_DIR` in the script to match your output directory (the output_path in function "predict" in class ForAINetV2OneFormer3D_XAwarequery in file workspace/oneformer3d/oneformer3d.py), for example:
+4. Configure through environment variables instead of editing files, for example:
 
 ```bash
-BLUEPOINTS_DIR="$WORK_DIR/work_dirs/YOUROUTPUTPATH"
+BLUEPOINTS_DIR=work_dirs/my_bluepoints SCORE_TH=0.4 ITERATIONS=2 bash tools/inference_bluepoint.sh
+# DRY_RUN=1 prints every command without running it
 ```
 
-- In the file:
-```
-oneformer3d/oneformer3d.py
-```
-Inside the function `predict` of class `ForAINetV2OneFormer3D_XAwarequery`, change:
+Other variables the script reads: `WORK_DIR`, `CONFIG_FILE`, `MODEL_PATH`, `DATA_ROOT`,
+`TEST_LIST`, `TEST_DATA_DIR`, `CUDA_VISIBLE_DEVICES`. The script never edits tracked files (no
+`sed` on the config, no rewrite of `meta_data/test_list.txt`); it passes thresholds through
+`tools/test.py --cfg-options`.
 
-```python
-self.save_ply_withscore(...)
-# self.save_bluepoints(...)
-```
-
-to:
-
-```python
-# self.save_ply_withscore(...)
-self.save_bluepoints(...)
-```
-
-- Also replace:
-
-```python
-# is_test = True
-# if is_test:
-if 'test' in lidar_path:
-```
-with the appropriate logic to ensure test mode is active when needed:
-
-```python
-is_test = True
-if is_test:
-#if 'test' in lidar_path:
-```
+The second pass needs `predict()` to write the remaining, unsegmented points with
+`save_bluepoints` instead of `save_ply_withscore` so they can be fed back into `test_data/`;
+today nothing calls it (see `docs/known-issues.md`), so the bluepoint loop currently has no
+points to pick up on iteration 2+ until that call site is added.
 
 This two-step (or multiple-step) inference improves robustness in challenging, highly dense forests.
 
@@ -484,7 +463,7 @@ For inference, batch_size is not used, because each cylinder is processed sequen
 
 1. Lowering the chunk value in the config
 
-2. Reducing `num_points` in the code ([see this line](https://github.com/SmartForest-no/ForestFormer3D/blob/8ca0f45196ce0cc8a656d046b3f935cbf34f315b/oneformer3d/oneformer3d.py#L2273))
+2. Reducing `max_points` in `_predict_full_plot` (`oneformer3d/oneformer3d.py`)
 
 3. Reducing the cylinder radius, which is also configurable in the config file.
 
