@@ -165,8 +165,29 @@ RUN git clone https://github.com/Karbo123/segmentator.git /opt/segmentator \
 # Project extras: LAS/LAZ IO for Phase 3, progress bars, tests.
 RUN pip install --no-cache-dir laspy==2.5.3 lazrs==0.5.3 tqdm==4.66.1 pytest==7.4.4
 
+# Pure-Python dependencies the conda-based pytorch base image used to provide implicitly
+# (found by importing every module in a probe of this image); pinned, no transitive pulls.
+RUN pip install --no-cache-dir --no-deps \
+        pyyaml==6.0.1 \
+        six==1.16.0 \
+        regex==2023.10.3 \
+        scikit-image==0.19.3 \
+        imageio==2.31.6 \
+        tifffile==2023.7.10 \
+        PyWavelets==1.4.1 \
+        pytz==2023.3 \
+        tzdata==2023.3 \
+        fonttools==4.42.1 \
+        markdown-it-py==3.0.0 \
+        mdurl==0.1.2 \
+        pygments==2.16.1 \
+        tenacity==8.2.3 \
+        prettytable==3.9.0 \
+        wcwidth==0.2.8 \
+        configargparse==1.7
+
 # Everything importable together (mmdet3d checks the mmcv/mmdet/mmengine version ranges).
-RUN python -c "import mmcv, mmengine, mmdet, mmdet3d, numpy, spconv.pytorch, MinkowskiEngine, torch_scatter, torch_cluster, segmentator, laspy, plyfile, open3d, tqdm; from torch_points_kernels import instance_iou; print('mmcv', mmcv.__version__, 'mmengine', mmengine.__version__, 'mmdet', mmdet.__version__, 'mmdet3d', mmdet3d.__version__, 'numpy', numpy.__version__)"
+RUN python -c "import yaml, six, regex, skimage, pandas, torchvision, mmcv, mmengine, mmdet, mmdet3d, numpy, spconv.pytorch, MinkowskiEngine, torch_scatter, torch_cluster, segmentator, laspy, plyfile, open3d, tqdm; from torch_points_kernels import instance_iou; print('mmcv', mmcv.__version__, 'mmengine', mmengine.__version__, 'mmdet', mmdet.__version__, 'mmdet3d', mmdet3d.__version__, 'numpy', numpy.__version__)"
 
 WORKDIR /workspace
 # The checkout is normally mounted over /workspace; the copy only makes the image
