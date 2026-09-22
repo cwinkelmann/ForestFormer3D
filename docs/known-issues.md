@@ -58,6 +58,39 @@ Each is inherited from OneFormer3D or only matters once the benchmark shows it d
     predictions through on a randomly initialised model, whose raw logits are negative; this is a
     test-only workaround and says nothing about the thresholds used for a trained checkpoint.
 
+13. **`looks_raw` misclassifies a ground-free, normalized crop with no `-1`.**
+    `oneformer3d/labels.py:79-94`: when a scene has no ground points (`semantic == 0` never true),
+    `looks_raw` falls back to `not (instance < 0).any()` — normalized GT with no unassigned points
+    (no `-1` anywhere) then reads as `raw=True`, and `normalize_instance_gt` wipes GT instance id
+    `0`, silently dropping one whole tree. Real ForAINetV2 plots always contain ground points, so
+    this only matters for a synthetic/edge-case crop; `tests/test_final_eval.py` documents the same
+    hazard in a comment on the file-B case of
+    `test_binary_semantic_totals_are_summed_over_files`.
+14. **Result PLYs can carry `semantic_pred == -1` for points no tile voted on.**
+    `SemanticVotes.resolve()` (`oneformer3d/tiling.py`) returns `-1` for points that were sampled
+    out of every overlapping tile; `save_ply_withscore` (`oneformer3d/oneformer3d.py:1589,2894`)
+    writes it through as `i4`, which round-trips fine in a `.ply`. Phase 3's LAS writer is
+    specified as writing `semantic` as **uint8** (0 ground, 1 wood, 2 leaf); casting `-1` straight
+    to `uint8` silently becomes `255`. Phase 3 must map `-1` to an explicit nodata value (e.g.
+    `255`) rather than rely on the cast.
+15. **Per-tile `torch.cuda.empty_cache()` and an unseeded `sample_region` in `_predict_full_plot`.**
+    `oneformer3d/oneformer3d.py:2206` calls `torch.cuda.empty_cache()` once per tile inside the
+    cylinder loop — on a 100 m plot with `radius=16`, `step=4` that is roughly 676 device syncs
+    plus allocator teardown inside the loop Phase 2 will report as wall-clock; not a regression
+    (the old code did the same), but worth hoisting out of the loop or throttled to every N tiles
+    before trusting a timing benchmark. Separately, `sample_region(pc2, pc2_indices, max_points)`
+    at `oneformer3d/oneformer3d.py:2167` is called without a `generator`, so a tile that exceeds
+    `max_points = 640_000` after voxel downsampling is subsampled using the global torch RNG —
+    nondeterministic run to run. Rare in practice, but passing a seeded CPU generator would make a
+    re-run of `run_release_eval.sh` reproducible bit-for-bit.
+16. **`instance_scores` means a different shape in full-plot vs. crop-mode `predict()`.**
+    `_predict_full_plot` (`oneformer3d/oneformer3d.py:2234`) sets `instance_scores` to a
+    per-*point* array (`score_np`, length `n_total`), while `_predict_crop`/`predict_by_feat` (e.g.
+    `oneformer3d/oneformer3d.py:104,917,3384,3873`) sets it to a per-*instance* array. Nothing in
+    the active config reads the key across both paths today (`UnifiedSegMetric` ignores it), so
+    this is a naming trap rather than a live bug — but any new code touching `instance_scores` must
+    check which `predict()` branch produced it.
+
 ## Operational notes discovered while fixing
 
 - `data/ForAINetV2/batch_load_ForAINetV2_data.py` skips scans whose `_vert.npy` already exists.
