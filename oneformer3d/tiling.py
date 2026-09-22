@@ -5,8 +5,6 @@ machine without mmengine / mmdet3d / spconv.
 """
 from __future__ import annotations
 
-from typing import Sequence
-
 import torch
 
 
@@ -54,8 +52,8 @@ def sample_region(points: torch.Tensor, indices: torch.Tensor, num_points: int,
         raise ValueError(f'points ({n}) and indices ({indices.shape[0]}) differ in length')
     if n <= num_points:
         return points, indices
-    perm = torch.randperm(n, generator=generator)[:num_points].to(points.device)
-    return points[perm], indices[perm]
+    perm = torch.randperm(n, generator=generator)[:num_points]
+    return points[perm.to(points.device)], indices[perm.to(indices.device)]
 
 
 def merge_instances_by_score(masks, scores: torch.Tensor, overlap_threshold: float,
@@ -82,15 +80,16 @@ def merge_instances_by_score(masks, scores: torch.Tensor, overlap_threshold: flo
         if masks.dim() != 2 or masks.dtype != torch.bool:
             raise ValueError('dense masks must be a bool tensor of shape (K, N)')
         num_points = masks.shape[1]
+        device = masks.device
         index_lists = [masks[k].nonzero(as_tuple=False).flatten() for k in range(masks.shape[0])]
     else:
         if num_points is None:
             raise ValueError('num_points is required when masks is a list of index tensors')
         index_lists = [torch.as_tensor(m, dtype=torch.long).flatten() for m in masks]
+        device = index_lists[0].device if index_lists else torch.device('cpu')
     scores = torch.as_tensor(scores, dtype=torch.float32).flatten()
     if len(index_lists) != scores.numel():
         raise ValueError(f'{len(index_lists)} masks but {scores.numel()} scores')
-    device = index_lists[0].device if index_lists else torch.device('cpu')
     labels = torch.full((num_points,), -1, dtype=torch.long, device=device)
     taken = torch.zeros(num_points, dtype=torch.bool, device=device)
     kept: list[int] = []

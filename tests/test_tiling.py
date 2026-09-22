@@ -63,6 +63,14 @@ def test_merge_with_no_masks():
     assert labels.tolist() == [-1] * 4 and kept.numel() == 0
 
 
+def test_merge_with_no_dense_masks_keeps_the_masks_device():
+    masks = torch.zeros((0, 5), dtype=torch.bool)
+    labels, kept = merge_instances_by_score(masks, torch.tensor([]), 0.3)
+    assert labels.device == masks.device
+    assert labels.tolist() == [-1] * 5
+    assert kept.numel() == 0
+
+
 def test_exact_cap_sampling_returns_all_points():
     pts = torch.arange(30, dtype=torch.float32).reshape(10, 3)
     idx = torch.arange(10)
