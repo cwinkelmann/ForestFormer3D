@@ -96,7 +96,15 @@ ff3d_preprocess() {
     || ff3d_die "data missing: run benchmark/fetch_zenodo.sh"
   ff3d_log "preprocessing: batch_load + create_data"
   ff3d_docker bash -c "cd data/ForAINetV2 && python batch_load_ForAINetV2_data.py && cd /workspace && python tools/create_data_forainetv2.py forainetv2"
-  [ -f "$FF3D_DATA/forainetv2_oneformer3d_infos_test.pkl" ] || ff3d_die "create_data produced no test pkl"
+  # Postcondition: only meaningful when the docker command above actually ran (ff3d_run
+  # executes it for real). Under FF3D_DRY_RUN=1 that command was only printed, so the pkl
+  # was never produced; checking for it here would kill every dry run on a checkout that
+  # has not been preprocessed yet.
+  if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
+    echo "DRY: (postcondition skipped) $FF3D_DATA/forainetv2_oneformer3d_infos_test.pkl"
+  else
+    [ -f "$FF3D_DATA/forainetv2_oneformer3d_infos_test.pkl" ] || ff3d_die "create_data produced no test pkl"
+  fi
   ff3d_log "preprocessing done"
 }
 
