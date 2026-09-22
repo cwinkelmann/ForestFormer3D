@@ -3,7 +3,7 @@
 Runs only inside the Docker image: `docker/smoke.sh` or, in the container,
 `pytest -m gpu tests/gpu/test_smoke.py`.
 
-Phase 1 changes two things here: loss() loses its `epoch` kwarg, and predict()
+Phase 1 changed two things here: loss() lost its `epoch` kwarg, and predict()
 selects full-plot tiling with test_cfg.full_plot instead of 'test' in lidar_path.
 """
 from pathlib import Path
@@ -17,8 +17,8 @@ pytestmark = pytest.mark.gpu
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = REPO_ROOT / "configs" / "oneformer3d_qs_radius16_qp300_2many.py"
 N_POINTS = 5000
-# Contains "test" so the current predict() takes the full-plot tiling branch.
-LIDAR_PATH = "data/ForAINetV2/test_data/smoke_plot.ply"
+# The .ply written by full-plot predict() is named after this file's stem.
+LIDAR_PATH = "data/ForAINetV2/plots/smoke_plot.ply"
 
 
 def make_synthetic_plot(n_points=N_POINTS, seed=0):
@@ -141,7 +141,8 @@ def test_predict_writes_nonempty_instance_map(model, plot, tmp_path):
     points, semantic, instance = plot
     model.eval()
     model.test_cfg["output_dir"] = str(tmp_path)  # what tools/test.py does with --work-dir
-    model.score_th = 0.0                          # untrained objectness is ~0.25 < config 0.4
+    model.test_cfg["full_plot"] = True            # tiled whole-plot inference
+    model.test_cfg["score_th"] = 0.0              # untrained objectness is ~0.25 < config 0.4
 
     inputs = dict(points=[torch.from_numpy(points).cuda()])
     samples = [make_sample(semantic, instance)]
