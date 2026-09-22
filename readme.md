@@ -32,8 +32,57 @@ If you find this project helpful, please cite our paper:
 
 This version uses 2 inference iterations by default. If your trees are not extremely densely distributed, you can set the number of iterations to 1 instead.
 
-# ForestFormer3D environment setup
-This guide provides step-by-step instructions to build and configure the Docker environment for ForestFormer3D, set up debugging in Visual Studio Code, and resolve common issues.
+---
+
+## Environment (CUDA 11.8 image)
+
+`Dockerfile` builds `forestformer3d:cu118`: PyTorch 2.0.1 / CUDA 11.8 with MinkowskiEngine,
+spconv, torch-scatter, torch-cluster, torch-points-kernels and the segmentator extension
+compiled for compute 8.0, 8.6, 8.9 and 9.0 (A100, A10/A40, L4/L40, H100). The previous
+CUDA 11.6 image is kept as `Dockerfile.a100-cu116` for reference; the manual steps 2 to 4
+below belong to that old image. With the new image nothing is reinstalled or copied by
+hand: `docker/entrypoint.sh` installs the `transforms_3d.py` patch and checks the CUDA
+extensions on every container start. (Until the training loop stops needing the `epoch`
+kwarg, `tools/train.py` still needs `loops.py` and `base_model.py` from step 4.)
+
+```bash
+# Build, from the checkout root (30-60 min the first time; four CUDA architectures)
+docker build -t forestformer3d:cu118 .
+
+# If MinkowskiEngine fails to compile for compute 9.0:
+docker build --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX" -t forestformer3d:cu118 .
+
+# Run a command with the checkout mounted at /workspace
+docker run --rm --gpus all --shm-size=64g -v "$PWD":/workspace forestformer3d:cu118 \
+    python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
+    work_dirs/clean_forestformer/epoch_3000_fix.pth --work-dir work_dirs/release_eval
+
+# Interactive shell
+docker run --rm -it --gpus all --shm-size=64g -v "$PWD":/workspace forestformer3d:cu118
+
+# Smoke test: one loss step and one full-plot inference on a synthetic plot
+docker/smoke.sh
+```
+
+Tests: `pytest` at the checkout root runs the CPU tests; `pytest -m gpu tests/gpu` runs
+the GPU tests and only works inside the image.
+
+### Bringing the image up on a GPU host
+
+```bash
+git clone -b fix/review-findings https://github.com/cwinkelmann/ForestFormer3D.git
+cd ForestFormer3D
+docker build -t forestformer3d:cu118 . 2>&1 | tee ../ff3d-cu118-build.log
+docker/smoke.sh          # expect "2 passed"
+```
+
+If the MinkowskiEngine layer fails with an nvcc error mentioning `sm_90`, rebuild with
+`--build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"`.
+
+---
+
+# ForestFormer3D environment setup (legacy CUDA 11.6 image)
+This guide provides step-by-step instructions to build and configure the Docker environment for ForestFormer3D, set up debugging in Visual Studio Code, and resolve common issues. It describes `Dockerfile.a100-cu116`; see "Environment (CUDA 11.8 image)" above for the current image.
 
 At first, please download the dataset and pretrained model from Zenodo, and unzip and place them in the correct locations. Make sure the directory structure looks like:
 
