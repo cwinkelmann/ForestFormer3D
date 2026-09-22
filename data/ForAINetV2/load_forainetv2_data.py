@@ -59,8 +59,8 @@ def read_segmentation(filename):
 
 
 def extract_bbox(mesh_vertices, label_ids, instance_ids, bg_sem=np.array([0])):
-    # Filter out background points and points without an instance
-    valid_mask = ~np.isin(label_ids, bg_sem) & (instance_ids >= 0)
+    # Filter out background points
+    valid_mask = ~np.isin(label_ids, bg_sem)
     mesh_vertices = mesh_vertices[valid_mask]
     instance_ids = instance_ids[valid_mask]
     label_ids = label_ids[valid_mask]
@@ -112,8 +112,9 @@ def export(ply_file,
     Returns:
         points (float32 Nx3, centred: mean x, mean y, min z subtracted),
         label_ids (int64: 0 ground, 1 wood, 2 leaf),
-        instance_ids (int64: raw treeID, -1 for ground and for vegetation
-            without a tree id),
+        instance_ids (int64: for labeled scans, the original convention —
+            raw treeID for every non-ground point (0 for vegetation with no
+            tree id), 0 for ground; for unlabeled scans, -1 everywhere),
         unaligned_bboxes, aligned_bboxes (Kx7), axis_align_matrix (4x4),
         offsets (float64 [mean_x, mean_y, min_z]).
     """
@@ -141,18 +142,34 @@ def export(ply_file,
 
     bg_sem = np.array([0])
     if has_labels:
+        # Original on-disk convention (byte-for-byte, do not change: Phase 2
+        # benchmarks the old model code on data this loader already produced):
+        # ground -> -1 temporarily, then remapped to 0; every other point
+        # (including vegetation with treeID == 0) keeps its raw treeID.
         label_ids = pcd['semantic_seg'].astype(np.int64) - 1        # 0 ground, 1 wood, 2 leaf
         instance_ids = pcd['treeID'].astype(np.int64)
-        instance_ids[np.isin(label_ids, bg_sem)] = -1               # ground has no instance
-        instance_ids[(~np.isin(label_ids, bg_sem)) & (instance_ids == 0)] = -1   # vegetation without a tree id
+        instance_ids[np.isin(label_ids, bg_sem)] = -1                # ground -> -1
+        valid_mask = instance_ids != -1
+        new_instance_ids = np.zeros_like(instance_ids)
+        new_instance_ids[valid_mask] = instance_ids[valid_mask]      # raw treeID (incl. 0) elsewhere
+        new_instance_ids[instance_ids == -1] = 0                     # ground -> 0
+        instance_ids = new_instance_ids
     else:
         label_ids = np.zeros(points.shape[0], dtype=np.int64)
         instance_ids = np.full(points.shape[0], -1, dtype=np.int64)
 
     axis_align_matrix = np.eye(4)
     if not test_mode:
+        # Original code ran points through an (always-identity) alignment
+        # matmul before computing aligned_bboxes; because that promotes the
+        # float32 points to float64, the aligned/unaligned boxes differ by a
+        # few ULPs even though the transform is the identity. Reproduced
+        # exactly so the on-disk bytes match what this loader always wrote.
+        pts_h = np.ones((points.shape[0], 4))
+        pts_h[:, 0:3] = points[:, 0:3]
+        aligned_mesh_vertices = np.dot(pts_h, axis_align_matrix.transpose())[:, 0:3]
         unaligned_bboxes = extract_bbox(points, label_ids, instance_ids, bg_sem)
-        aligned_bboxes = extract_bbox(points, label_ids, instance_ids, bg_sem)
+        aligned_bboxes = extract_bbox(aligned_mesh_vertices, label_ids, instance_ids, bg_sem)
     else:
         unaligned_bboxes = None
         aligned_bboxes = None
