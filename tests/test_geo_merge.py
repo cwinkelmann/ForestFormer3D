@@ -16,9 +16,15 @@ def _result_las(path, origin, tree_ids, semantic, n=200):
     header = laspy.LasHeader(point_format=6, version="1.4")
     header.scales = np.array([0.001] * 3)
     header.offsets = np.array([origin[0], origin[1], 0.0])
-    header.add_extra_dim(laspy.ExtraBytesParams(name="treeID", type=np.int32))
-    header.add_extra_dim(laspy.ExtraBytesParams(name="semantic", type=np.uint8))
-    header.add_extra_dim(laspy.ExtraBytesParams(name="score", type=np.float32))
+    # Descriptions verbatim from ff3d_geo.convert.results_to_las: laspy compares point
+    # formats dimension by dimension (description included) when writing, so a fixture
+    # without them would not catch a merge that rebuilds the extra dims from names only.
+    header.add_extra_dim(laspy.ExtraBytesParams(
+        name="treeID", type=np.int32, description="ForestFormer3D instance, -1 none"))
+    header.add_extra_dim(laspy.ExtraBytesParams(
+        name="semantic", type=np.uint8, description="0 ground 1 wood 2 leaf 255 n/a"))
+    header.add_extra_dim(laspy.ExtraBytesParams(
+        name="score", type=np.float32, description="instance score"))
     header.add_crs(__import__("pyproj").CRS.from_epsg(25833))
     las = laspy.LasData(header)
     las.x = origin[0] + rng.uniform(0, 100, n)
@@ -58,3 +64,39 @@ def test_merge_trees_matches_merged_las_ids(tmp_path):
     t = gpd.read_file(tmp_path / "merged.gpkg", layer="trees")
     assert n == 5 and sorted(t["tree_id"].tolist()) == [0, 1, 2, 3, 4]
     assert t.crs.to_epsg() == 25833
+
+
+def test_merge_las_keeps_the_extra_dimension_descriptions(tmp_path):
+    """The merged LAS must carry results_to_las's extra-dim descriptions through.
+
+    Regression: merge_las used to rebuild treeID/semantic/score from their names
+    alone, which drops the descriptions; laspy then rejected every write with
+    "Incompatible point formats" (it compares point formats dimension by
+    dimension, and DimensionInfo carries the description).
+    """
+    a = _result_las(tmp_path / "a.las", (381000, 5829000), [-1, 0, 1, 2], [0, 1, 2, 2])
+    b = _result_las(tmp_path / "b.las", (381100, 5829000), [0, 0, 1, -1], [2, 2, 1, 0])
+    out = tmp_path / "merged.las"
+    merge_las([a, b], out)
+    merged = laspy.read(out)
+    assert merged.header.point_format == laspy.read(a).header.point_format
+    assert {d.name: d.description for d in merged.point_format.extra_dimensions} == {
+        "treeID": "ForestFormer3D instance, -1 none",
+        "semantic": "0 ground 1 wood 2 leaf 255 n/a",
+        "score": "instance score",
+    }
+
+
+def test_merge_las_names_a_sub_tile_with_a_different_point_format(tmp_path):
+    a = _result_las(tmp_path / "a.las", (381000, 5829000), [-1, 0, 1], [0, 1, 2])
+    b = tmp_path / "b.las"
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.scales = np.array([0.001] * 3)
+    header.offsets = np.array([381100.0, 5829000.0, 0.0])
+    header.add_extra_dim(laspy.ExtraBytesParams(name="treeID", type=np.int32))
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = [381100.0], [5829000.0], [1.0]
+    las.treeID = np.array([0], np.int32)
+    las.write(str(b))
+    with pytest.raises(ValueError, match="same results_to_las version"):
+        merge_las([a, b], tmp_path / "merged.las")

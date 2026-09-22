@@ -11,6 +11,7 @@ table's ``tree_id`` set matches the merged LAS's ``treeID >= 0`` set.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import geopandas as gpd
@@ -40,7 +41,8 @@ def merge_las(las_paths, out_las) -> dict:
     max_x = min_x = max_y = min_y = max_z = min_z = None
     max_ids: list[int] = []
     crs = None
-    extra_dim_names: list[str] | None = None
+    point_format = None
+    version = None
 
     for p in las_paths:
         with laspy.open(str(p)) as reader:
@@ -57,9 +59,23 @@ def merge_las(las_paths, out_las) -> dict:
             max_z = zs[1] if max_z is None else max(max_z, zs[1])
             if crs is None:
                 crs = header.parse_crs()
-            names = list(header.point_format.extra_dimension_names)
-            if extra_dim_names is None:
-                extra_dim_names = names
+            # The output point format is COPIED from the first input rather than
+            # rebuilt from the extra dimensions' names: laspy compares point formats
+            # dimension by dimension when writing, and a DimensionInfo carries its
+            # description, so extra dims re-declared without the descriptions that
+            # results_to_las gives them ("ForestFormer3D instance, -1 none", ...)
+            # compare unequal and write_points fails with "Incompatible point formats".
+            if point_format is None:
+                point_format = copy.deepcopy(header.point_format)
+                version = str(header.version)
+            elif header.point_format != point_format:
+                raise ValueError(
+                    f"merge_las: {p} has point format {header.point_format.id} with extra "
+                    f"dims {list(header.point_format.extra_dimension_names)}, which differs "
+                    f"from {las_paths[0]} (format {point_format.id}, extra dims "
+                    f"{list(point_format.extra_dimension_names)}); all sub-tile results "
+                    "must come from the same results_to_las version"
+                )
 
         las = laspy.read(str(p))
         ids = np.asarray(las.treeID, dtype=np.int64)
@@ -72,16 +88,9 @@ def merge_las(las_paths, out_las) -> dict:
         id_offsets[str(p)] = running
         running += max_id + 1
 
-    header = laspy.LasHeader(point_format=6, version="1.4")
+    header = laspy.LasHeader(point_format=point_format, version=version)
     header.scales = np.array([0.001, 0.001, 0.001])
     header.offsets = np.floor([min_x, min_y, min_z])
-    for name in extra_dim_names or []:
-        if name == "treeID":
-            header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.int32))
-        elif name == "semantic":
-            header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.uint8))
-        elif name == "score":
-            header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.float32))
     if crs is not None:
         header.add_crs(crs)
     else:
