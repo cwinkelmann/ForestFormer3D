@@ -27,9 +27,11 @@ SCRIPT = REPO / "benchmark" / "run_release_eval.sh"
 
 
 def _snapshot_files(d: Path) -> set:
+    """All paths (files AND directories) under d, relative -- for before/after dry-run diffs.
+    Must include directories: a dry run must not even mkdir the output dirs."""
     if not d.exists():
         return set()
-    return {str(p.relative_to(d)) for p in d.rglob("*") if p.is_file()}
+    return {str(p.relative_to(d)) for p in d.rglob("*")}
 
 
 def _make_root(tmp_path):
@@ -222,6 +224,39 @@ def test_dry_run_never_writes_markers(tmp_path):
     assert len(fixed_test_lines) == 1, out2
     assert len(old_test_lines) == 1, out2
     assert len(eval_lines) == 2, out2
+
+
+def test_dry_run_does_not_touch_preexisting_output_files(tmp_path):
+    """A dry run must not create the output dirs or delete result files left by an
+    interrupted REAL run: pre-seed work_dirs/bench-release-fixed/{a,b}.ply and
+    evaluation_total_test.txt with NO .done-* markers present (as if a real run died between
+    test.py and final_eval.py, or the marker write just hadn't happened yet), then assert
+    they all still exist, byte-for-byte, and the whole work_dirs snapshot (files and dirs) is
+    unchanged -- the ff3d_run-gated mkdir/rm in run_test_stage/run_eval_stage must never
+    execute for real under FF3D_DRY_RUN=1."""
+    root = _make_root(tmp_path)
+    old = _make_old(tmp_path)
+    fixed_dir = root / "work_dirs" / "bench-release-fixed"
+    fixed_dir.mkdir(parents=True)
+    seeded = {
+        fixed_dir / "a.ply": b"ply-a",
+        fixed_dir / "b.ply": b"ply-b",
+        fixed_dir / "evaluation_total_test.txt": b"stale eval\n",
+    }
+    for p, content in seeded.items():
+        p.write_bytes(content)
+
+    before = _snapshot_files(root / "work_dirs")
+
+    r = _run(root, old)
+    assert r.returncode == 0, r.stdout
+
+    for p, content in seeded.items():
+        assert p.exists(), f"{p} was deleted by a dry run"
+        assert p.read_bytes() == content, f"{p} was modified by a dry run"
+
+    after = _snapshot_files(root / "work_dirs")
+    assert after == before, f"dry run created/removed paths under work_dirs: {after ^ before}"
 
 
 def test_dry_run_without_foreground_skips_fork(tmp_path):

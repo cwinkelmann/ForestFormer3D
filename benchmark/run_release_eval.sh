@@ -21,18 +21,22 @@ FIXED_DIR="work_dirs/bench-release-fixed"
 OLD_DIR="work_dirs/bench-release-old"
 BENCH_DIR="$FF3D_ROOT/work_dirs/bench-release"
 
-# run_test_stage/run_eval_stage only touch their $BENCH_DIR/$marker on the REAL-run success
-# path. Under FF3D_DRY_RUN=1 no marker is ever written (the docker call was only printed, not
-# actually run, so nothing was verified) -- otherwise a dry run on a real deployment would
-# leave behind markers that make the subsequent real run silently skip every stage.
+# run_test_stage/run_eval_stage: every mutating filesystem command (mkdir, rm, touch) goes
+# through common.sh's ff3d_run, exactly like the docker invocations themselves, so under
+# FF3D_DRY_RUN=1 it is only printed, never executed -- a dry run must not create the output
+# dirs, delete *.ply/evaluation_total_test.txt left by an interrupted real run, or write the
+# $BENCH_DIR/$marker files (the docker call was only printed, not actually run, so nothing
+# was verified; a marker left behind by a dry run would make a subsequent REAL run silently
+# skip every stage). The marker touch is additionally gated behind an explicit `return 0` on
+# the dry-run branch, since it only makes sense after a REAL, verified success.
 run_test_stage() {  # run_test_stage <old|fixed> <ckpt (root-relative)> <out_dir (root-relative)> <marker>
   local variant="$1" ckpt="$2" out="$3" marker="$4" runner n
   if [ -f "$BENCH_DIR/$marker" ]; then
     ff3d_log "$variant test.py already done ($out) -- skipping (marker $marker present)"
     return 0
   fi
-  mkdir -p "$FF3D_ROOT/$out"
-  rm -f "$FF3D_ROOT/$out"/*.ply
+  ff3d_run mkdir -p "$FF3D_ROOT/$out"
+  ff3d_run rm -f "$FF3D_ROOT/$out"/*.ply
   if [ "$variant" = "old" ]; then runner=ff3d_docker_old; else runner=ff3d_docker; fi
   ff3d_log "$variant test.py: $ckpt -> $out"
   "$runner" python tools/test.py "$FF3D_CONFIG" "$ckpt" --work-dir "$out"
@@ -43,8 +47,8 @@ run_test_stage() {  # run_test_stage <old|fixed> <ckpt (root-relative)> <out_dir
   n="$(find "$FF3D_ROOT/$out" -maxdepth 1 -name '*.ply' | wc -l | tr -d ' ')"
   [ "$n" = "$N_TEST" ] || ff3d_die "$variant produced $n ply files, expected $N_TEST in $out"
   ff3d_log "$variant test.py done: $n ply files"
-  mkdir -p "$BENCH_DIR"
-  touch "$BENCH_DIR/$marker"
+  ff3d_run mkdir -p "$BENCH_DIR"
+  ff3d_run touch "$BENCH_DIR/$marker"
 }
 
 run_eval_stage() {  # run_eval_stage <out_dir (root-relative)> <marker>
@@ -53,7 +57,7 @@ run_eval_stage() {  # run_eval_stage <out_dir (root-relative)> <marker>
     ff3d_log "final_eval already done ($out) -- skipping (marker $marker present)"
     return 0
   fi
-  rm -f "$FF3D_ROOT/$out/evaluation_total_test.txt"
+  ff3d_run rm -f "$FF3D_ROOT/$out/evaluation_total_test.txt"
   ff3d_log "final_eval.py $out"
   ff3d_docker python tools/final_eval.py "$out"
   if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
@@ -63,8 +67,8 @@ run_eval_stage() {  # run_eval_stage <out_dir (root-relative)> <marker>
   grep -q '^Instance Segmentation F1 score:' "$FF3D_ROOT/$out/evaluation_total_test.txt" \
     || ff3d_die "no F1 line in $out/evaluation_total_test.txt"
   grep '^Instance Segmentation F1 score:' "$FF3D_ROOT/$out/evaluation_total_test.txt" | tail -1
-  mkdir -p "$BENCH_DIR"
-  touch "$BENCH_DIR/$marker"
+  ff3d_run mkdir -p "$BENCH_DIR"
+  ff3d_run touch "$BENCH_DIR/$marker"
 }
 
 ff3d_log "release eval start (root $FF3D_ROOT, image $FF3D_IMAGE)"
