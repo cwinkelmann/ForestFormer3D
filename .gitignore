@@ -10,3 +10,10 @@ __pycache__/
 
 # Symlink to the image's segmentator build, created by docker/entrypoint.sh
 segmentator/csrc/build
+
+# Run outputs and datasets (never committed)
+work_dirs/
+data/ForAINetV2/train_val_data/
+data/ForAINetV2/test_data/
+data/ForAINetV2/forainetv2_instance_data/
+data/ForAINetV2/*.pkl
