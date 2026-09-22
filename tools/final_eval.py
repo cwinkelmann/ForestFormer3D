@@ -18,6 +18,21 @@ _labels_spec.loader.exec_module(_labels)
 looks_raw = _labels.looks_raw
 normalize_instance_gt = _labels.normalize_instance_gt
 
+
+def _floats(xs):
+    """Cast a list/array of numpy scalars to plain Python floats for logging.
+
+    numpy>=2 reprs a bare scalar fine (`str(np.float64(0.8)) == '0.8'`), but a
+    list/array containing numpy scalars reprs each element as
+    `np.float64(0.8)` (via `repr`, which is what `str()`/`.format()` on the
+    container uses for its elements). Any log line that formats a whole
+    list/array of per-class values must run it through this first so the log
+    stays a plain, easily re-parsed Python literal regardless of numpy
+    version.
+    """
+    return [float(x) for x in xs]
+
+
 #This file produces stats about the total average F1 score, the average F1 score per forest region, and packs all F1 score within a forest region together
 #and save these stats in a file called "Eval_F1_per_region"
 if __name__ == '__main__':
@@ -275,7 +290,7 @@ if __name__ == '__main__':
 
             log_string('Semantic Segmentation oAcc: {}'.format(sum(true_positive_classes) / float(sum(positive_classes))), IND_LOG_FOUT)
             log_string('Semantic Segmentation mAcc: {}'.format(np.mean(true_positive_classes[sem_classcount_final] / gt_classes[sem_classcount_final])), IND_LOG_FOUT)
-            log_string('Semantic Segmentation IoU: {}'.format(iou_list), IND_LOG_FOUT)
+            log_string('Semantic Segmentation IoU: {}'.format(_floats(iou_list)), IND_LOG_FOUT)
             log_string('Semantic Segmentation mIoU: {}'.format(1. * sum(iou_list) / len(sem_classcount_final)), IND_LOG_FOUT)
             log_string('  ', IND_LOG_FOUT)
 
@@ -302,7 +317,7 @@ if __name__ == '__main__':
 
             log_string('Binary Semantic Segmentation oAcc: {}'.format(sum(true_positive_classes_bi) / float(sum(positive_classes_bi))), IND_LOG_FOUT)
             log_string('Binary Semantic Segmentation mAcc: {}'.format(np.mean(true_positive_classes_bi[sem_classcount_final_bi] / gt_classes_bi[sem_classcount_final_bi])), IND_LOG_FOUT)
-            log_string('Binary Semantic Segmentation IoU: {}'.format(iou_list_bi), IND_LOG_FOUT)
+            log_string('Binary Semantic Segmentation IoU: {}'.format(_floats(iou_list_bi)), IND_LOG_FOUT)
             log_string('Binary Semantic Segmentation mIoU: {}'.format(1. * sum(iou_list_bi) / len(sem_classcount_final_bi)), IND_LOG_FOUT)
             log_string('  ', IND_LOG_FOUT)
 
@@ -368,34 +383,34 @@ if __name__ == '__main__':
                             np.mean(precision[ins_classcount_final]) + np.mean(recall[ins_classcount_final]))
 
             log_string('Instance Segmentation for Offset:', IND_LOG_FOUT)
-            log_string('Instance Segmentation MUCov: {}'.format(MUCov[ins_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation MUCov: {}'.format(_floats(MUCov[ins_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation mMUCov: {}'.format(np.mean(MUCov[ins_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation MWCov: {}'.format(MWCov[ins_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation MWCov: {}'.format(_floats(MWCov[ins_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation mMWCov: {}'.format(np.mean(MWCov[ins_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation Precision: {}'.format(precision[ins_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation Precision: {}'.format(_floats(precision[ins_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation mPrecision: {}'.format(np.mean(precision[ins_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation Recall: {}'.format(recall[ins_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation Recall: {}'.format(_floats(recall[ins_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation mRecall: {}'.format(np.mean(recall[ins_classcount_final])), IND_LOG_FOUT)
             log_string('Instance Segmentation F1 score: {}'.format(F1_score), IND_LOG_FOUT)
-            log_string('Instance Segmentation RQ: {}'.format(RQ[sem_classcount_bi]), IND_LOG_FOUT)
+            log_string('Instance Segmentation RQ: {}'.format(_floats(RQ[sem_classcount_bi])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanRQ: {}'.format(np.mean(RQ[sem_classcount_final_bi])), IND_LOG_FOUT)
-            log_string('Instance Segmentation SQ: {}'.format(SQ[sem_classcount_bi]), IND_LOG_FOUT)
+            log_string('Instance Segmentation SQ: {}'.format(_floats(SQ[sem_classcount_bi])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanSQ: {}'.format(np.mean(SQ[sem_classcount_final_bi])), IND_LOG_FOUT)
-            log_string('Instance Segmentation PQ: {}'.format(PQ[sem_classcount_bi]), IND_LOG_FOUT)
+            log_string('Instance Segmentation PQ: {}'.format(_floats(PQ[sem_classcount_bi])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanPQ: {}'.format(np.mean(PQ[sem_classcount_final_bi])), IND_LOG_FOUT)
-            log_string('Instance Segmentation PQ star: {}'.format(PQStar[sem_classcount_bi]), IND_LOG_FOUT)
+            log_string('Instance Segmentation PQ star: {}'.format(_floats(PQStar[sem_classcount_bi])), IND_LOG_FOUT)
             log_string('Instance Segmentation mean PQ star: {}'.format(np.mean(PQStar[sem_classcount_final_bi])), IND_LOG_FOUT)
-            log_string('Instance Segmentation RQ (things): {}'.format(RQ[ins_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation RQ (things): {}'.format(_floats(RQ[ins_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanRQ (things): {}'.format(np.mean(RQ[ins_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation SQ (things): {}'.format(SQ[ins_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation SQ (things): {}'.format(_floats(SQ[ins_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanSQ (things): {}'.format(np.mean(SQ[ins_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation PQ (things): {}'.format(PQ[ins_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation PQ (things): {}'.format(_floats(PQ[ins_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanPQ (things): {}'.format(np.mean(PQ[ins_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation RQ (stuff): {}'.format(RQ[stuff_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation RQ (stuff): {}'.format(_floats(RQ[stuff_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanRQ (stuff): {}'.format(np.mean(RQ[stuff_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation SQ (stuff): {}'.format(SQ[stuff_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation SQ (stuff): {}'.format(_floats(SQ[stuff_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanSQ (stuff): {}'.format(np.mean(SQ[stuff_classcount_final])), IND_LOG_FOUT)
-            log_string('Instance Segmentation PQ (stuff): {}'.format(PQ[stuff_classcount]), IND_LOG_FOUT)
+            log_string('Instance Segmentation PQ (stuff): {}'.format(_floats(PQ[stuff_classcount])), IND_LOG_FOUT)
             log_string('Instance Segmentation meanPQ (stuff): {}'.format(np.mean(PQ[stuff_classcount_final])), IND_LOG_FOUT)
 
         true_positive_classes_global += true_positive_classes
@@ -434,7 +449,7 @@ if __name__ == '__main__':
 
     log_string('Semantic Segmentation oAcc: {}'.format(sum(true_positive_classes_global) / float(sum(positive_classes_global))))
     log_string('Semantic Segmentation mAcc: {}'.format(np.mean(true_positive_classes_global[sem_classcount_final_global] / gt_classes_global[sem_classcount_final_global])))
-    log_string('Semantic Segmentation IoU: {}'.format(iou_list_global))
+    log_string('Semantic Segmentation IoU: {}'.format(_floats(iou_list_global)))
     log_string('Semantic Segmentation mIoU: {}'.format(1. * sum(iou_list_global) / len(sem_classcount_final_global)))
     log_string('  ')
 
@@ -461,7 +476,7 @@ if __name__ == '__main__':
 
     log_string('Binary Semantic Segmentation oAcc: {}'.format(sum(true_positive_classes_bi_global) / float(sum(positive_classes_bi_global))))
     log_string('Binary Semantic Segmentation mAcc: {}'.format(np.mean(true_positive_classes_bi_global[sem_classcount_final_bi_global] / gt_classes_bi_global[sem_classcount_final_bi_global])))
-    log_string('Binary Semantic Segmentation IoU: {}'.format(iou_list_bi_global))
+    log_string('Binary Semantic Segmentation IoU: {}'.format(_floats(iou_list_bi_global)))
     log_string('Binary Semantic Segmentation mIoU: {}'.format(1. * sum(iou_list_bi_global) / len(sem_classcount_final_bi_global)))
     log_string('  ')
 
@@ -527,34 +542,34 @@ if __name__ == '__main__':
                     np.mean(precision_global[ins_classcount_final_global]) + np.mean(recall_global[ins_classcount_final_global]))
 
     log_string('Instance Segmentation for Offset:')
-    log_string('Instance Segmentation MUCov: {}'.format(MUCov_global[ins_classcount]))
+    log_string('Instance Segmentation MUCov: {}'.format(_floats(MUCov_global[ins_classcount])))
     log_string('Instance Segmentation mMUCov: {}'.format(np.mean(MUCov_global[ins_classcount_final_global])))
-    log_string('Instance Segmentation MWCov: {}'.format(MWCov_global[ins_classcount]))
+    log_string('Instance Segmentation MWCov: {}'.format(_floats(MWCov_global[ins_classcount])))
     log_string('Instance Segmentation mMWCov: {}'.format(np.mean(MWCov_global[ins_classcount_final_global])))
-    log_string('Instance Segmentation Precision: {}'.format(precision_global[ins_classcount]))
+    log_string('Instance Segmentation Precision: {}'.format(_floats(precision_global[ins_classcount])))
     log_string('Instance Segmentation mPrecision: {}'.format(np.mean(precision_global[ins_classcount_final_global])))
-    log_string('Instance Segmentation Recall: {}'.format(recall_global[ins_classcount]))
+    log_string('Instance Segmentation Recall: {}'.format(_floats(recall_global[ins_classcount])))
     log_string('Instance Segmentation mRecall: {}'.format(np.mean(recall_global[ins_classcount_final_global])))
     log_string('Instance Segmentation F1 score: {}'.format(F1_score_global))
-    log_string('Instance Segmentation RQ: {}'.format(RQ_global[sem_classcount_bi_global]))
+    log_string('Instance Segmentation RQ: {}'.format(_floats(RQ_global[sem_classcount_bi_global])))
     log_string('Instance Segmentation meanRQ: {}'.format(np.mean(RQ_global[sem_classcount_final_bi_global])))
-    log_string('Instance Segmentation SQ: {}'.format(SQ_global[sem_classcount_bi_global]))
+    log_string('Instance Segmentation SQ: {}'.format(_floats(SQ_global[sem_classcount_bi_global])))
     log_string('Instance Segmentation meanSQ: {}'.format(np.mean(SQ_global[sem_classcount_final_bi_global])))
-    log_string('Instance Segmentation PQ: {}'.format(PQ_global[sem_classcount_bi_global]))
+    log_string('Instance Segmentation PQ: {}'.format(_floats(PQ_global[sem_classcount_bi_global])))
     log_string('Instance Segmentation meanPQ: {}'.format(np.mean(PQ_global[sem_classcount_final_bi_global])))
-    log_string('Instance Segmentation PQ star: {}'.format(PQStar_global[sem_classcount_bi_global]))
+    log_string('Instance Segmentation PQ star: {}'.format(_floats(PQStar_global[sem_classcount_bi_global])))
     log_string('Instance Segmentation mean PQ star: {}'.format(np.mean(PQStar_global[sem_classcount_final_bi_global])))
-    log_string('Instance Segmentation RQ (things): {}'.format(RQ_global[ins_classcount]))
+    log_string('Instance Segmentation RQ (things): {}'.format(_floats(RQ_global[ins_classcount])))
     log_string('Instance Segmentation meanRQ (things): {}'.format(np.mean(RQ_global[ins_classcount_final_global])))
-    log_string('Instance Segmentation SQ (things): {}'.format(SQ_global[ins_classcount]))
+    log_string('Instance Segmentation SQ (things): {}'.format(_floats(SQ_global[ins_classcount])))
     log_string('Instance Segmentation meanSQ (things): {}'.format(np.mean(SQ_global[ins_classcount_final_global])))
-    log_string('Instance Segmentation PQ (things): {}'.format(PQ_global[ins_classcount]))
+    log_string('Instance Segmentation PQ (things): {}'.format(_floats(PQ_global[ins_classcount])))
     log_string('Instance Segmentation meanPQ (things): {}'.format(np.mean(PQ_global[ins_classcount_final_global])))
-    log_string('Instance Segmentation RQ (stuff): {}'.format(RQ_global[stuff_classcount]))
+    log_string('Instance Segmentation RQ (stuff): {}'.format(_floats(RQ_global[stuff_classcount])))
     log_string('Instance Segmentation meanRQ (stuff): {}'.format(np.mean(RQ_global[stuff_classcount_final_global])))
-    log_string('Instance Segmentation SQ (stuff): {}'.format(SQ_global[stuff_classcount]))
+    log_string('Instance Segmentation SQ (stuff): {}'.format(_floats(SQ_global[stuff_classcount])))
     log_string('Instance Segmentation meanSQ (stuff): {}'.format(np.mean(SQ_global[stuff_classcount_final_global])))
-    log_string('Instance Segmentation PQ (stuff): {}'.format(PQ_global[stuff_classcount]))
+    log_string('Instance Segmentation PQ (stuff): {}'.format(_floats(PQ_global[stuff_classcount])))
     log_string('Instance Segmentation meanPQ (stuff): {}'.format(np.mean(PQ_global[stuff_classcount_final_global])))
 
     LOG_FOUT.close()

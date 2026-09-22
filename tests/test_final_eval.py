@@ -1,21 +1,18 @@
 import ast
-import re
 import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+plyfile = pytest.importorskip("plyfile")
+pytest.importorskip("scipy")
+
+import numpy as np
 from plyfile import PlyData, PlyElement
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'tools' / 'final_eval.py'
-
-# numpy>=2 reprs scalars as e.g. "np.float64(0.8)" instead of "0.8"; strip the
-# wrapper so ast.literal_eval can parse the logged values regardless of the
-# numpy version running final_eval.py (production pins numpy==1.24, which
-# does not wrap scalars this way).
-_NUMPY_SCALAR_RE = re.compile(r'np\.\w+\(([^()]+)\)')
 
 
 def write_result_ply(path, semantic_gt, semantic_pred, instance_gt, instance_pred):
@@ -32,8 +29,7 @@ def write_result_ply(path, semantic_gt, semantic_pred, instance_gt, instance_pre
 def parse(log_text, key):
     for line in log_text.splitlines():
         if line.startswith(key + ':'):
-            value = line.split(':', 1)[1].strip()
-            return ast.literal_eval(_NUMPY_SCALAR_RE.sub(r'\1', value))
+            return ast.literal_eval(line.split(':', 1)[1].strip())
     raise AssertionError(f'{key} not in log')
 
 
