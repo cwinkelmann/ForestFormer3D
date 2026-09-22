@@ -77,9 +77,10 @@ the `tools/test.py` output, then the markdown report block ending in
 Files afterwards in `work_dirs/tegel-r12/` (a real run):
 
 ```
-20260922_143817/                                     # mmengine log dir
+20260922_170517/                                     # mmengine log dir
 empty_list.txt                                       # empty train/val scan lists
 forainetv2_oneformer3d_infos_test.pkl                # test info pkl, private to this run
+oneformer3d_qs_radius16_qp300_2many.py               # config copy dumped by tools/test.py
 r12_tegel_E381300_N5828300_100m.las                  # georeferenced result
 r12_tegel_E381300_N5828300_100m.ply                  # raw model result
 r12_tegel_E381300_N5828300_100m.sidecar.json         # origin / EPSG / point count
