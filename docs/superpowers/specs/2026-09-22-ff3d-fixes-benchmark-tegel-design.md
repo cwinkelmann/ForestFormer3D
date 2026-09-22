@@ -53,7 +53,7 @@ Stack, all pinned:
 
 | Component | Version |
 |-----------|---------|
-| base | `pytorch/pytorch:2.0.1-cuda11.8-cudnn8-devel` |
+| base | `nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04` + `torch==2.0.1+cu118` / `torchvision==0.15.2+cu118` from `download.pytorch.org` |
 | mmcv | 2.0.1, cu118 / torch2.0 wheel index |
 | mmengine | 0.7.3 |
 | mmdet | 3.0.0 |
@@ -65,6 +65,8 @@ Stack, all pinned:
 | torch-points-kernels | 0.7.0 built from source, `FORCE_CUDA=1`, same arch list |
 | segmentator | Karbo123 commit 76efe46 built as today |
 | extras | `laspy[lazrs]`, `tqdm`, `pytest`, existing numeric pins carried over where still compatible with numpy 1.24 |
+
+The pytorch/pytorch image for 2.0.1 exists only for CUDA 11.7, so torch is installed from the wheel index.
 
 Rules: no `--install-option` (removed in pip 23.1; MinkowskiEngine gets its flags through
 `setup.py` environment variables or a `pip install .` after `git clone`), `pip uninstall -y`,

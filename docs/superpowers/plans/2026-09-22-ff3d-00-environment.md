@@ -210,6 +210,17 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ### Task 2: CUDA 11.8 Dockerfile
 
+**Amendment (2026-09-22):** The first GPU-server build failed at `FROM`: Docker Hub has no
+`pytorch/pytorch:2.0.1-cuda11.8-cudnn8-devel` tag (those 2.0.1 tags stop at CUDA 11.7; the
+11.8 tags start at torch 2.1.0). Per the controller ruling, the base image is now
+`nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04` (Ubuntu 22.04 Python 3.10, apt `python3
+python3-dev python3-pip python3-venv python-is-python3`), with torch 2.0.1 / torchvision
+0.15.2 installed from the cu118 wheel index as the first pip layer. Every other pin, the
+`FROM` and base-image references below and in Global Constraints are superseded by this
+note; see `docs/superpowers/specs/2026-09-22-ff3d-fixes-benchmark-tegel-design.md` section
+3.1 and `.superpowers/sdd/2026-09-22-ff3d-00-environment/task-2-fix-report.md` for the
+ruling and full rationale.
+
 **Files:**
 - Rename: `Dockerfile` -> `Dockerfile.a100-cu116` (unchanged content)
 - Create: `Dockerfile`

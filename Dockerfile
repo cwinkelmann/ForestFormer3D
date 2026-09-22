@@ -2,9 +2,14 @@
 # compute 8.0 (A100), 8.6 (A10/A40), 8.9 (L4/L40) and 9.0 (H100).
 # The previous CUDA 11.6 image is kept unchanged as Dockerfile.a100-cu116.
 #
+# Base image: pytorch/pytorch only ships a 2.0.1-cuda11.8-cudnn8-devel tag starting at
+# torch 2.1.0 (the 2.0.1 tags stop at CUDA 11.7). We instead build on the official
+# nvidia/cuda 11.8 devel image (Ubuntu 22.04, Python 3.10) and install the torch 2.0.1
+# / torchvision 0.15.2 wheels for cu118 directly from the PyTorch wheel index.
+#
 # Build (checkout root):  docker build -t forestformer3d:cu118 .
 # Run:  docker run --rm --gpus all --shm-size=64g -v "$PWD":/workspace forestformer3d:cu118 <cmd>
-FROM pytorch/pytorch:2.0.1-cuda11.8-cudnn8-devel
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
 # Override with --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX" if MinkowskiEngine
 # fails to compile for 9.0 (design spec section 8).
@@ -17,14 +22,24 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     DEBIAN_FRONTEND=noninteractive
 
 # Compilers and CMake for the CUDA extensions, OpenBLAS for MinkowskiEngine,
-# GL/X runtime libraries for the open3d and opencv wheels. Ubuntu 20.04 ships gcc 9,
-# which CUDA 11.8 supports, so no toolchain PPA is needed.
+# GL/X runtime libraries for the open3d and opencv wheels, and Python 3.10 itself (this
+# base has no conda environment). Ubuntu 22.04 ships gcc 11, which CUDA 11.8 supports, so
+# no toolchain PPA is needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git rsync \
         libopenblas-dev \
         libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
+        python3 python3-dev python3-pip python3-venv python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# pip<24.1 so --index-url resolution and the modern torch/torchvision wheels below behave
+# the same way the previous conda-based pip did; Ubuntu's python3-pip is otherwise too old.
+RUN python3 -m pip install --no-cache-dir --upgrade "pip<24.1"
+
+# torch 2.0.1 / torchvision 0.15.2 for CUDA 11.8, from the official wheel index (no
+# pytorch/pytorch:2.0.1-cuda11.8-cudnn8-devel tag exists — see the header comment).
+RUN pip install --no-cache-dir torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
 
 # Pins every later build step must see: numpy 1.24 (numba 0.57 / mmdet3d ceiling) and a
 # setuptools that still runs `python setup.py install` for MinkowskiEngine.
@@ -127,6 +142,8 @@ RUN FORCE_CUDA=1 pip install --no-cache-dir --no-deps --no-build-isolation torch
 # Built under /opt so the /workspace mount cannot hide it; `make install` only symlinks the
 # clone into site-packages, and docker/entrypoint.sh links csrc/build into the mounted
 # checkout because the repo's segmentator/main.py imports .csrc.build.libsegmentator.
+# sysconfig's LIBDIR resolves to /usr/lib/x86_64-linux-gnu on Ubuntu 22.04, where
+# python3-dev installs libpython3.10.so (there is no conda lib dir on this base image).
 RUN git clone https://github.com/Karbo123/segmentator.git /opt/segmentator \
     && cd /opt/segmentator \
     && git reset --hard 76efe46d03dd27afa78df972b17d07f2c6cfb696 \
