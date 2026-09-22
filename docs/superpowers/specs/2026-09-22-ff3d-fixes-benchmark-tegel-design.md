@@ -227,8 +227,9 @@ Pure Python (numpy, laspy, shapely, pyproj), no CUDA, tested on the Mac.
   `--origin E N` overrides; error if neither.
 - `convert.py`:
   - `las_to_ply(las_path, ply_path, sidecar_path, origin, epsg=25833)`: writes `x y z`
-    as float64 in local coordinates (the pipeline's `.ply` reader expects local, small
-    values), constant `semantic_seg=1`, `treeID=0`, and a JSON sidecar with origin, EPSG,
+    only, as float64 in local coordinates (the pipeline's `.ply` reader expects local,
+    small values) -- labels come from running `batch_load_ForAINetV2_data.py
+    --unlabeled` on it, not from the PLY -- plus a JSON sidecar with origin, EPSG,
     scale/offset of the source, and the ALS `classification` array saved as `.npy` next to it.
   - `results_to_las(result_ply, sidecar_path, offsets_npy, out_las)`: LAS 1.4, point format 6, coordinates
     restored to UTM with the source scale, extra dimensions `treeID` (int32, -1 = none),
@@ -243,9 +244,12 @@ Pure Python (numpy, laspy, shapely, pyproj), no CUDA, tested on the Mac.
   classes 3-5 minus class-2 DTM, 3 m window, min height 3 m) as the plausibility reference.
 - `cli.py`: `python -m ff3d_geo run --las <file> --checkpoint <pth> --out <dir>
   [--origin E N] [--epsg 25833] [--config ...]`: convert, place in `data/ForAINetV2/test_data`,
-  write `meta_data/test_list.txt`, run `batch_load --unlabeled` and `create_data`, run
-  `tools/test.py --work-dir <out>`, then `results_to_las` and `trees_to_gpkg`. Also
-  `python -m ff3d_geo convert ...` and `python -m ff3d_geo report ...` for the parts.
+  write a private scan list under `<out>` (never the tracked `meta_data/test_list.txt`)
+  and pass it to `batch_load --unlabeled` (`--test_scan_names_file`) and `create_data`
+  (`--test-list ... --splits test`, with the info pkl written into `<out>` via
+  `--out-dir`), run `tools/test.py --work-dir <out>`, then `results_to_las` and
+  `trees_to_gpkg`. Also `python -m ff3d_geo convert ...` and `python -m ff3d_geo
+  report ...` for the parts.
 
 ### 6.2 Run and report
 

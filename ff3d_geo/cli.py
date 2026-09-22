@@ -50,7 +50,6 @@ from typing import Callable
 
 from ff3d_geo.convert import las_to_ply, results_to_las
 from ff3d_geo.origin import parse_origin
-from ff3d_geo.trees import trees_to_gpkg
 
 DEFAULT_CONFIG = "configs/oneformer3d_qs_radius16_qp300_2many.py"
 DEFAULT_CHECKPOINT = "work_dirs/clean_forestformer/epoch_3000_fix.pth"
@@ -127,12 +126,17 @@ def _container_path(path: Path, repo: Path, what: str) -> str:
 
 
 def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
-    """A step that sources benchmark/common.sh and runs ``inner`` via ``ff3d_docker``."""
+    """A step that sources benchmark/common.sh and runs ``inner`` via ``ff3d_docker``.
+
+    ``FF3D_DRY_RUN`` is forced to ``"0"`` in the step env: the CLI has its own
+    ``--dry-run`` flag, and a caller who still has ``FF3D_DRY_RUN=1`` exported from
+    unrelated benchmark work must not silently turn this step into a no-op.
+    """
     return Step(
         name=name,
         argv=["bash", "-c", f"source benchmark/common.sh; ff3d_docker {inner}"],
         cwd=repo,
-        env={"FF3D_ROOT": str(repo), "FF3D_GPU": str(gpu)},
+        env={"FF3D_ROOT": str(repo), "FF3D_GPU": str(gpu), "FF3D_DRY_RUN": "0"},
     )
 
 
@@ -199,6 +203,11 @@ def plan_run(
         if instance_dir.is_dir():
             for stale in instance_dir.glob(f"{stem}_*.npy"):
                 stale.unlink()
+        # A previous run's result PLY must not survive: if this run's inference exits
+        # 0 without writing one (e.g. an empty pkl), results_to_las would otherwise
+        # silently georeference the old result.
+        if result_ply.is_file():
+            result_ply.unlink()
 
     def check_preprocess() -> None:
         # batch_load reports a failed export on stderr but create_data only PRINTS
@@ -220,6 +229,9 @@ def plan_run(
         results_to_las(result_ply, sidecar, offsets_npy, out_las)
 
     def trees() -> None:
+        # Imported lazily: geopandas is only needed for the reporting half.
+        from ff3d_geo.trees import trees_to_gpkg
+
         n = trees_to_gpkg(out_las, gpkg)
         print(f"{gpkg}: {n} trees")
 
@@ -344,6 +356,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.command == "run":
+        # A non-dry run with a wrong --las would otherwise create --out (prepare_inputs)
+        # and only then die inside laspy.read with a bare FileNotFoundError; check
+        # up front, before any step runs, for a clear error instead. --dry-run only
+        # prints the plan and is allowed to run ahead of the input file existing.
+        if not args.dry_run and not Path(args.las).is_file():
+            raise ValueError(f"--las {args.las} does not exist")
         origin = tuple(args.origin) if args.origin else None
         timings: dict[str, float] = {}
         steps = plan_run(
@@ -363,11 +381,14 @@ def main(argv: list[str] | None = None) -> int:
         results_to_las(args.result_ply, args.sidecar, args.offsets, args.out_las)
         print(f"wrote {args.out_las}")
         if args.gpkg is not None:
+            from ff3d_geo.trees import trees_to_gpkg
+
             print(f"wrote {args.gpkg} ({trees_to_gpkg(args.out_las, args.gpkg)} trees)")
         return 0
 
     if args.command == "report":
         from ff3d_geo.report import build_report, report_markdown, write_report
+        from ff3d_geo.trees import trees_to_gpkg
 
         if not Path(args.gpkg).is_file():
             print(f"wrote {args.gpkg} ({trees_to_gpkg(args.las, args.gpkg)} trees)")

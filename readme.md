@@ -88,6 +88,25 @@ docker/smoke.sh          # expect "2 passed"
 If the MinkowskiEngine layer fails with an nvcc error mentioning `sm_90`, rebuild with
 `--build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"`.
 
+### Geospatial inference on your own ALS tiles (`ff3d_geo`)
+
+`ff3d_geo/` runs ForestFormer3D on real georeferenced ALS tiles (LAS/LAZ) instead of the
+ForAINetV2 benchmark plots, and turns the result back into a georeferenced LAS 1.4 file plus
+a tree GeoPackage and a markdown/JSON report. It is a separate, pure-Python package (no
+torch/CUDA) that runs on the HOST, in a plain CPU venv, and only calls into the
+`forestformer3d:cu118` container (via `benchmark/common.sh`) for the two GPU steps.
+
+```bash
+python3 -m venv .venv-cpu && .venv-cpu/bin/pip install -e ".[geo]"   # or: pip install -r tests/requirements-cpu.txt
+
+.venv-cpu/bin/python -m ff3d_geo run --las <path/to/tile.las> \
+    --checkpoint work_dirs/clean_forestformer/epoch_3000_fix.pth \
+    --out work_dirs/<name> --gpu <N>          # add --dry-run to preview the 8 steps first
+```
+
+See `docs/benchmarks/RUNBOOK-tegel.md` for a full worked example (copying tiles to a GPU
+host over SSH, running both tiles, and filling in a report).
+
 ---
 
 # ForestFormer3D environment setup (legacy CUDA 11.6 image)

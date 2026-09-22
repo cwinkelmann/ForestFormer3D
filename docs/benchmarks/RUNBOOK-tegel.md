@@ -70,9 +70,9 @@ not hours; if `tools/test.py` starts iterating over more than one scan, the scan
 leaked - kill that run's PID only and check `<out>/scan_list.txt`.
 
 Expected per run: the 8 step lines (`# python: ...` / `$ cd ...`), `batch_load` printing
-the `--unlabeled` constant-label path, `create_data` printing that train/val are skipped,
-the `tools/test.py` output, then the markdown report block ending in
-`First pass usable: **yes|no**`.
+the `--unlabeled` constant-label path, `create_data` (`--splits test`) silently building
+only the test split (train/val are simply not built, no message), the `tools/test.py`
+output, then the markdown report block ending in `First pass usable: **yes|no**`.
 
 Files afterwards in `work_dirs/tegel-r12/` (a real run):
 

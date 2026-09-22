@@ -19,6 +19,9 @@ import pytest
 
 pytest.importorskip("laspy")
 pytest.importorskip("plyfile")
+pytest.importorskip("shapely")
+pytest.importorskip("pyproj")
+pytest.importorskip("geopandas")
 
 import numpy as np  # noqa: E402
 from plyfile import PlyData, PlyElement  # noqa: E402
@@ -69,8 +72,8 @@ def test_plan_run_builds_the_expected_host_and_docker_steps(fake_repo, tmp_path)
 
     pre, inf = commands
     assert pre.cwd == fake_repo and inf.cwd == fake_repo
-    assert pre.env == {"FF3D_ROOT": str(fake_repo), "FF3D_GPU": "5"}
-    assert inf.env == {"FF3D_ROOT": str(fake_repo), "FF3D_GPU": "5"}
+    assert pre.env == {"FF3D_ROOT": str(fake_repo), "FF3D_GPU": "5", "FF3D_DRY_RUN": "0"}
+    assert inf.env == {"FF3D_ROOT": str(fake_repo), "FF3D_GPU": "5", "FF3D_DRY_RUN": "0"}
 
     assert pre.argv[:2] == ["bash", "-c"]
     assert pre.argv[2] == (
@@ -131,6 +134,32 @@ def test_step_render_quotes_arguments_and_names_python_steps():
     assert Step(name="report").render() == "# python: report"
 
 
+def test_run_checks_las_exists_before_any_step(fake_repo, tmp_path, monkeypatch):
+    """A non-dry run with a wrong --las must fail immediately with a clear error,
+    not create --out and then die inside laspy.read."""
+    calls = []
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0),
+    )
+    las = tmp_path / f"{STEM}.las"  # never created
+    out = fake_repo / "work_dirs" / "o"
+    with pytest.raises(ValueError, match="does not exist"):
+        main(["run", "--las", str(las), "--out", str(out), "--repo", str(fake_repo)])
+    assert calls == []
+    assert not out.exists()
+
+
+def test_run_dry_run_still_works_when_las_does_not_exist(fake_repo, tmp_path, capsys):
+    """--dry-run only prints the plan, so it must not require --las to exist."""
+    las = tmp_path / f"{STEM}.las"  # never created
+    out = fake_repo / "work_dirs" / "o"
+    rc = main(["run", "--las", str(las), "--out", str(out), "--repo", str(fake_repo),
+               "--dry-run"])
+    assert rc == 0
+    assert not out.exists()
+
+
 def test_run_dry_run_prints_every_command_and_touches_nothing(fake_repo, tmp_path, capsys):
     las = tmp_path / f"{STEM}.las"
     out = fake_repo / "work_dirs" / "tegel-r12"
@@ -140,7 +169,9 @@ def test_run_dry_run_prints_every_command_and_touches_nothing(fake_repo, tmp_pat
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 8
     assert lines[0].startswith("# python: las_to_ply")
-    assert lines[2].startswith(f"$ cd {fake_repo} && FF3D_ROOT={fake_repo} FF3D_GPU=5 bash -c ")
+    assert lines[2].startswith(
+        f"$ cd {fake_repo} && FF3D_ROOT={fake_repo} FF3D_GPU=5 FF3D_DRY_RUN=0 bash -c "
+    )
     assert "batch_load_ForAINetV2_data.py --unlabeled" in lines[2]
     assert "tools/test.py" in lines[4] and "--work-dir work_dirs/tegel-r12" in lines[4]
     # nothing written: no out dir, no PLY in the repo, no scan list
@@ -168,6 +199,29 @@ def test_the_private_scan_list_reaches_both_batch_load_and_create_data(fake_repo
     assert ("--cfg-options test_dataloader.dataset.ann_file="
             "/workspace/work_dirs/o/forainetv2_oneformer3d_infos_test.pkl"
             in steps[4].argv[2])
+
+
+def test_docker_step_forces_dry_run_off_regardless_of_the_callers_shell(
+    fake_repo, tmp_path, monkeypatch
+):
+    """A caller with FF3D_DRY_RUN=1 still exported from unrelated benchmark work must
+    not turn a docker step into a silent no-op; the CLI's own --dry-run is the only
+    switch for that."""
+    monkeypatch.setenv("FF3D_DRY_RUN", "1")
+    steps = plan_run(tmp_path / f"{STEM}.las", DEFAULT_CHECKPOINT,
+                     fake_repo / "work_dirs/o", repo=fake_repo)
+    commands = [s for s in steps if s.argv is not None]
+    assert all(s.env["FF3D_DRY_RUN"] == "0" for s in commands)
+
+    seen_envs = []
+
+    def fake_run(argv, **kwargs):
+        seen_envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    execute(commands, dry_run=False)
+    assert all(env["FF3D_DRY_RUN"] == "0" for env in seen_envs)
 
 
 def test_execute_reports_the_failing_step_by_name(fake_repo, tmp_path, monkeypatch, capsys):
@@ -198,6 +252,24 @@ def _run_with_fake_preprocess(tmp_path, monkeypatch, produce):
     out.mkdir(parents=True)
     (out / "scan_list.txt").write_text(f"{STEM}\n")
     execute([s for s in steps if s.name in ("preprocess", "check_preprocess")], dry_run=False)
+
+
+def test_prepare_inputs_unlinks_a_stale_result_ply(fake_repo, tmp_path):
+    """A re-run must not let georeference() pick up a previous run's result: if this
+    run's inference step exits 0 without writing a new result PLY, the stale one must
+    already be gone rather than getting silently georeferenced again."""
+    las = tmp_path / f"{STEM}.las"
+    out = fake_repo / "work_dirs" / "o"
+    steps = plan_run(las, DEFAULT_CHECKPOINT, out, repo=fake_repo)
+    prepare_inputs = next(s for s in steps if s.name == "prepare_inputs")
+
+    stale_result = out / f"{STEM}.ply"
+    stale_result.parent.mkdir(parents=True)
+    stale_result.write_bytes(b"stale result from a previous run")
+
+    prepare_inputs.func()
+
+    assert not stale_result.exists()
 
 
 def test_check_preprocess_passes_when_every_artefact_is_there(tmp_path, monkeypatch, capsys):
@@ -286,8 +358,6 @@ def _write_fake_result_ply(input_ply, offsets_npy, result_ply):
 
 
 def test_run_executes_the_docker_steps_and_then_the_host_steps(tmp_path, monkeypatch, capsys):
-    pytest.importorskip("shapely")
-    pytest.importorskip("geopandas")
     repo = tmp_path / "repo"
     repo.mkdir()
     las = write_two_cone_las(tmp_path / f"{STEM}.las")
@@ -334,8 +404,6 @@ def test_run_executes_the_docker_steps_and_then_the_host_steps(tmp_path, monkeyp
 
 
 def test_georef_subcommand_writes_las_and_optional_gpkg(tmp_path):
-    pytest.importorskip("shapely")
-    pytest.importorskip("geopandas")
     from ff3d_geo.convert import las_to_ply
 
     las = write_two_cone_las(tmp_path / f"{STEM}.las")

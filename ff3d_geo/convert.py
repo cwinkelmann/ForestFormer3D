@@ -12,17 +12,6 @@ from plyfile import PlyData, PlyElement
 
 from ff3d_geo.origin import parse_origin
 
-# Vertex layout for a *labeled* ForestFormer3D PLY (results_to_las output, Task 3):
-# what data/ForAINetV2/load_forainetv2_data.py's export() reads when semantic_seg
-# and treeID are both present (its ``has_labels`` branch).
-PLY_VERTEX_DTYPE = [
-    ("x", "f8"),
-    ("y", "f8"),
-    ("z", "f8"),
-    ("semantic_seg", "i4"),
-    ("treeID", "i4"),
-]
-
 # Vertex layout for the *unlabeled* input PLY that las_to_ply writes: x, y, z only.
 # load_forainetv2_data.py's export() finds no semantic_seg/treeID fields and, run
 # with --unlabeled, takes its constant-label path (semantic 0 = ground, instance -1)
