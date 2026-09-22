@@ -159,7 +159,7 @@ def select_run_dir(work_dir):
     beside the interrupted run it continues. Concatenating them all silently mixes two
     different runs' curves, so this takes the NEWEST COMPLETE one -- newest by directory name,
     which is mmengine's own sortable YYYYMMDD_HHMMSS timestamp; "complete" = its scalars.json
-    holds at least one parseable record -- and names the rest in a warning on stderr.
+    is non-empty (records are parsed later by parse_scalars) -- and names the rest in a warning on stderr.
 
     Caveat, deliberately not papered over: for a --resume continuation the earlier run dir's
     epochs are NOT merged in, so the curve starts where the resumed run started. The warning

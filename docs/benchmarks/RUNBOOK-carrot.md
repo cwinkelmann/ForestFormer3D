@@ -202,10 +202,10 @@ Every marker sits inside the output dir of the stage it guards (all paths relati
 | release: fixed `final_eval.py` | `work_dirs/bench-release-fixed/.done-eval` |
 | release: old `final_eval.py` | `work_dirs/bench-release-old/.done-eval` |
 | 200-epoch: training | `work_dirs/bench-<variant>-200/.done-train` |
-| 200-epoch: checkpoint prep | `work_dirs/bench-<variant>-200/epoch_200.layout` |
+| 200-epoch: checkpoint prep | `work_dirs/bench-<variant>-200/epoch_<FF3D_EPOCHS>.layout` (default 200) |
 | 200-epoch: `test.py` | `work_dirs/bench-<variant>-200/test/.done-test` |
 | 200-epoch: `final_eval.py` | `work_dirs/bench-<variant>-200/test/.done-eval` |
-| Zenodo unpack | `<data dir>/.unpacked-<md5>` |
+| Zenodo unpack | `work_dirs/.zenodo/<key>.unpacked-<md5>` |
 
 Historical note: runs made before this change wrote the release markers into a third
 directory, `work_dirs/bench-release/.done-{fixed,old,eval-fixed,eval-old}`. Nothing reads
