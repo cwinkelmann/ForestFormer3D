@@ -5,6 +5,10 @@ Runs only inside the Docker image: `docker/smoke.sh` or, in the container,
 
 Phase 1 changed two things here: loss() lost its `epoch` kwarg, and predict()
 selects full-plot tiling with test_cfg.full_plot instead of 'test' in lidar_path.
+
+The synthetic plot's footprint (~5 m) is kept well inside a single cylinder's inner
+band (radius 16 m minus the 0.5 m edge filter) so no untrained mask ever touches the
+edge, while the 4 m tiling step still produces a 2x2 tile lattice.
 """
 from pathlib import Path
 
@@ -22,7 +26,12 @@ LIDAR_PATH = "data/ForAINetV2/plots/smoke_plot.ply"
 
 
 def make_synthetic_plot(n_points=N_POINTS, seed=0):
-    """A flat ground disc (radius 10 m) with two fake trees.
+    """A flat ground disc (radius 2.5 m) with two fake trees.
+
+    x/y is scaled by 0.25 relative to the "natural" 10 m-radius layout (ground disc
+    radius 2.5 m, trees at (-1, -1) and (1, 1), stem/crown x/y jitter scaled too; z is
+    untouched) so the whole plot's footprint stays inside the 15.5 m inner band of
+    every tile and no untrained mask ever gets discarded by the edge filter.
 
     Returns points float32[N,3]; semantic int64[N] (0 ground, 1 wood, 2 leaf);
     instance int64[N] (-1 ground, 0 and 1 for the trees).
@@ -52,6 +61,7 @@ def make_synthetic_plot(n_points=N_POINTS, seed=0):
         ins += [np.full(n_stem, inst_id, dtype=np.int64), np.full(n_crown, inst_id, dtype=np.int64)]
 
     points = np.concatenate(pts).astype(np.float32)
+    points[:, :2] *= 0.25  # shrink x/y only, so the footprint clears the edge band
     semantic = np.concatenate(sem)
     instance = np.concatenate(ins)
     assert points.shape == (n_points, 3)
@@ -142,7 +152,10 @@ def test_predict_writes_nonempty_instance_map(model, plot, tmp_path):
     model.eval()
     model.test_cfg["output_dir"] = str(tmp_path)  # what tools/test.py does with --work-dir
     model.test_cfg["full_plot"] = True            # tiled whole-plot inference
-    model.test_cfg["score_th"] = 0.0              # untrained objectness is ~0.25 < config 0.4
+    # untrained scores are negative raw logits; both thresholds must let them through
+    # so this gate tests plumbing, not quality
+    model.test_cfg["inst_score_thr"] = -1e6
+    model.test_cfg["score_th"] = -1e6
 
     inputs = dict(points=[torch.from_numpy(points).cuda()])
     samples = [make_sample(semantic, instance)]

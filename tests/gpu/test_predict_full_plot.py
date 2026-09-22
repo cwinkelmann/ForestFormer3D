@@ -22,7 +22,10 @@ def build_model(output_dir, **test_cfg_overrides):
     init_default_scope('mmdet3d')
     cfg = Config.fromfile(CONFIG)
     cfg.model.test_cfg.output_dir = str(output_dir)
-    cfg.model.test_cfg.score_th = 0.0    # untrained objectness is well below the config's 0.4
+    # untrained scores are negative raw logits; both thresholds must let them through
+    # so this gate tests plumbing, not quality
+    cfg.model.test_cfg.inst_score_thr = -1e6
+    cfg.model.test_cfg.score_th = -1e6
     for k, v in test_cfg_overrides.items():
         cfg.model.test_cfg[k] = v
     torch.manual_seed(0)
@@ -38,6 +41,11 @@ def build_model(output_dir, **test_cfg_overrides):
 
 
 def synthetic_plot(n_ground=6000, n_trees=4, pts_per_tree=1500, seed=0):
+    """4 trees on a ground plane; x/y scaled by 0.25 so the whole footprint stays
+    inside the 15.5 m inner band of every tile (radius 16 m minus the 0.5 m edge
+    filter) and no untrained mask ever gets discarded by the edge filter, while the
+    4 m tiling step still produces a multi-tile lattice.
+    """
     g = torch.Generator().manual_seed(seed)
     pts = [torch.rand((n_ground, 3), generator=g) * torch.tensor([30.0, 30.0, 0.3])]
     sem = [torch.zeros(n_ground, dtype=torch.int64)]
@@ -47,7 +55,9 @@ def synthetic_plot(n_ground=6000, n_trees=4, pts_per_tree=1500, seed=0):
         pts.append(torch.rand((pts_per_tree, 3), generator=g) * torch.tensor([2.0, 2.0, 10.0]) + centre)
         sem.append(torch.ones(pts_per_tree, dtype=torch.int64))
         inst.append(torch.full((pts_per_tree,), t + 1, dtype=torch.int64))
-    return torch.cat(pts).float(), torch.cat(sem).numpy(), torch.cat(inst).numpy()
+    points = torch.cat(pts).float()
+    points[:, :2] *= 0.25  # shrink x/y only, so the footprint clears the edge band
+    return points, torch.cat(sem).numpy(), torch.cat(inst).numpy()
 
 
 def make_sample(tmp_path, with_gt):
