@@ -168,6 +168,39 @@ def test_done_fixed_marker_skips_fixed_stage_only(tmp_path):
     assert len(eval_lines) == 2, out
 
 
+def test_dry_run_never_writes_markers(tmp_path):
+    """A dry run must never create work_dirs/bench-release/.done-* markers: nothing was
+    actually verified (the docker calls were only printed), so a marker left behind by a
+    dry run would make a SUBSEQUENT REAL run silently skip every stage. Also: a second dry
+    run on the same (still marker-less) layout must print every stage again, not skip any."""
+    root = _make_root(tmp_path)
+    old = _make_old(tmp_path)
+    bench_dir = root / "work_dirs" / "bench-release"
+
+    r1 = _run(root, old)
+    assert r1.returncode == 0, r1.stdout
+    assert not bench_dir.exists() or list(bench_dir.glob(".done-*")) == []
+
+    r2 = _run(root, old)
+    out2 = r2.stdout
+    assert r2.returncode == 0, out2
+    assert not bench_dir.exists() or list(bench_dir.glob(".done-*")) == []
+    assert "already done" not in out2
+
+    fixed_test_lines = [
+        l for l in out2.splitlines()
+        if "tools/test.py" in l and "epoch_3000_converted.pth" in l
+    ]
+    old_test_lines = [
+        l for l in out2.splitlines()
+        if "tools/test.py" in l and "epoch_3000_raw.pth" in l
+    ]
+    eval_lines = [l for l in out2.splitlines() if "tools/final_eval.py" in l]
+    assert len(fixed_test_lines) == 1, out2
+    assert len(old_test_lines) == 1, out2
+    assert len(eval_lines) == 2, out2
+
+
 def test_foreground_default_daemonizes(tmp_path):
     """Without FF3D_FOREGROUND=1, the script forks under nohup and returns immediately,
     printing the log path (mirrors the manual check in the task brief)."""
