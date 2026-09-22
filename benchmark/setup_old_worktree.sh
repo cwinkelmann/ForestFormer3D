@@ -21,6 +21,10 @@
 # The old README also asked to run fix_spconv_checkpoint.py before test.py; the benchmark
 # instead feeds the old test.py the RAW layout (it permutes weights in memory) -- see
 # ff3d_prepare_checkpoint in common.sh / run_release_eval.sh.
+#
+# One line of the old code's own tools/test.py IS edited (see below): it calls torch.load()/
+# torch.save() but never imports torch, which fails on the real GPU host. This is the only
+# source change this script makes to a file 6a75c37 itself committed.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -82,3 +86,23 @@ else
 fi
 ff3d_log "NOTE: this file is untracked in the old worktree's git status (6a75c37 predates"
 ff3d_log "docker/ entirely) -- that is expected, not a sign of a dirty/corrupt worktree."
+
+# The committed 6a75c37 tools/test.py calls torch.load()/torch.save() (lines ~123/139) but
+# never imports torch itself -- confirmed on the real GPU host, this dies with
+# "NameError: name 'torch' is not defined" during release-eval inference. This is the ONE
+# source edit this script makes to the old code's own committed files (everything else --
+# transforms_3d.py, loops.py, base_model.py, docker/entrypoint.sh -- is applied via separate
+# files/copies, never by editing what 6a75c37 committed). Idempotent: only inserted if
+# missing; uses awk (not sed -i, whose in-place syntax differs between GNU and BSD sed) so it
+# behaves the same on the Mac and on the GPU host.
+old_test_py="$FF3D_OLD_ROOT/tools/test.py"
+if grep -qx 'import torch' "$old_test_py"; then
+  ff3d_log "old tools/test.py already has 'import torch' -- nothing to do"
+else
+  awk '{ print } !done && /^import argparse$/ { print "import torch"; done=1 }' \
+    "$old_test_py" > "$old_test_py.tmp"
+  mv "$old_test_py.tmp" "$old_test_py"
+  grep -qx 'import torch' "$old_test_py" \
+    || ff3d_die "failed to insert 'import torch' into $old_test_py (no 'import argparse' line?)"
+  ff3d_log "inserted 'import torch' into old tools/test.py, right after 'import argparse'"
+fi

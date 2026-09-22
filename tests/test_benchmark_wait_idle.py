@@ -222,12 +222,25 @@ def test_setup_old_worktree_idempotent_and_copies_entrypoint(tmp_path):
         assert old_entrypoint.is_file()
         assert os.access(old_entrypoint, os.X_OK)
 
-        # second run: no-op / idempotent, and the entrypoint copy is still there afterwards.
+        # tools/test.py at 6a75c37 calls torch.load()/torch.save() but never imports torch
+        # (a real bug found on the GPU host: NameError at run time). The throwaway clone at
+        # 6a75c37 lacks the import before setup runs; the script must insert it, once, right
+        # after 'import argparse', without disturbing the rest of the file.
+        old_test_py = old / "tools" / "test.py"
+        test_py_text = old_test_py.read_text()
+        lines = test_py_text.splitlines()
+        assert lines.count("import torch") == 1
+        assert lines[lines.index("import argparse") + 1] == "import torch"
+
+        # second run: no-op / idempotent, and the entrypoint copy + import are still there.
         r2 = subprocess.run([BASH, str(SETUP_OLD)], capture_output=True, text=True, env=env)
         assert r2.returncode == 0, r2.stdout + r2.stderr
         assert "worktree exists" in (r2.stdout + r2.stderr)
+        assert "already has 'import torch'" in (r2.stdout + r2.stderr)
         assert old_entrypoint.is_file()
         assert os.access(old_entrypoint, os.X_OK)
+        assert old_test_py.read_text().splitlines().count("import torch") == 1
+        assert old_test_py.read_text() == test_py_text  # byte-for-byte unchanged, not re-touched
 
         wt_list = subprocess.run(
             ["git", "-C", str(clone), "worktree", "list"], capture_output=True, text=True
