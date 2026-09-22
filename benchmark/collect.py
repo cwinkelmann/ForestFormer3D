@@ -59,7 +59,7 @@ FINAL_EVAL_LABELS = {
 }
 RELEASE_COLUMNS = ['F1', 'mPrecision', 'mRecall', 'mPQ', 'mIoU', 'mIoU_binary', 'mMUCov', 'mMWCov']
 LOG_TRAIN_RE = re.compile(
-    r'^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) - mmengine - INFO - Epoch\(train\)\s*\[(\d+)\]\[(\d+)/(\d+)\]')
+    r'^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) - mmengine - INFO - Epoch\(train\)\s*\[(\d+)\]\[\s*(\d+)/(\d+)\]')
 TS_FMT = '%Y/%m/%d %H:%M:%S'
 
 
@@ -156,7 +156,7 @@ def summarize_training(work_dir):
     train, val = parse_scalars(scalars)
     losses = loss_per_epoch(train)
     curve = val_curve(val)
-    nan_epochs = sorted(e for e, l in losses.items() if math.isnan(l))
+    nonfinite_epochs = sorted(e for e, l in losses.items() if not math.isfinite(l))
     have_f1 = sorted((e, m['F1']) for e, m in curve.items() if 'F1' in m)
     best = max(have_f1, key=lambda t: t[1]) if have_f1 else None
     last = have_f1[-1] if have_f1 else None
@@ -164,7 +164,7 @@ def summarize_training(work_dir):
     return {
         'epochs_done': max(losses) if losses else 0,
         'final_loss': losses[max(losses)] if losses else None,
-        'nan_epochs': nan_epochs,
+        'nonfinite_epochs': nonfinite_epochs,
         'losses': losses,
         'val': curve,
         'best_val': best,
@@ -175,7 +175,7 @@ def summarize_training(work_dir):
 
 
 def _f(x, nd=4):
-    if x is None or (isinstance(x, float) and math.isnan(x)):
+    if x is None or (isinstance(x, float) and not math.isfinite(x)):
         return 'n/a'
     return f'{x:.{nd}f}'
 
@@ -198,7 +198,7 @@ def render(date, release, training, epochs_target=200):
         cells = [_f(m.get(c)) if m else 'n/a' for c in RELEASE_COLUMNS]
         lines.append(f'| {variant} | ' + ' | '.join(cells) + ' |')
     lines += ['', '## Table 2: 200-epoch training, old vs fixed', '',
-              '| variant | epochs | sec/epoch | final train loss | best val F1 (epoch) | last val F1 (epoch) | test F1 (epoch_200) | test mIoU | NaN epochs |',
+              '| variant | epochs | sec/epoch | final train loss | best val F1 (epoch) | last val F1 (epoch) | test F1 (epoch_200) | test mIoU | non-finite loss epochs |',
               '|---|---|---|---|---|---|---|---|---|']
     for variant in ('old', 'fixed'):
         s = training.get(variant)
@@ -209,9 +209,9 @@ def render(date, release, training, epochs_target=200):
         last = f"{_f(s['last_val'][1])} ({s['last_val'][0]})" if s['last_val'] else 'n/a'
         test_f1 = _f(s['test'].get('F1')) if s['test'] else 'n/a'
         test_miou = _f(s['test'].get('mIoU')) if s['test'] else 'n/a'
-        nan = ', '.join(map(str, s['nan_epochs'])) if s['nan_epochs'] else 'none'
+        nonfinite = ', '.join(map(str, s['nonfinite_epochs'])) if s['nonfinite_epochs'] else 'none'
         lines.append(f"| {variant} | {s['epochs_done']} | {_f(s['wallclock']['sec_per_epoch'], 1)} | "
-                     f"{_f(s['final_loss'])} | {best} | {last} | {test_f1} | {test_miou} | {nan} |")
+                     f"{_f(s['final_loss'])} | {best} | {last} | {test_f1} | {test_miou} | {nonfinite} |")
     epochs = sorted({e for s in training.values() if s for e in s['val']})
     if epochs:
         lines += ['', '### Validation curve (val split, every val_interval epochs)', '',
@@ -241,16 +241,16 @@ def render(date, release, training, epochs_target=200):
         lines.append('- Released checkpoint: PENDING (missing evaluation_total_test.txt for old and/or fixed release run)')
     s = training.get('fixed')
     if s:
-        ok = s['epochs_done'] >= epochs_target and not s['nan_epochs'] and len(s['val']) > 0
+        ok = s['epochs_done'] >= epochs_target and not s['nonfinite_epochs'] and len(s['val']) > 0
         lines.append(f"- Fixed 200-epoch run: {s['epochs_done']}/{epochs_target} epochs, "
-                     f"{'no NaN loss' if not s['nan_epochs'] else 'NaN at epochs ' + str(s['nan_epochs'])}, "
+                     f"{'no non-finite loss' if not s['nonfinite_epochs'] else 'non-finite loss at epochs ' + str(s['nonfinite_epochs'])}, "
                      f"{len(s['val'])} val points: {'PASS' if ok else 'FAIL'}")
     else:
         lines.append('- Fixed 200-epoch run: PENDING (no scalars.json found under bench-fixed-200)')
     s = training.get('old')
     if s:
         lines.append(f"- Old 200-epoch run (informational): {s['epochs_done']}/{epochs_target} epochs"
-                     + (', NaN at epochs ' + str(s['nan_epochs']) if s['nan_epochs'] else ''))
+                     + (', non-finite loss at epochs ' + str(s['nonfinite_epochs']) if s['nonfinite_epochs'] else ''))
     else:
         lines.append('- Old 200-epoch run (informational): PENDING (no scalars.json found under bench-old-200)')
     lines.append('')

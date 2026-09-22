@@ -71,7 +71,7 @@ def write_final_eval(d: Path, f1: float, miou: float = 0.81, oacc: float = 0.9, 
 
 
 def write_training(work: Path, epochs: int, loss0: float, f1s: dict, nan_at: int | None = None,
-                   ts0="2026/09/23 00:00:00", sec_per_epoch=60):
+                   inf_at: int | None = None, ts0="2026/09/23 00:00:00", sec_per_epoch=60):
     """23 iterations per epoch, one train record per epoch (mmengine logs at end of epoch
     when len(dataloader) <= logger interval), val record every 20 epochs with step=epoch."""
     import datetime as dt
@@ -81,7 +81,12 @@ def write_training(work: Path, epochs: int, loss0: float, f1s: dict, nan_at: int
     t0 = dt.datetime.strptime(ts0, "%Y/%m/%d %H:%M:%S")
     scalars, log = [], []
     for e in range(1, epochs + 1):
-        loss = float("nan") if nan_at == e else loss0 / e
+        if nan_at == e:
+            loss = float("nan")
+        elif inf_at == e:
+            loss = float("inf")
+        else:
+            loss = loss0 / e
         scalars.append({"lr": 1e-4, "data_time": 0.05, "loss": loss, "time": 2.5, "epoch": e,
                         "memory": 20000, "step": 23 * e})
         t = t0 + dt.timedelta(seconds=sec_per_epoch * e)
@@ -162,6 +167,15 @@ def test_val_record_tolerates_missing_metric_keys(tmp_path):
 
 def test_wallclock_from_log(root):
     logs = sorted((root / "work_dirs/bench-old-200").glob("*/*.log"))
+    log_path = logs[0]
+    # mmengine left-pads the iteration counter to align digit widths, e.g. "[ 5/23]"; rewrite
+    # the first log line to use that padded form so LOG_TRAIN_RE is proven tolerant of it. The
+    # padding only touches the iteration fraction (unused by parse_log_wallclock), not the
+    # epoch number or timestamp, so the expected results are unchanged.
+    text = log_path.read_text()
+    first_line, rest = text.split("\n", 1)
+    assert "[23/23]" in first_line
+    log_path.write_text(first_line.replace("[23/23]", "[ 5/23]") + "\n" + rest)
     w = collect.parse_log_wallclock(logs)
     assert w["first_epoch"] == 1 and w["last_epoch"] == 200
     assert w["wall_s"] == pytest.approx(199 * 60)
@@ -171,9 +185,18 @@ def test_wallclock_from_log(root):
 def test_summarize_training_detects_nan(tmp_path):
     write_training(tmp_path / "w", 30, 5.0, {20: 0.2}, nan_at=25)
     s = collect.summarize_training(tmp_path / "w")
-    assert s["nan_epochs"] == [25]
+    assert s["nonfinite_epochs"] == [25]
     assert s["epochs_done"] == 30
     assert s["best_val"] == (20, pytest.approx(0.2))
+
+
+def test_summarize_training_detects_infinite_loss(tmp_path):
+    """A loss diverging to +/-inf round-trips through JSON as Infinity/-Infinity and must be
+    flagged just like NaN — math.isnan() alone would miss it and report PASS."""
+    write_training(tmp_path / "w", 10, 5.0, {}, inf_at=6)
+    s = collect.summarize_training(tmp_path / "w")
+    assert s["nonfinite_epochs"] == [6]
+    assert s["epochs_done"] == 10
 
 
 def test_summarize_training_no_val_points_does_not_crash(tmp_path):
@@ -194,8 +217,26 @@ def test_main_writes_report_with_pass_fail(root, capsys):
     assert "| fixed | 0.8200 |" in text and "| old | 0.8000 |" in text
     assert "| fixed | 200 | 60.0 |" in text
     assert "Released checkpoint: fixed F1 0.8200 >= old F1 0.8000: PASS" in text
-    assert "Fixed 200-epoch run: 200/200 epochs, no NaN loss, 3 val points: PASS" in text
+    assert "Fixed 200-epoch run: 200/200 epochs, no non-finite loss, 3 val points: PASS" in text
     assert "| 20 | 0.3000 | 0.3500 |" in text
+
+
+def test_main_infinite_loss_fails_criteria(tmp_path):
+    """An Infinity loss in the fixed 200-epoch run must flip the success criterion to FAIL,
+    not be silently treated as finite (the original bug: math.isnan(inf) is False)."""
+    wd = tmp_path / "work_dirs"
+    write_final_eval(wd / "bench-release-fixed", f1=0.82)
+    write_final_eval(wd / "bench-release-old", f1=0.80)
+    write_training(wd / "bench-old-200", 200, 10.0, {20: 0.30, 40: 0.40, 200: 0.55})
+    write_training(wd / "bench-fixed-200", 200, 9.0, {20: 0.35, 40: 0.45, 200: 0.60}, inf_at=100)
+    write_final_eval(wd / "bench-old-200" / "test", f1=0.50)
+    write_final_eval(wd / "bench-fixed-200" / "test", f1=0.58)
+    out = tmp_path / "docs/benchmarks/2026-09-25-carrot-ff3d.md"
+    rc = collect.main(["--root", str(tmp_path), "--date", "2026-09-25", "--out", str(out)])
+    assert rc == 0
+    text = out.read_text()
+    assert "non-finite loss at epochs [100]" in text
+    assert "Fixed 200-epoch run: 200/200 epochs, non-finite loss at epochs [100], 3 val points: FAIL" in text
 
 
 def test_main_explicit_dir_args_override_root(root):
