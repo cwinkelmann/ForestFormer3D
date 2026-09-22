@@ -17,6 +17,8 @@ FF3D_OLD_COMMIT="${FF3D_OLD_COMMIT:-6a75c37}"
 # FF3D_OLD_ROOT is therefore a sibling directory of the checkout, independently
 # overridable (it does not derive from FF3D_ROOT).
 FF3D_OLD_ROOT="${FF3D_OLD_ROOT:-/raid/cwinkelmann/ff3d-old-main}"
+FF3D_OLD="$FF3D_OLD_ROOT"                     # alias: Tasks 3-5 scripts refer to FF3D_OLD
+export FF3D_OLD FF3D_OLD_ROOT
 FF3D_CONFIG="configs/oneformer3d_qs_radius16_qp300_2many.py"
 FF3D_DATA="${FF3D_ROOT}/data/ForAINetV2"
 FF3D_CKPT_DIR="${FF3D_ROOT}/work_dirs/clean_forestformer"
@@ -63,8 +65,18 @@ ff3d_docker() {
 # The image entrypoint copies /workspace/replace_mmdetection_files/transforms_3d.py into
 # mmdet3d; because /workspace IS the old worktree here, the old code's own transforms_3d.py
 # is applied automatically.
+# The bind mount onto /workspace also SHADOWS the image's baked
+# `ENTRYPOINT /workspace/docker/entrypoint.sh`: commit $FF3D_OLD_COMMIT predates that
+# entrypoint script, so it has no docker/ dir of its own and the container would fail to
+# exec. benchmark/setup_old_worktree.sh (Task 3) copies $FF3D_ROOT/docker/entrypoint.sh
+# into $FF3D_OLD_ROOT/docker/entrypoint.sh to restore it under the mount; assert that here
+# before every run.
 ff3d_docker_old() {
-  [ -f "$FF3D_OLD_ROOT/tools/test.py" ] || ff3d_die "old worktree missing: run benchmark/setup_old_worktree.sh"
+  if [ "${FF3D_DRY_RUN:-0}" != "1" ]; then
+    [ -f "$FF3D_OLD_ROOT/tools/test.py" ] || ff3d_die "old worktree missing: run benchmark/setup_old_worktree.sh"
+    [ -x "$FF3D_OLD_ROOT/docker/entrypoint.sh" ] \
+      || ff3d_die "old worktree lacks docker/entrypoint.sh -- run benchmark/setup_old_worktree.sh"
+  fi
   ff3d_run $FF3D_DOCKER run --rm --gpus "device=${FF3D_GPU}" --shm-size="$FF3D_SHM" \
     -e PYTHONPATH=/workspace -w /workspace \
     -v "$FF3D_OLD_ROOT":/workspace \
