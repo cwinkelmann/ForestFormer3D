@@ -66,7 +66,11 @@ while IFS= read -r scan_name || [[ -n "${scan_name:-}" ]]; do
         write_list "$current_scan_name" "$TEST_LIST"
 
         ( cd "$DATA_ROOT" && run python batch_load_ForAINetV2_data.py --test_scan_names_file "$TEST_LIST" )
-        ( cd "$WORK_DIR" && run python tools/create_data_forainetv2.py forainetv2 )
+        # --test-list/--splits: build the info pkl from the private TEST_LIST only,
+        # so neither the tracked meta_data/test_list.txt nor the train/val pkls are
+        # involved (create_data would otherwise read meta_data/test_list.txt).
+        ( cd "$WORK_DIR" && run python tools/create_data_forainetv2.py forainetv2 \
+            --test-list "$TEST_LIST" --splits test )
         ( cd "$WORK_DIR" && CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" run python tools/test.py "$CONFIG_FILE" "$MODEL_PATH" \
             --work-dir "$BLUEPOINTS_DIR" \
             --cfg-options "model.test_cfg.score_th=$SCORE_TH" "model.test_cfg.output_dir=$BLUEPOINTS_DIR" )

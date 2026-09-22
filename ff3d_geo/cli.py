@@ -14,10 +14,22 @@ helper, which bind-mounts ``$FF3D_ROOT`` at ``/workspace``. The CLI therefore
   must live under the repo so the container can see them.
 
 The tracked ``data/ForAINetV2/meta_data/test_list.txt`` is never read or written
-(ruling G2): a private one-line scan list is written to ``<out>/scan_list.txt``
-instead and passed with ``--test_scan_names_file``. ``<out>/empty_list.txt`` is passed
-as the train/val list so ``batch_load_ForAINetV2_data.py`` does not re-export the 61
-training plots.
+(ruling G2, ruling R-P3-9): a private one-line scan list is written to
+``<out>/scan_list.txt`` and passed BOTH to ``batch_load_ForAINetV2_data.py``
+(``--test_scan_names_file``) and to ``tools/create_data_forainetv2.py``
+(``--test-list``, with ``--splits test``), so the info pkl really lists this tile.
+``<out>/empty_list.txt`` is passed as the train/val list so ``batch_load`` does not
+re-export the 61 training plots.
+
+The pkl itself is written to ``<out>`` (``--out-dir``) rather than into
+``data/ForAINetV2``, so the benchmark's ``forainetv2_oneformer3d_infos_{train,val,test}
+.pkl`` are left byte-identical while the Phase 2 test stages are still pending;
+``tools/test.py`` is pointed at it with
+``--cfg-options test_dataloader.dataset.ann_file=/workspace/<out>/...pkl``. An absolute
+``ann_file`` survives the dataset's ``data_root`` join either way: mmengine's
+``BaseDataset._join_prefix`` only joins when the path is relative, and even a plain
+``os.path.join('data/ForAINetV2/', '/workspace/...')`` returns the absolute path
+unchanged.
 
 ``--dry-run`` prints the plan -- the exact command lines, including the ``bash -c``
 scripts -- and touches nothing at all.
@@ -43,7 +55,7 @@ from ff3d_geo.trees import trees_to_gpkg
 DEFAULT_CONFIG = "configs/oneformer3d_qs_radius16_qp300_2many.py"
 DEFAULT_CHECKPOINT = "work_dirs/clean_forestformer/epoch_3000_fix.pth"
 DEFAULT_EPSG = 25833
-DEFAULT_GPU = 5
+DEFAULT_GPU = "0"  # benchmark/common.sh's own default for FF3D_GPU
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTAINER_ROOT = PurePosixPath("/workspace")
 
@@ -52,7 +64,7 @@ CONTAINER_ROOT = PurePosixPath("/workspace")
 # the round trip through batch_load/create_data. _100m is fine; _07 is not.
 _UNSAFE_STEM = re.compile(r"_\d+$")
 # Paths embedded verbatim in the bash -c scripts must not need shell quoting.
-_SHELL_SAFE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
+_SHELL_SAFE = re.compile(r"^[A-Za-z0-9_@%+=:,./][A-Za-z0-9_@%+=:,./-]*$")
 
 
 @dataclass
@@ -114,7 +126,7 @@ def _container_path(path: Path, repo: Path, what: str) -> str:
     return _shell_literal((CONTAINER_ROOT / rel).as_posix())
 
 
-def _docker_step(name: str, inner: str, repo: Path, gpu: int) -> Step:
+def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
     """A step that sources benchmark/common.sh and runs ``inner`` via ``ff3d_docker``."""
     return Step(
         name=name,
@@ -132,7 +144,7 @@ def plan_run(
     epsg: int = DEFAULT_EPSG,
     config=DEFAULT_CONFIG,
     repo=REPO_ROOT,
-    gpu: int = DEFAULT_GPU,
+    gpu=DEFAULT_GPU,
     timings: dict[str, float] | None = None,
 ) -> list[Step]:
     """Build the ordered step list for ``run`` without executing or writing anything.
@@ -166,6 +178,8 @@ def plan_run(
     sidecar = out / f"{stem}.sidecar.json"
     result_ply = out / f"{stem}.ply"
     offsets_npy = instance_dir / f"{stem}_offsets.npy"
+    vert_npy = instance_dir / f"{stem}_vert.npy"
+    info_pkl = out / "forainetv2_oneformer3d_infos_test.pkl"
     out_las = out / f"{stem}.las"
     gpkg = out / f"{stem}_trees.gpkg"
     report_json = out / f"{stem}_report.json"
@@ -185,6 +199,22 @@ def plan_run(
         if instance_dir.is_dir():
             for stale in instance_dir.glob(f"{stem}_*.npy"):
                 stale.unlink()
+
+    def check_preprocess() -> None:
+        # batch_load reports a failed export on stderr but create_data only PRINTS
+        # "no test scans with preprocessed data, skipping ..." and writes nothing, so
+        # without these checks a preprocessing miss would only surface hours later,
+        # after the GPU step, as a missing result PLY.
+        for path in (vert_npy, offsets_npy, info_pkl):
+            if not path.is_file():
+                raise RuntimeError(
+                    f"preprocessing did not produce {path}; see the container output above"
+                )
+        if info_pkl.stat().st_mtime < scan_list.stat().st_mtime:
+            raise RuntimeError(
+                f"{info_pkl} is older than {scan_list}: create_data skipped this tile and "
+                "a stale pkl would be used; see the container output above"
+            )
 
     def georeference() -> None:
         results_to_las(result_ply, sidecar, offsets_npy, out_las)
@@ -208,10 +238,15 @@ def plan_run(
         f" --train_scan_names_file {_container_path(empty_list, repo, 'empty list')}"
         f" --val_scan_names_file {_container_path(empty_list, repo, 'empty list')}"
         f" && cd {CONTAINER_ROOT} && python tools/create_data_forainetv2.py forainetv2"
+        f" --test-list {_container_path(scan_list, repo, 'scan list')}"
+        " --splits test"
+        f" --out-dir {_container_path(out, repo, '--out')}"
         '"'
     )
     inference_inner = (
         f"python tools/test.py {config_rel} {checkpoint_rel} --work-dir {out_rel}"
+        " --cfg-options test_dataloader.dataset.ann_file="
+        f"{_container_path(info_pkl, repo, 'info pkl')}"
     )
 
     return [
@@ -220,6 +255,8 @@ def plan_run(
         Step(name="prepare_inputs", func=prepare_inputs,
              name_detail=f"write {scan_list}, {empty_list}; rm {instance_dir}/{stem}_*.npy"),
         _docker_step("preprocess", preprocess_inner, repo, gpu),
+        Step(name="check_preprocess", func=check_preprocess,
+             name_detail=f"require {vert_npy}, {offsets_npy}, {info_pkl}"),
         _docker_step("inference", inference_inner, repo, gpu),
         Step(name="results_to_las", func=georeference,
              name_detail=f"{result_ply} + {offsets_npy} -> {out_las}"),
@@ -273,8 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--config", default=DEFAULT_CONFIG, help="repo-relative model config")
     run.add_argument("--repo", type=Path, default=REPO_ROOT,
                      help="checkout to mount at /workspace (default: %(default)s)")
-    run.add_argument("--gpu", type=int, default=DEFAULT_GPU,
-                     help="physical GPU for ff3d_docker (default: %(default)s)")
+    run.add_argument("--gpu", default=os.environ.get("FF3D_GPU", DEFAULT_GPU),
+                     help="physical GPU for ff3d_docker "
+                          "(default: $FF3D_GPU, else %(default)s)")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     _add_origin_args(run)
 

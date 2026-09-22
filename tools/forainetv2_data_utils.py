@@ -15,9 +15,14 @@ class ForAINetV2Data(object):
         root_path (str): Root path of the raw data.
         split (str, optional): Set split type of the data. Default: 'train'.
         save_path (str, optional): Output directory.
+        split_file (str, optional): Path of the file listing the scan names of
+            this split. Default: None, i.e. ``<root_path>/meta_data/
+            <split>_list.txt``. Pass an explicit path to run a split off a
+            private list without touching the tracked ones.
     """
 
-    def __init__(self, root_path, split='train', save_path=None):
+    def __init__(self, root_path, split='train', save_path=None,
+                 split_file=None):
         self.root_dir = root_path
         self.save_path = root_path if save_path is None else save_path
         self.split = split
@@ -37,8 +42,11 @@ class ForAINetV2Data(object):
             for i, treeid in enumerate(list(self.cat_ids))
         }
         assert split in ['train', 'val', 'test']
-        split_file = osp.join(self.root_dir, 'meta_data',
-                              f'{split}_list.txt')
+        if split_file is None:
+            split_file = osp.join(self.root_dir, 'meta_data',
+                                  f'{split}_list.txt')
+        else:
+            split_file = str(split_file)
         self.sample_id_list = []
         if osp.isfile(split_file):
             for sample_id in mmengine.list_from_file(split_file):

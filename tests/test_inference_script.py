@@ -41,7 +41,18 @@ def test_dry_run_echoes_commands_without_touching_files(tmp_path):
         assert 'meta_data' not in list_path, line
         assert list_path.startswith('/'), line
 
-    assert 'DRY: python tools/create_data_forainetv2.py forainetv2' in out
+    create_data_lines = [line for line in out.splitlines()
+                         if 'tools/create_data_forainetv2.py' in line]
+    assert create_data_lines, out
+    for line in create_data_lines:
+        # The pkl must be built from the same private list batch_load exported, not
+        # from the tracked meta_data/test_list.txt, and only for the test split.
+        assert line.startswith('DRY: python tools/create_data_forainetv2.py forainetv2 '
+                               '--test-list '), line
+        assert line.endswith(' --splits test'), line
+        list_path = line.split(' --test-list ', 1)[1].split(' --splits ', 1)[0]
+        assert 'meta_data' not in list_path, line
+        assert list_path.startswith('/'), line
     assert ('DRY: python tools/test.py' in out and '/ckpt/epoch_3000_fix.pth' in out
             and '--cfg-options model.test_cfg.score_th=0.35' in out
             and f'model.test_cfg.output_dir={work}/work_dirs/bluepoints' in out)

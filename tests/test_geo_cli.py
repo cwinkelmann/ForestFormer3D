@@ -10,6 +10,8 @@ executes nothing, so the fake repo only has to exist as a directory (no
 """
 
 import json
+import os
+import re
 import subprocess
 import sys
 
@@ -47,12 +49,13 @@ def fake_repo(tmp_path):
 def test_plan_run_builds_the_expected_host_and_docker_steps(fake_repo, tmp_path):
     las = tmp_path / f"{STEM}.las"
     out = fake_repo / "work_dirs" / "tegel-r12"
-    steps = plan_run(las, DEFAULT_CHECKPOINT, out, repo=fake_repo, gpu=5)
+    steps = plan_run(las, DEFAULT_CHECKPOINT, out, repo=fake_repo, gpu="5")
 
     assert [s.name for s in steps] == [
         "las_to_ply",
         "prepare_inputs",
         "preprocess",
+        "check_preprocess",
         "inference",
         "results_to_las",
         "trees_to_gpkg",
@@ -76,12 +79,17 @@ def test_plan_run_builds_the_expected_host_and_docker_steps(fake_repo, tmp_path)
         " --test_scan_names_file /workspace/work_dirs/tegel-r12/scan_list.txt"
         " --train_scan_names_file /workspace/work_dirs/tegel-r12/empty_list.txt"
         " --val_scan_names_file /workspace/work_dirs/tegel-r12/empty_list.txt"
-        ' && cd /workspace && python tools/create_data_forainetv2.py forainetv2"'
+        " && cd /workspace && python tools/create_data_forainetv2.py forainetv2"
+        " --test-list /workspace/work_dirs/tegel-r12/scan_list.txt"
+        " --splits test"
+        ' --out-dir /workspace/work_dirs/tegel-r12"'
     )
     assert inf.argv[:2] == ["bash", "-c"]
     assert inf.argv[2] == (
         "source benchmark/common.sh; ff3d_docker python tools/test.py "
         f"{DEFAULT_CONFIG} {DEFAULT_CHECKPOINT} --work-dir work_dirs/tegel-r12"
+        " --cfg-options test_dataloader.dataset.ann_file="
+        "/workspace/work_dirs/tegel-r12/forainetv2_oneformer3d_infos_test.pkl"
     )
 
 
@@ -96,7 +104,7 @@ def test_plan_run_uses_absolute_container_paths_under_workspace(fake_repo, tmp_p
 
 def test_plan_run_defaults_out_to_work_dirs_tegel_stem(fake_repo, tmp_path):
     steps = plan_run(tmp_path / f"{STEM}.las", DEFAULT_CHECKPOINT, None, repo=fake_repo)
-    assert f"--work-dir work_dirs/tegel-{STEM}" in steps[3].argv[2]
+    assert f"--work-dir work_dirs/tegel-{STEM}" in steps[4].argv[2]
 
 
 def test_plan_run_rejects_stems_ending_in_digits(fake_repo, tmp_path):
@@ -130,23 +138,36 @@ def test_run_dry_run_prints_every_command_and_touches_nothing(fake_repo, tmp_pat
                "--gpu", "5", "--dry-run"])
     assert rc == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 7
+    assert len(lines) == 8
     assert lines[0].startswith("# python: las_to_ply")
     assert lines[2].startswith(f"$ cd {fake_repo} && FF3D_ROOT={fake_repo} FF3D_GPU=5 bash -c ")
     assert "batch_load_ForAINetV2_data.py --unlabeled" in lines[2]
-    assert "tools/test.py" in lines[3] and "--work-dir work_dirs/tegel-r12" in lines[3]
+    assert "tools/test.py" in lines[4] and "--work-dir work_dirs/tegel-r12" in lines[4]
     # nothing written: no out dir, no PLY in the repo, no scan list
     assert not out.exists()
     assert list(fake_repo.iterdir()) == []
 
 
-def test_dry_run_never_touches_the_tracked_test_list(fake_repo, tmp_path):
-    """G2: the tracked meta_data/test_list.txt is never a step input or output."""
+def test_the_private_scan_list_reaches_both_batch_load_and_create_data(fake_repo, tmp_path):
+    """G2 + R-P3-9: the tracked meta_data/test_list.txt is never an input or output of
+    any step, and the private scan list reaches create_data (which would otherwise read
+    the tracked list and build a pkl that does not contain this tile)."""
     steps = plan_run(tmp_path / f"{STEM}.las", DEFAULT_CHECKPOINT,
                      fake_repo / "work_dirs/o", repo=fake_repo)
     rendered = "\n".join(s.render() for s in steps) + "\n".join(
         s.name_detail or "" for s in steps)
     assert "meta_data/test_list.txt" not in rendered
+    assert "meta_data" not in rendered
+
+    script = steps[2].argv[2]
+    scan_list = "/workspace/work_dirs/o/scan_list.txt"
+    assert f"--test_scan_names_file {scan_list}" in script
+    assert f"--test-list {scan_list} --splits test" in script
+    # the pkl is written into <out>, so the benchmark pkls in data/ForAINetV2 stay put
+    assert "--out-dir /workspace/work_dirs/o" in script
+    assert ("--cfg-options test_dataloader.dataset.ann_file="
+            "/workspace/work_dirs/o/forainetv2_oneformer3d_infos_test.pkl"
+            in steps[4].argv[2])
 
 
 def test_execute_reports_the_failing_step_by_name(fake_repo, tmp_path, monkeypatch, capsys):
@@ -157,6 +178,78 @@ def test_execute_reports_the_failing_step_by_name(fake_repo, tmp_path, monkeypat
     steps = [Step(name="inference", argv=["bash", "-c", "true"], cwd=fake_repo)]
     with pytest.raises(RuntimeError, match="step 'inference' failed with exit 3"):
         execute(steps, dry_run=False)
+
+
+def _run_with_fake_preprocess(tmp_path, monkeypatch, produce):
+    """Run the plan up to check_preprocess with the docker steps replaced by ``produce``."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    las = tmp_path / f"{STEM}.las"
+    out = repo / "work_dirs" / "o"
+    steps = plan_run(las, DEFAULT_CHECKPOINT, out, repo=repo)
+    inst = repo / "data/ForAINetV2/forainetv2_instance_data"
+
+    def fake_run(argv, **kwargs):
+        produce(inst, out)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # las_to_ply needs a real LAS; skip it and write the scan list ourselves.
+    out.mkdir(parents=True)
+    (out / "scan_list.txt").write_text(f"{STEM}\n")
+    execute([s for s in steps if s.name in ("preprocess", "check_preprocess")], dry_run=False)
+
+
+def test_check_preprocess_passes_when_every_artefact_is_there(tmp_path, monkeypatch, capsys):
+    def produce(inst, out):
+        inst.mkdir(parents=True, exist_ok=True)
+        np.save(inst / f"{STEM}_vert.npy", np.zeros((1, 3)))
+        np.save(inst / f"{STEM}_offsets.npy", np.zeros(3))
+        (out / "forainetv2_oneformer3d_infos_test.pkl").write_bytes(b"fake pkl")
+
+    _run_with_fake_preprocess(tmp_path, monkeypatch, produce)  # must not raise
+
+
+@pytest.mark.parametrize("omit", ["_vert.npy", "_offsets.npy", "pkl"])
+def test_check_preprocess_names_the_missing_artefact(tmp_path, monkeypatch, capsys, omit):
+    def produce(inst, out):
+        inst.mkdir(parents=True, exist_ok=True)
+        if omit != "_vert.npy":
+            np.save(inst / f"{STEM}_vert.npy", np.zeros((1, 3)))
+        if omit != "_offsets.npy":
+            np.save(inst / f"{STEM}_offsets.npy", np.zeros(3))
+        if omit != "pkl":
+            (out / "forainetv2_oneformer3d_infos_test.pkl").write_bytes(b"fake pkl")
+
+    expected = "forainetv2_oneformer3d_infos_test.pkl" if omit == "pkl" else f"{STEM}{omit}"
+    with pytest.raises(RuntimeError, match=re.escape(expected)):
+        _run_with_fake_preprocess(tmp_path, monkeypatch, produce)
+
+
+def test_check_preprocess_rejects_a_pkl_older_than_the_scan_list(tmp_path, monkeypatch):
+    def produce(inst, out):
+        inst.mkdir(parents=True, exist_ok=True)
+        np.save(inst / f"{STEM}_vert.npy", np.zeros((1, 3)))
+        np.save(inst / f"{STEM}_offsets.npy", np.zeros(3))
+        stale = out / "forainetv2_oneformer3d_infos_test.pkl"
+        stale.write_bytes(b"stale pkl")
+        os.utime(stale, (1_000_000, 1_000_000))  # older than the scan list
+
+    with pytest.raises(RuntimeError, match="is older than"):
+        _run_with_fake_preprocess(tmp_path, monkeypatch, produce)
+
+
+def test_gpu_defaults_to_the_ff3d_gpu_environment_variable(monkeypatch):
+    monkeypatch.delenv("FF3D_GPU", raising=False)
+    assert build_parser().parse_args(["run", "--las", "a.las"]).gpu == DEFAULT_GPU == "0"
+    monkeypatch.setenv("FF3D_GPU", "7")
+    assert build_parser().parse_args(["run", "--las", "a.las"]).gpu == "7"
+
+
+def test_shell_guard_rejects_an_option_looking_path(fake_repo, tmp_path):
+    with pytest.raises(ValueError, match="cannot be embedded"):
+        plan_run(tmp_path / f"{STEM}.las", DEFAULT_CHECKPOINT,
+                 fake_repo / "-x" / "out", repo=fake_repo)
 
 
 def test_convert_subcommand_writes_ply_sidecar_and_classification(tmp_path):
@@ -210,6 +303,7 @@ def test_run_executes_the_docker_steps_and_then_the_host_steps(tmp_path, monkeyp
             # batch_load + create_data: the centering offsets land next to the .npy exports
             offsets_npy.parent.mkdir(parents=True, exist_ok=True)
             np.save(offsets_npy.parent / f"{STEM}_vert.npy", np.zeros((1, 3)))
+            (out / "forainetv2_oneformer3d_infos_test.pkl").write_bytes(b"fake pkl")
             _write_fake_result_ply(input_ply, offsets_npy, out / f"{STEM}.ply")
         return subprocess.CompletedProcess(argv, 0)
 
@@ -232,6 +326,9 @@ def test_run_executes_the_docker_steps_and_then_the_host_steps(tmp_path, monkeyp
     assert (out / f"{STEM}_trees.gpkg").is_file()
     assert (out / f"{STEM}_report.json").is_file()
     assert (out / f"{STEM}_report.md").is_file()
+    # the benchmark pkls in data/ForAINetV2 are untouched; ours lives under <out>
+    assert (out / "forainetv2_oneformer3d_infos_test.pkl").is_file()
+    assert not (repo / "data/ForAINetV2/forainetv2_oneformer3d_infos_test.pkl").exists()
     report = json.loads((out / f"{STEM}_report.json").read_text())
     assert report["n_trees"] == 2
 
@@ -261,7 +358,7 @@ def test_parser_exposes_the_four_subcommands_and_defaults():
     args = parser.parse_args(["run", "--las", "a.las"])
     assert args.checkpoint == DEFAULT_CHECKPOINT
     assert args.config == DEFAULT_CONFIG
-    assert args.gpu == DEFAULT_GPU
+    assert args.gpu == os.environ.get("FF3D_GPU", DEFAULT_GPU)
     assert args.out is None and args.dry_run is False
 
 
