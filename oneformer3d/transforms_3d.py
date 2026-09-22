@@ -7,6 +7,10 @@ from mmdet3d.datasets.transforms import PointSample
 
 from mmdet3d.registry import TRANSFORMS
 
+# Single source of truth for the "ground / treeID 0 is not an instance" rule
+# and for renumbering instance ids; see oneformer3d/labels.py.
+from .labels import compact_instance_ids_with_ratio, normalize_instance_gt
+
 
 @TRANSFORMS.register_module()
 class ElasticTransfrom(BaseTransform):
@@ -276,21 +280,16 @@ class PointInstClassMapping_(BaseTransform):
         pts_instance_mask[pts_semantic_mask == self.num_classes] = -1
         pts_semantic_mask[pts_semantic_mask == self.num_classes] = -1
 
-        idxs = np.unique(pts_instance_mask)
-        mapping = np.zeros(np.max(idxs) + 2, dtype=int)
-        new_idxs = np.arange(len(idxs))
-        if idxs[0] == -1:
-            mapping[idxs] = new_idxs - 1
-            new_idxs = new_idxs[:-1]
-        else:
-            mapping[idxs] = new_idxs
-        pts_instance_mask = mapping[pts_instance_mask]
-
+        pts_instance_mask, ratio = compact_instance_ids_with_ratio(
+            pts_instance_mask, input_dict.get('ratio_inspoint', None))
         input_dict['pts_instance_mask'] = pts_instance_mask
         input_dict['pts_semantic_mask'] = pts_semantic_mask
+        if ratio is not None:
+            input_dict['ratio_inspoint'] = ratio
 
-        gt_labels = np.zeros(len(new_idxs), dtype=int)
-        for inst in new_idxs:
+        instance_ids = np.unique(pts_instance_mask[pts_instance_mask >= 0])
+        gt_labels = np.zeros(len(instance_ids), dtype=int)
+        for inst in instance_ids:
             gt_labels[inst] = pts_semantic_mask[pts_instance_mask == inst][0]
 
         input_dict['gt_labels_3d'] = gt_labels
@@ -313,10 +312,9 @@ class PointSample_(PointSample):
                 - choices (np.ndarray, optional): The generated random samples.
         """
 
-        point_range = range(len(points))
-        choices = np.random.choice(point_range, 
-                                   min(num_samples, len(points)))
-        
+        choices = np.random.choice(
+            len(points), min(num_samples, len(points)), replace=False)
+
         return points[choices], choices
 
     def transform(self, input_dict):
@@ -346,18 +344,13 @@ class PointSample_(PointSample):
         sp_pts_mask = input_dict.get('sp_pts_mask', None)
 
         if pts_instance_mask is not None:
-            pts_instance_mask = pts_instance_mask[choices]
-            
-            idxs = np.unique(pts_instance_mask)
-            mapping = np.zeros(np.max(idxs) + 2, dtype=int)
-            new_idxs = np.arange(len(idxs))
-            if idxs[0] == -1:
-                mapping[idxs] = new_idxs - 1
-            else:
-                mapping[idxs] = new_idxs
-            pts_instance_mask = mapping[pts_instance_mask]
-
+            # Dropping points can make an instance disappear entirely, so the
+            # ids are renumbered - and ratio_inspoint has to follow them.
+            pts_instance_mask, ratio = compact_instance_ids_with_ratio(
+                pts_instance_mask[choices], input_dict.get('ratio_inspoint', None))
             input_dict['pts_instance_mask'] = pts_instance_mask
+            if ratio is not None:
+                input_dict['ratio_inspoint'] = ratio
 
         if pts_semantic_mask is not None:
             pts_semantic_mask = pts_semantic_mask[choices]
@@ -469,93 +462,65 @@ class CylinderCrop(BaseTransform):
         self.radius = radius
 
     def transform(self, input_dict):
-
-        assert "points" in input_dict.keys()
-        
-        # Get the tensor of points
-        points_tensor = input_dict["points"].tensor.numpy()
-        
-        # Select a random center point
+        assert 'points' in input_dict.keys()
+        points_tensor = input_dict['points'].tensor.numpy()
         center = points_tensor[np.random.randint(points_tensor.shape[0])]
-        
-        # Calculate indices of points within the radius
         choices = np.where(
-            (np.sum(np.square(points_tensor[:, :2] - center[:2]), 1) < self.radius**2)
-        )[0]
-        
-        # Update points tensor
-        if "points" in input_dict.keys():
-            input_dict["points"] = input_dict["points"][choices]
+            np.sum(np.square(points_tensor[:, :2] - center[:2]), 1) < self.radius ** 2)[0]
+        input_dict['points'] = input_dict['points'][choices]
+
         pts_instance_mask = input_dict.get('pts_instance_mask', None)
         pts_semantic_mask = input_dict.get('pts_semantic_mask', None)
         sp_pts_mask = input_dict.get('sp_pts_mask', None)
 
-        # Initialize the instance mask
-        instance_mask = pts_semantic_mask != 0  # Background points have -1 in pts_instance_mask
-        pts_instance_mask = pts_instance_mask.copy()
-        pts_instance_mask[~instance_mask] = -1
-        
         if pts_instance_mask is not None:
-            original_pts_instance_mask = pts_instance_mask
-            pts_instance_mask = pts_instance_mask[choices]
+            # normalize_instance_gt() is the single place that knows the
+            # ground / treeID-0 rule: ground (semantic 0), points already
+            # marked -1 and vegetation whose raw treeID is 0 (no annotated
+            # tree) all become -1 instead of forming one big instance. Both
+            # the legacy (ground == 0) and the current (ground == -1) .npy
+            # conventions end up as -1 here. The crop sees raw ids, so raw=True.
+            plot_ids = normalize_instance_gt(
+                pts_semantic_mask, pts_instance_mask, raw=True)
+            instance_mask_full = plot_ids != -1
 
-            idxs = np.unique(pts_instance_mask)
-            mapping = np.zeros(np.max(idxs) + 2, dtype=int)
-            new_idxs = np.arange(len(idxs))
-            if idxs[0] == -1:
-                mapping[idxs] = new_idxs - 1
-            else:
-                mapping[idxs] = new_idxs
-            pts_instance_mask = mapping[pts_instance_mask]
-            input_dict['pts_instance_mask'] = pts_instance_mask
+            cropped_ids, _ = compact_instance_ids_with_ratio(plot_ids[choices])
+            input_dict['pts_instance_mask'] = cropped_ids
 
-            # Initialize vote_label without zero initialization
-            vote_label = np.empty((len(choices), 3))
-            vote_label[:] = np.nan  # Set initial values to NaN for easier debugging and identification
-
-            # Calculate the ratio_inspoint
+            vote_label = np.full((len(choices), 3), np.nan)
             ratio_inspoint = {}
-            for idx in idxs:
-                if idx != -1:  # Skip the background points
-                    original_count = np.sum(original_pts_instance_mask == idx)
-                    new_count = np.sum(pts_instance_mask == mapping[idx])
-                    ratio_inspoint[mapping[idx]] = new_count / original_count if original_count > 0 else 0
+            for new_id in np.unique(cropped_ids):
+                if new_id == -1:
+                    continue
+                in_crop = np.where(cropped_ids == new_id)[0]
+                plot_id = plot_ids[choices[in_crop[0]]]
+                in_plot = np.where(plot_ids == plot_id)[0]
+                # Fraction of the whole-plot tree that survived the crop; the
+                # loss rescales the GT mask with it (see get_iou_with_crop).
+                ratio_inspoint[int(new_id)] = len(in_crop) / len(in_plot)
+                pos = points_tensor[in_plot, :3]
+                tree_center = 0.5 * (pos.min(0) + pos.max(0))
+                vote_label[in_crop, :] = tree_center - points_tensor[choices[in_crop], :3]
 
-                    # Calculate the vote_label for the instance
-                    ind = np.where(original_pts_instance_mask == idx)[0]
-                    if len(ind) > 0:
-                        pos = points_tensor[ind, :3]
-                        max_pos = pos.max(0)
-                        min_pos = pos.min(0)
-                        center = 0.5 * (min_pos + max_pos)
-                        
-                        # Find the points in the cylinder that belong to this instance
-                        cylinder_ind = np.where(pts_instance_mask == mapping[idx])[0]
-                        vote_label[cylinder_ind, :] = center - points_tensor[choices[cylinder_ind], :3]
-            
-            
             input_dict['ratio_inspoint'] = ratio_inspoint
             input_dict['vote_label'] = torch.tensor(vote_label, dtype=torch.float32)
-            input_dict['instance_mask'] = torch.tensor(instance_mask, dtype=torch.bool)
+            input_dict['instance_mask'] = instance_mask_full[choices]
 
         if pts_semantic_mask is not None:
             pts_semantic_mask = pts_semantic_mask[choices]
             input_dict['pts_semantic_mask'] = pts_semantic_mask
 
-        if instance_mask is not None:
-            instance_mask = instance_mask[choices]
-            input_dict['instance_mask'] = instance_mask 
-
         if sp_pts_mask is not None:
             sp_pts_mask = sp_pts_mask[choices]
-            sp_pts_mask = np.unique(
-                sp_pts_mask, return_inverse=True)[1]
+            sp_pts_mask = np.unique(sp_pts_mask, return_inverse=True)[1]
             input_dict['sp_pts_mask'] = sp_pts_mask
 
         if 'eval_ann_info' in input_dict:
-            input_dict['eval_ann_info']['pts_instance_mask'] = pts_instance_mask
+            input_dict['eval_ann_info']['pts_instance_mask'] = \
+                input_dict.get('pts_instance_mask')
             input_dict['eval_ann_info']['pts_semantic_mask'] = pts_semantic_mask
-            input_dict['eval_ann_info']['instance_mask'] = instance_mask
+            input_dict['eval_ann_info']['instance_mask'] = \
+                input_dict.get('instance_mask')
 
         return input_dict
 
@@ -721,18 +686,13 @@ class GridSample(BaseTransform):
         sp_pts_mask = input_dict.get('sp_pts_mask', None)
 
         if pts_instance_mask is not None:
-            pts_instance_mask = pts_instance_mask[choices]
-            
-            idxs = np.unique(pts_instance_mask)
-            mapping = np.zeros(np.max(idxs) + 2, dtype=int)
-            new_idxs = np.arange(len(idxs))
-            if idxs[0] == -1:
-                mapping[idxs] = new_idxs - 1
-            else:
-                mapping[idxs] = new_idxs
-            pts_instance_mask = mapping[pts_instance_mask]
-
+            # Dropping points can make an instance disappear entirely, so the
+            # ids are renumbered - and ratio_inspoint has to follow them.
+            pts_instance_mask, ratio = compact_instance_ids_with_ratio(
+                pts_instance_mask[choices], input_dict.get('ratio_inspoint', None))
             input_dict['pts_instance_mask'] = pts_instance_mask
+            if ratio is not None:
+                input_dict['ratio_inspoint'] = ratio
 
         if pts_semantic_mask is not None:
             pts_semantic_mask = pts_semantic_mask[choices]

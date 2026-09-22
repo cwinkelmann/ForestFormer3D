@@ -8,6 +8,29 @@ from __future__ import annotations
 import numpy as np
 
 
+def _compact(instance: np.ndarray) -> tuple[np.ndarray, dict[int, int]]:
+    """Core of :func:`compact_instance_ids`.
+
+    Returns the compacted array together with the ``{old_id: new_id}`` mapping
+    that produced it, so callers can re-key side tables (``ratio_inspoint``)
+    with exactly the same mapping.
+    """
+    instance = np.asarray(instance).astype(np.int64)
+    out = np.full(instance.shape, -1, dtype=np.int64)
+    valid = instance >= 0
+    if not np.any(valid):
+        return out, {}
+    valid_vals = instance[valid]
+    unique, first_idx, inverse = np.unique(valid_vals, return_index=True, return_inverse=True)
+    # `unique` is sorted by value, not by first appearance in `valid_vals`;
+    # re-rank so the id that appears first in the array becomes 0, etc.
+    appearance_order = np.argsort(first_idx, kind='stable')
+    new_id = np.empty(len(unique), dtype=np.int64)
+    new_id[appearance_order] = np.arange(len(unique))
+    out[valid] = new_id[inverse]
+    return out, {int(old): int(new) for old, new in zip(unique, new_id)}
+
+
 def compact_instance_ids(instance: np.ndarray) -> np.ndarray:
     """Renumber instance ids to 0..K-1 in order of first appearance.
 
@@ -20,20 +43,33 @@ def compact_instance_ids(instance: np.ndarray) -> np.ndarray:
     Returns:
         (N,) int64 array with -1 preserved and other ids compacted.
     """
-    instance = np.asarray(instance).astype(np.int64)
-    out = np.full(instance.shape, -1, dtype=np.int64)
-    valid = instance >= 0
-    if not np.any(valid):
-        return out
-    valid_vals = instance[valid]
-    unique, first_idx, inverse = np.unique(valid_vals, return_index=True, return_inverse=True)
-    # `unique` is sorted by value, not by first appearance in `valid_vals`;
-    # re-rank so the id that appears first in the array becomes 0, etc.
-    appearance_order = np.argsort(first_idx, kind='stable')
-    new_id = np.empty(len(unique), dtype=np.int64)
-    new_id[appearance_order] = np.arange(len(unique))
-    out[valid] = new_id[inverse]
-    return out
+    return _compact(instance)[0]
+
+
+def compact_instance_ids_with_ratio(
+        instance: np.ndarray,
+        ratio_inspoint: dict | None = None) -> tuple[np.ndarray, dict | None]:
+    """:func:`compact_instance_ids`, re-keying ``ratio_inspoint`` alongside it.
+
+    ``ratio_inspoint`` maps instance id -> fraction of that instance's points
+    that survived the cylinder crop. Every transform that subsamples points
+    renumbers the ids, so the dict has to follow: ``filter_stuff_masks`` and
+    ``get_iou_with_crop`` look the ratios up *by id* (strictly), and a stale
+    key silently scales the wrong instance's IoU or raises.
+
+    Entries whose id no longer occurs in ``instance`` are dropped.
+
+    Returns:
+        ``(new_mask, new_ratio)``. ``new_ratio`` is ``None`` if and only if
+        ``ratio_inspoint`` was ``None``; the return is always a 2-tuple so
+        call sites can unpack unconditionally.
+    """
+    out, id_map = _compact(instance)
+    if ratio_inspoint is None:
+        return out, None
+    new_ratio = {id_map[int(old)]: float(ratio)
+                 for old, ratio in ratio_inspoint.items() if int(old) in id_map}
+    return out, new_ratio
 
 
 def normalize_instance_gt(semantic: np.ndarray, instance: np.ndarray,

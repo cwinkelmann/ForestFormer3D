@@ -1383,24 +1383,27 @@ class ForAINetV2OneFormer3D(Base3DDetector):
     
     @staticmethod
     def filter_stuff_masks(batch_data_samples_i, stuff_classes, ratio_inspoint):
+        """Drop stuff instances; crop ratios are looked up by instance id.
+
+        Row ``i`` of ``sp_inst_masks`` is instance id ``i`` (``get_gt_inst_masks``
+        one-hot encodes the ids in order), and ``ratio_inspoint`` is keyed by
+        the ids in force after the last transform that compacted them. A
+        missing key means the two drifted apart, which would silently rescale
+        the wrong instance's IoU, so fail loudly instead.
+        """
         labels_3d = batch_data_samples_i.labels_3d
         sp_inst_masks = batch_data_samples_i.sp_inst_masks
+        n_inst = len(labels_3d)
+        missing = [i for i in range(n_inst) if i not in ratio_inspoint]
+        if missing:
+            raise KeyError(f'ratio_inspoint lacks instance ids {missing}; '
+                           f'keys are {sorted(int(k) for k in ratio_inspoint)}')
+        ratio_tensor = torch.tensor([float(ratio_inspoint[i]) for i in range(n_inst)],
+                                    device=labels_3d.device)
+        keep = ~torch.isin(
+            labels_3d, torch.tensor(stuff_classes, device=labels_3d.device))
 
-        stuff_classes_tensor = torch.tensor(stuff_classes, device=labels_3d.device)
-
-        mask = torch.isin(labels_3d, stuff_classes_tensor)
-        indices_to_keep = ~mask
-
-        filtered_labels_3d = labels_3d[indices_to_keep]
-
-        filtered_sp_inst_masks = sp_inst_masks[indices_to_keep]
-
-        ratio_tensor = torch.zeros(len(labels_3d), device=labels_3d.device)
-        for i, idx in enumerate(labels_3d):
-            ratio_tensor[i] = ratio_inspoint[i]
-        ratio_subset = ratio_tensor[indices_to_keep]
-
-        return filtered_labels_3d, filtered_sp_inst_masks, ratio_subset
+        return labels_3d[keep], sp_inst_masks[keep], ratio_tensor[keep]
     
     @staticmethod
     def generate_cylindrical_regions(points, radius, step_size):
@@ -1953,19 +1956,23 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             bi_semantic_logit = bi_semantic_logits[i]
 
             # Sum the foreground (instance_mask) per voxel and determine whether the voxel is background/foreground
-            instance_mask_tensor = torch.from_numpy(instance_mask)
-            instance_mask = instance_mask_tensor.to(device)
+            instance_mask = torch.as_tensor(instance_mask).to(device)
             voxel_point_counts = scatter_add(torch.ones_like(instance_mask.float()), voxel_superpoints, dim=0)
             foreground_voxel_counts = scatter_add(instance_mask.float(), voxel_superpoints, dim=0)
-            
-            # If a voxel has more than half foreground points, consider it foreground
-            bi_y = (foreground_voxel_counts / voxel_point_counts) > 0.5
-            bi_y = bi_y.long()  # Convert to long for loss function compatibility
 
-            # Calculate semantic binary cross-entropy loss over all voxels (background and foreground)
-            semantic_loss_bi = torch.nn.functional.nll_loss(
-                bi_semantic_logit, bi_y.to(torch.int64)  # Removed ignore_index
-            )
+            # A voxel with more than half foreground points is foreground.
+            bi_y = ((foreground_voxel_counts / voxel_point_counts) > 0.5).long()
+            # Vegetation without a tree id (instance -1 but not ground) is
+            # ignored by the binary head; it keeps its class in the 3-class loss.
+            ignore_pts = (sem_mask != 0) & (pts_instance_mask == -1)
+            ignore_voxel_counts = scatter_add(ignore_pts.float(), voxel_superpoints, dim=0)
+            bi_y[(ignore_voxel_counts / voxel_point_counts) > 0.5] = -100
+
+            if (bi_y != -100).any():
+                semantic_loss_bi = torch.nn.functional.nll_loss(
+                    bi_semantic_logit, bi_y, ignore_index=-100)
+            else:
+                semantic_loss_bi = bi_semantic_logit.sum() * 0.0
             
             # Accumulate semantic loss for the batch
             total_semantic_loss_bi += semantic_loss_bi
@@ -2797,24 +2804,27 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
     
     @staticmethod
     def filter_stuff_masks(batch_data_samples_i, stuff_classes, ratio_inspoint):
+        """Drop stuff instances; crop ratios are looked up by instance id.
+
+        Row ``i`` of ``sp_inst_masks`` is instance id ``i`` (``get_gt_inst_masks``
+        one-hot encodes the ids in order), and ``ratio_inspoint`` is keyed by
+        the ids in force after the last transform that compacted them. A
+        missing key means the two drifted apart, which would silently rescale
+        the wrong instance's IoU, so fail loudly instead.
+        """
         labels_3d = batch_data_samples_i.labels_3d
         sp_inst_masks = batch_data_samples_i.sp_inst_masks
+        n_inst = len(labels_3d)
+        missing = [i for i in range(n_inst) if i not in ratio_inspoint]
+        if missing:
+            raise KeyError(f'ratio_inspoint lacks instance ids {missing}; '
+                           f'keys are {sorted(int(k) for k in ratio_inspoint)}')
+        ratio_tensor = torch.tensor([float(ratio_inspoint[i]) for i in range(n_inst)],
+                                    device=labels_3d.device)
+        keep = ~torch.isin(
+            labels_3d, torch.tensor(stuff_classes, device=labels_3d.device))
 
-        stuff_classes_tensor = torch.tensor(stuff_classes, device=labels_3d.device)
-
-        mask = torch.isin(labels_3d, stuff_classes_tensor)
-        indices_to_keep = ~mask
-
-        filtered_labels_3d = labels_3d[indices_to_keep]
-
-        filtered_sp_inst_masks = sp_inst_masks[indices_to_keep]
-
-        ratio_tensor = torch.zeros(len(labels_3d), device=labels_3d.device)
-        for i, idx in enumerate(labels_3d):
-            ratio_tensor[i] = ratio_inspoint[i]
-        ratio_subset = ratio_tensor[indices_to_keep]
-
-        return filtered_labels_3d, filtered_sp_inst_masks, ratio_subset
+        return labels_3d[keep], sp_inst_masks[keep], ratio_tensor[keep]
     
     @staticmethod
     def grid_sample(points: torch.Tensor,

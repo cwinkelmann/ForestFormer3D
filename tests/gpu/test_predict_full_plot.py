@@ -73,6 +73,7 @@ def test_full_plot_predict_returns_merged_arrays_and_writes_ply(tmp_path, with_g
     inst = np.asarray(seg['pts_instance_mask'][1])
     sem = np.asarray(seg['pts_semantic_mask'][1])
     assert inst.min() >= -1 and sem.min() >= -1 and sem.max() < 3
+    assert (inst >= 0).any()                               # not a zero-instance pass
     ids = np.unique(inst[inst >= 0])
     assert ids.tolist() == list(range(len(ids)))          # contiguous 0..K-1
     assert not np.any((sem == 0) & (inst >= 0))            # ground carries no instance

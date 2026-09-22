@@ -1,7 +1,8 @@
 """Tests for oneformer3d/labels.py (pure numpy, no torch needed)."""
 import numpy as np
 
-from oneformer3d.labels import compact_instance_ids, normalize_instance_gt
+from oneformer3d.labels import (compact_instance_ids, compact_instance_ids_with_ratio,
+                                normalize_instance_gt)
 
 
 def test_normalize_raw_scene_marks_ground_and_unannotated():
@@ -42,3 +43,31 @@ def test_normalize_non_raw_treats_zero_as_valid_instance():
 def test_compact_instance_ids_keeps_minus_one_and_compacts_rest():
     out = compact_instance_ids(np.array([5, 5, 9, -1]))
     assert out.tolist() == [0, 0, 1, -1]
+
+
+def test_compact_instance_ids_with_ratio_remaps_the_dict():
+    mask = np.array([-1, 3, 3, 7, 9])
+    new_mask, ratio = compact_instance_ids_with_ratio(
+        mask, {3: 0.5, 5: 0.9, 7: 0.25, 9: 1.0})
+    assert new_mask.tolist() == [-1, 0, 0, 1, 2]
+    assert ratio == {0: 0.5, 1: 0.25, 2: 1.0}   # 5 vanished, keys follow the new ids
+
+
+def test_compact_instance_ids_with_ratio_follows_appearance_order():
+    # 9 appears before 3, so 9 -> 0 and 3 -> 1; the ratios must follow.
+    new_mask, ratio = compact_instance_ids_with_ratio(
+        np.array([9, 3, 9, -1]), {3: 0.25, 9: 1.0})
+    assert new_mask.tolist() == [0, 1, 0, -1]
+    assert ratio == {0: 1.0, 1: 0.25}
+
+
+def test_compact_instance_ids_with_ratio_returns_none_without_a_dict():
+    new_mask, ratio = compact_instance_ids_with_ratio(np.array([4, 4, -1]))
+    assert new_mask.tolist() == [0, 0, -1]
+    assert ratio is None
+
+
+def test_compact_instance_ids_with_ratio_handles_an_empty_scene():
+    new_mask, ratio = compact_instance_ids_with_ratio(np.array([-1, -1]), {0: 1.0})
+    assert new_mask.tolist() == [-1, -1]
+    assert ratio == {}

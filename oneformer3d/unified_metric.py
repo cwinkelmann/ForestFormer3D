@@ -8,6 +8,7 @@ from mmdet3d.evaluation.metrics import SegMetric
 from mmdet3d.registry import METRICS
 from mmdet3d.evaluation import panoptic_seg_eval, seg_eval
 from .instance_seg_eval import instance_seg_eval
+from .labels import normalize_instance_gt
 
 
 @METRICS.register_module()
@@ -18,14 +19,6 @@ class UnifiedSegMetric(SegMetric):
     Args:
         thing_class_inds (List[int]): Ids of thing classes.
         stuff_class_inds (List[int]): Ids of stuff classes.
-        min_num_points (int): Minimal size of mask for panoptic segmentation.
-        id_offset (int): Offset for instance classes.
-        sem_mapping (List[int]): Semantic class to gt id.
-        inst_mapping (List[int]): Instance class to gt id.
-        metric_meta (Dict): Analogue of dataset meta of SegMetric. Keys:
-            `label2cat` (Dict[int, str]): class names,
-            `ignore_index` (List[int]): ids of semantic categories to ignore,
-            `classes` (List[str]): class names.
         logger_keys (List[Tuple]): Keys for logger to save; of len 3:
             semantic, instance, and panoptic.
     """
@@ -33,23 +26,13 @@ class UnifiedSegMetric(SegMetric):
     def __init__(self,
                  thing_class_inds,
                  stuff_class_inds,
-                 min_num_points,
-                 id_offset,
-                 sem_mapping,   
-                 inst_mapping,
-                 metric_meta,
                  logger_keys=[('miou',),
-                              ('all_ap', 'all_ap_50%', 'all_ap_25%'), 
+                              ('all_ap', 'all_ap_50%', 'all_ap_25%'),
                               ('pq',)],
                  **kwargs):
         self.thing_class_inds = thing_class_inds
         self.stuff_class_inds = stuff_class_inds
-        self.min_num_points = min_num_points
-        self.id_offset = id_offset
-        self.metric_meta = metric_meta
         self.logger_keys = logger_keys
-        self.sem_mapping = np.array(sem_mapping)
-        self.inst_mapping = np.array(inst_mapping)
         super().__init__(**kwargs)
 
     def compute_metrics(self, results):
@@ -85,11 +68,25 @@ class UnifiedSegMetric(SegMetric):
         all_mean_weighted_cov_global = [[] for _ in range(NUM_CLASSES_BINARY)]
 
         for eval_ann, single_pred_results in results:
-            # Get GT and Pred labels, and shift them by 1 (0 is ignored)
-            sem_gt_i = eval_ann['pts_semantic_mask'] + 1
-            sem_pre_i = single_pred_results['pts_semantic_mask'][1] + 1
-            ins_gt_i = eval_ann['pts_instance_mask']
-            ins_pre_i = single_pred_results['pts_instance_mask'][1]
+            if eval_ann is None:
+                continue          # unlabeled scan: nothing to score
+
+            sem_gt_raw = np.asarray(eval_ann['pts_semantic_mask'])
+            ins_gt_raw = np.asarray(eval_ann['pts_instance_mask'])
+            # Normalize the GT with the one shared rule (oneformer3d/labels.py):
+            # ground and un-annotated points become -1, real trees get ids 0..K-1.
+            # Which convention arrived depends on the mode, so decide by content:
+            # raw full-plot GT (eval_ann_info in test mode) uses treeID 0 for
+            # ground/un-annotated and never contains -1, while GT that came
+            # through the crop pipeline (validation) is already normalized, so
+            # it does contain -1 and its id 0 is a real tree.
+            raw = not bool((ins_gt_raw < 0).any())
+            ins_gt_i = normalize_instance_gt(sem_gt_raw, ins_gt_raw, raw=raw)
+
+            # Shift the semantic labels by 1 (0 is ignored)
+            sem_gt_i = sem_gt_raw + 1
+            sem_pre_i = np.asarray(single_pred_results['pts_semantic_mask'][1]) + 1
+            ins_pre_i = np.asarray(single_pred_results['pts_instance_mask'][1])
 
             # Semantic Segmentation Evaluation
             for j in range(sem_gt_i.shape[0]):
@@ -131,14 +128,19 @@ class UnifiedSegMetric(SegMetric):
             un = np.unique(gt_ins)
             pts_in_gt = [[] for _ in range(NUM_CLASSES_BINARY)]
             for g in un:
-                if g == 0: continue # In ForAINetV2, instance ID 0 is not a valid instance
+                if g == -1: continue    # -1 = ground / no tree id; ids start at 0
                 tmp = (gt_ins == g)
                 sem_seg_i = int(stats.mode(gt_sem[tmp], keepdims=True)[0][0])
                 pts_in_gt[sem_seg_i].append(tmp)
 
             # Coverage Metrics (MUCov, MWCov)
             for i_sem in INS_CLASS_IDS:
-                if not pts_in_gt[i_sem] or not pts_in_pred[i_sem]: continue
+                if not pts_in_gt[i_sem]: continue
+                if not pts_in_pred[i_sem]:
+                    # GT trees but no predictions: zero coverage, not "skip".
+                    all_mean_cov_global[i_sem].append(0.0)
+                    all_mean_weighted_cov_global[i_sem].append(0.0)
+                    continue
                 sum_cov, num_gt_point, mean_weighted_cov = 0, 0, 0
                 for ins_gt in pts_in_gt[i_sem]:
                     ovmax = 0.
