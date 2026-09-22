@@ -89,13 +89,16 @@ def cache_dir(tmp_path):
 
 def test_list_from_cache(tmp_path, cache_dir):
     cache, md5s = cache_dir
-    r = _run(["--list"], tmp_path / "root", {"FF3D_ZENODO_CACHE": str(cache)})
+    root = tmp_path / "root"
+    r = _run(["--list"], root, {"FF3D_ZENODO_CACHE": str(cache)})
     assert r.returncode == 0, r.stdout + r.stderr
     lines = [l.split("\t") for l in r.stdout.strip().splitlines()]
     assert [l[0] for l in lines] == KEYS
     for key, size, md5, url in lines:
         assert md5 == md5s[key]
         assert len(md5) == 32
+    # --list is side-effect-free: it must not even create FF3D_ROOT/work_dirs
+    assert not (root / "work_dirs").exists()
 
 
 def test_dry_run_cache_mode_does_not_touch_disk(tmp_path, cache_dir):
@@ -107,7 +110,9 @@ def test_dry_run_cache_mode_does_not_touch_disk(tmp_path, cache_dir):
     for key in KEYS:
         assert key in r.stdout
     assert not (root / "data").exists()
-    assert not (root / "work_dirs" / "clean_forestformer").exists()
+    # --dry-run is side-effect-free: it must not even create FF3D_ROOT/work_dirs
+    # (not just the specific data/checkpoint subdirs)
+    assert not (root / "work_dirs").exists()
 
 
 def test_cache_mode_unpacks_and_leaves_cache_untouched(tmp_path, cache_dir):
@@ -203,11 +208,28 @@ def _no_cache_env(tmp_path, api_url):
 
 def test_list_from_api(tmp_path, zenodo):
     api_url, _ = zenodo
-    r = _run(["--list"], tmp_path / "root", _no_cache_env(tmp_path, api_url))
+    root = tmp_path / "root"
+    r = _run(["--list"], root, _no_cache_env(tmp_path, api_url))
     assert r.returncode == 0, r.stderr
     lines = [l.split("\t") for l in r.stdout.strip().splitlines()]
     assert [l[0] for l in lines] == KEYS
     assert all(len(l) == 4 and len(l[2]) == 32 for l in lines)
+    # --list is side-effect-free: it must not even create FF3D_ROOT/work_dirs
+    assert not (root / "work_dirs").exists()
+
+
+def test_dry_run_api_mode_does_not_touch_disk(tmp_path, zenodo):
+    api_url, _ = zenodo
+    root = tmp_path / "root"
+    r = _run(["--dry-run"], root, _no_cache_env(tmp_path, api_url))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "dry-run" in r.stdout
+    for key in KEYS:
+        assert key in r.stdout
+    assert not (root / "data").exists()
+    # --dry-run is side-effect-free: it must not download, and must not even create
+    # FF3D_ROOT/work_dirs (the downloads dir and .zenodo marker dir both live under it)
+    assert not (root / "work_dirs").exists()
 
 
 def test_api_fetch_places_files_and_is_idempotent(tmp_path, zenodo):

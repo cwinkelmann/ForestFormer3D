@@ -62,6 +62,8 @@ for f in rec["files"]:
 }
 
 cache_ready() {
+  # All-or-nothing: a files.tsv that names even one zip not actually present in the cache
+  # dir makes this return 1, and main() falls back to the whole API path for every file.
   local tsv="$FF3D_ZENODO_CACHE/files.tsv"
   [ -f "$tsv" ] || return 1
   local key url md5field size
@@ -111,7 +113,10 @@ unpack_zip() {
   esac
   mkdir -p "$dest" "$FF3D_ZENODO_DIR"
   tmp="$(mktemp -d "$FF3D_ZENODO_DIR/unpack-XXXXXX")"
-  unzip -q "$archive" -d "$tmp"
+  if ! unzip -q "$archive" -d "$tmp"; then
+    rm -rf "$tmp"
+    die "$key: unzip failed for $archive"
+  fi
   find "$tmp" -type f \( -name '*.ply' -o -name '*.pth' \) -not -path '*/__MACOSX/*' -exec mv -f {} "$dest"/ \;
   rm -rf "$tmp"
 }
@@ -159,8 +164,8 @@ main() {
     esac
   done
 
-  mkdir -p "$FF3D_ZENODO_DIR"
-
+  # --list and --dry-run must be side-effect-free: no mkdir here. $FF3D_ZENODO_DIR is
+  # created lazily, only by the code paths that actually write (download/unpack/marker).
   local mode listing
   if cache_ready; then
     mode=cache
@@ -178,7 +183,8 @@ main() {
     return 0
   fi
 
-  [ "$mode" = "api" ] && mkdir -p "$FF3D_DOWNLOADS"
+  # dry-run touches nothing on disk, not even the downloads dir.
+  [ "$mode" = "api" ] && [ "$dry_run" != 1 ] && mkdir -p "$FF3D_DOWNLOADS"
 
   while IFS=$'\t' read -r key size md5 url; do
     [ -n "$key" ] || continue
