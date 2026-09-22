@@ -5,13 +5,19 @@ line instead of running it) plus FF3D_FOREGROUND=1 (skips the nohup self-daemoni
 docker, no GPU, no torch: this file only ever inspects the shell commands the script would
 have run.
 
-Because a dry run never actually produces epoch_200.pth / *.ply / evaluation_total_test.txt,
-each real (non-dry) file-existence check in the script would abort a bare single dry run
-partway through. So each test seeds just enough stub files to get the run past the checks
-that matter for that stage, and asserts on everything printed before the run stops.
+A dry run never actually produces epoch_200.pth / *.ply / evaluation_total_test.txt, so
+every postcondition check on one of THOSE artefacts is dry-run-aware in the script itself
+(commit "bench: run_train_200.sh postconditions are dry-run aware", mirroring common.sh's
+ff3d_preprocess fix in 6738a5f): it prints "DRY: (postcondition skipped) <path>" instead of
+dying. That means a single fresh dry run -- with NO post-training artefacts pre-seeded --
+now runs the complete sequence through final_eval and exits 0; the tests below rely on
+that rather than pre-seeding epoch_200.pth/checkpoints/markers to dodge each check in turn.
+
+Preconditions on things the user must actually supply (data present, old worktree present)
+are untouched by that fix and still fail for real -- covered separately below.
 """
+import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -22,7 +28,6 @@ BASH = "bash"
 
 
 def _run(env_overrides, args, cwd=None):
-    import os
     env = dict(os.environ)
     env.update(env_overrides)
     return subprocess.run(
@@ -32,7 +37,10 @@ def _run(env_overrides, args, cwd=None):
 
 
 def _seed_common(root: Path):
-    """Data layout common.sh's ff3d_preprocess/ff3d_prepare_checkpoint expect."""
+    """Data layout common.sh's ff3d_preprocess/ff3d_prepare_checkpoint expect. This is
+    legitimate PRE-EXISTING input (the Zenodo data + its one-time preprocessing), not a
+    post-training artefact, so it stays seeded in every test.
+    """
     meta = root / "data" / "ForAINetV2" / "meta_data"
     meta.mkdir(parents=True, exist_ok=True)
     (meta / "test_list.txt").write_text("a_test\n")
@@ -76,6 +84,8 @@ def test_usage_error_with_bad_variant():
 
 
 def test_old_variant_dies_without_old_worktree(tmp_path):
+    # precondition on user input (the old worktree must exist) -- NOT dry-run-gated, still
+    # a real check even under FF3D_DRY_RUN=1.
     _seed_common(tmp_path)
     r = _run({"FF3D_ROOT": str(tmp_path), "FF3D_FOREGROUND": "1"}, ["old"])
     assert r.returncode == 1, r.stdout + r.stderr
@@ -83,18 +93,15 @@ def test_old_variant_dies_without_old_worktree(tmp_path):
 
 
 @pytest.mark.parametrize("variant,ckpt_suffix", [("fixed", "converted"), ("old", "raw")])
-def test_dry_run_train_and_test_commands(tmp_path, variant, ckpt_suffix):
-    """Fresh run: preprocess-skip, train.py (correct cfg-options + work-dir), checkpoint
-    prep, test.py with the checkpoint file matching the variant. Dies at the ply-count
-    check (dry test.py never produces .ply files) -- that's expected and is itself proof
-    the check ran with N_TEST=1.
+def test_dry_run_full_sequence_through_final_eval(tmp_path, variant, ckpt_suffix):
+    """Fresh run, NOTHING pre-seeded beyond the data/preprocessing precondition: the dry
+    postconditions let the script run the complete sequence -- preprocess-skip, train.py,
+    checkpoint prep, test.py, final_eval.py -- and exit 0.
     """
     root = tmp_path / "root"
     root.mkdir()
     _seed_common(root)
-    work = root / "work_dirs" / f"bench-{variant}-200"
-    work.mkdir(parents=True)
-    (work / "epoch_200.pth").write_text("")  # stub so the post-train existence check passes
+    work_rel = f"work_dirs/bench-{variant}-200"
 
     old_root = tmp_path / "old" if variant == "old" else None
     if old_root:
@@ -103,43 +110,55 @@ def test_dry_run_train_and_test_commands(tmp_path, variant, ckpt_suffix):
     r = _run(_base_env(root, variant, old_root), [variant], cwd=root)
     out = r.stdout + r.stderr
 
-    assert r.returncode == 1, out
+    assert r.returncode == 0, out
     assert "preprocessing present, skipping" in out
 
-    # train.py: correct config, work-dir and the three cfg-options
+    # 1. train.py: correct config, work-dir and the three cfg-options
     assert "python tools/train.py configs/oneformer3d_qs_radius16_qp300_2many.py" in out
-    assert f"--work-dir work_dirs/bench-{variant}-200" in out
+    assert f"--work-dir {work_rel}" in out
     assert "--cfg-options train_cfg.max_epochs=200 train_cfg.val_interval=20 default_hooks.checkpoint.max_keep_ckpts=2" in out
+    assert f"DRY: (postcondition skipped) {root}/{work_rel}/epoch_200.pth" in out
+    assert "training done" in out
 
-    # checkpoint prep on epoch_200.pth
-    assert f"tools/fix_spconv_checkpoint.py --in-path work_dirs/bench-{variant}-200/epoch_200.pth" in out
-    assert f"--out-path work_dirs/bench-{variant}-200/epoch_200_converted.pth" in out
+    # 2. checkpoint prep on epoch_200.pth
+    assert f"tools/fix_spconv_checkpoint.py --in-path {work_rel}/epoch_200.pth" in out
+    assert f"--out-path {work_rel}/epoch_200_converted.pth" in out
     assert "epoch_200.pth layout: raw" in out
 
-    # test.py uses the correct checkpoint file for this variant
+    # 3. test.py uses the correct checkpoint file for this variant
     assert (f"python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py "
-            f"work_dirs/bench-{variant}-200/epoch_200_{ckpt_suffix}.pth "
-            f"--work-dir work_dirs/bench-{variant}-200/test") in out
+            f"{work_rel}/epoch_200_{ckpt_suffix}.pth "
+            f"--work-dir {work_rel}/test") in out
+    assert f"DRY: (postcondition skipped) {root}/{work_rel}/test/*.ply (expected 1)" in out
 
-    assert f"ERROR: {variant} produced 0 ply files, expected 1 in work_dirs/bench-{variant}-200/test" in out
+    # 4. final_eval.py, always through the FIXED image/checkout even for the old variant
+    assert f"python tools/final_eval.py {work_rel}/test" in out
+    assert f"DRY: (postcondition skipped) {root}/{work_rel}/test/evaluation_total_test.txt" in out
+
+    assert f"train-{variant}-200 finished" in out
 
     if variant == "old":
         # the old worktree wrapper: old_prelude.sh + the old worktree mounted at /workspace,
-        # for BOTH the train.py and test.py invocations
+        # for BOTH the train.py and test.py invocations, but NOT for final_eval.py
         assert out.count(f"-v {old_root}:/workspace") == 2
         assert out.count("bash /old_prelude.sh") == 2
+        assert f"-v {root}:/workspace" in out  # the final_eval.py call, on the main checkout
     else:
         assert f"-v {root}:/workspace" in out
         assert "old_prelude.sh" not in out
 
+    # the postcondition-skip stub + the real "done" markers this script always writes
+    work = root / work_rel
+    assert (work / "epoch_200.pth").exists()
     assert (work / ".done-train").exists()
+    assert (work / "test" / ".done-test").exists()
+    assert (work / "test" / ".done-eval").exists()
 
 
 @pytest.mark.parametrize("variant,ckpt_suffix", [("fixed", "converted"), ("old", "raw")])
-def test_dry_run_final_eval_command(tmp_path, variant, ckpt_suffix):
-    """Train/checkpoint/test stages already marked done -> the run should skip straight to
-    printing the final_eval.py command, then die on the missing F1 line (dry run never
-    writes evaluation_total_test.txt).
+def test_dry_run_skips_completed_stages(tmp_path, variant, ckpt_suffix):
+    """Train/checkpoint/test stages already marked done from a prior run -> re-running
+    skips straight to final_eval.py without re-invoking train.py/test.py.
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -148,6 +167,7 @@ def test_dry_run_final_eval_command(tmp_path, variant, ckpt_suffix):
     test_out = work / "test"
     test_out.mkdir(parents=True)
     (work / "epoch_200.pth").write_text("")
+    (work / f"epoch_200_{ckpt_suffix}.pth").write_text("")
     (work / "epoch_200_converted.pth").write_text("")
     (work / "epoch_200_raw.pth").write_text("")
     (work / "epoch_200.layout").write_text("raw\n")
@@ -161,10 +181,10 @@ def test_dry_run_final_eval_command(tmp_path, variant, ckpt_suffix):
     r = _run(_base_env(root, variant, old_root), [variant], cwd=root)
     out = r.stdout + r.stderr
 
-    assert r.returncode == 1, out
+    assert r.returncode == 0, out
     assert "training already done" in out
     assert "test.py already done" in out
+    assert "python tools/train.py" not in out
+    assert "python tools/test.py" not in out
     assert f"python tools/final_eval.py work_dirs/bench-{variant}-200/test" in out
-    # final_eval always runs through the FIXED image/checkout, even for the old variant
-    assert f"-v {root}:/workspace" in out
-    assert f"ERROR: no F1 line in work_dirs/bench-{variant}-200/test/evaluation_total_test.txt" in out
+    assert (test_out / ".done-eval").exists()
