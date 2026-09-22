@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-from os import path as osp
 
 from converter_forainetv2 import create_info_file
 from update_infos_to_v2 import update_pkl_infos
@@ -15,14 +14,10 @@ def forainetv2_data_prep(root_path, info_prefix, out_dir, workers):
         out_dir (str): Output directory of the generated info file.
         workers (int): Number of threads to be used.
     """
-    create_info_file(
+    written = create_info_file(
         root_path, info_prefix, out_dir, workers=workers)
-    info_train_path = osp.join(out_dir, f'{info_prefix}_oneformer3d_infos_train.pkl')
-    info_val_path = osp.join(out_dir, f'{info_prefix}_oneformer3d_infos_val.pkl')
-    info_test_path = osp.join(out_dir, f'{info_prefix}_oneformer3d_infos_test.pkl')
-    update_pkl_infos(info_prefix, out_dir=out_dir, pkl_path=info_train_path)
-    update_pkl_infos(info_prefix, out_dir=out_dir, pkl_path=info_val_path)
-    update_pkl_infos(info_prefix, out_dir=out_dir, pkl_path=info_test_path)
+    for pkl_path in written:
+        update_pkl_infos(info_prefix, out_dir=out_dir, pkl_path=pkl_path)
 
 
 parser = argparse.ArgumentParser(description='Data converter arg parser')

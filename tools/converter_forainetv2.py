@@ -35,23 +35,14 @@ def create_info_file(data_path,
         save_path, f'{pkl_prefix}_oneformer3d_infos_val.pkl')
     test_filename = os.path.join(
         save_path, f'{pkl_prefix}_oneformer3d_infos_test.pkl')
-    if pkl_prefix == 'forainetv2':
-        # ScanNet has a train-val-test split
-        train_dataset = ForAINetV2Data(root_path=data_path, split='train')
-        val_dataset = ForAINetV2Data(root_path=data_path, split='val')
-        test_dataset = ForAINetV2Data(root_path=data_path, split='test')
-    
-    infos_train = train_dataset.get_infos(
-        num_workers=workers, has_label=True)
-    mmengine.dump(infos_train, train_filename, 'pkl')
-    print(f'{pkl_prefix} info train file is saved to {train_filename}')
-
-    infos_val = val_dataset.get_infos(
-        num_workers=workers, has_label=True)
-    mmengine.dump(infos_val, val_filename, 'pkl')
-    print(f'{pkl_prefix} info val file is saved to {val_filename}')
-
-    infos_test = test_dataset.get_infos(
-        num_workers=workers, has_label=True)
-    mmengine.dump(infos_test, test_filename, 'pkl')
-    print(f'{pkl_prefix} info test file is saved to {test_filename}')
+    written = []
+    for split, filename in [('train', train_filename), ('val', val_filename), ('test', test_filename)]:
+        dataset = ForAINetV2Data(root_path=data_path, split=split)
+        if len(dataset) == 0:
+            print(f'{pkl_prefix}: no {split} scans with preprocessed data, skipping {filename}')
+            continue
+        infos = dataset.get_infos(num_workers=workers, has_label=True)
+        mmengine.dump(infos, filename, 'pkl')
+        print(f'{pkl_prefix} info {split} file is saved to {filename}')
+        written.append(filename)
+    return written

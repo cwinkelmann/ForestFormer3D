@@ -39,8 +39,16 @@ class ForAINetV2Data(object):
         assert split in ['train', 'val', 'test']
         split_file = osp.join(self.root_dir, 'meta_data',
                               f'{split}_list.txt')
-        mmengine.check_file_exist(split_file)
-        self.sample_id_list = mmengine.list_from_file(split_file)
+        self.sample_id_list = []
+        if osp.isfile(split_file):
+            for sample_id in mmengine.list_from_file(split_file):
+                vert = osp.join(root_path, 'forainetv2_instance_data', f'{sample_id}_vert.npy')
+                if osp.isfile(vert):
+                    self.sample_id_list.append(sample_id)
+                else:
+                    print(f'{split}: {sample_id} has no preprocessed data ({vert}), skipping')
+        else:
+            print(f'{split}: list file {split_file} does not exist, skipping split')
         self.test_mode = (split == 'test')
 
     def __len__(self):
