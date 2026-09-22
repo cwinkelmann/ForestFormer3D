@@ -1,8 +1,12 @@
 """UnifiedSegMetric: id 0 is a real tree, -1 is ignored, empty scenes score zero."""
+import inspect
+from pathlib import Path
+
 import numpy as np
 import pytest
 from mmengine.logging import MMLogger
 
+import oneformer3d.unified_metric
 from oneformer3d.unified_metric import UnifiedSegMetric
 
 pytestmark = pytest.mark.gpu
@@ -76,8 +80,26 @@ def test_raw_gt_ignores_vegetation_without_tree_id():
 
 
 def test_unused_ctor_args_are_gone():
-    with pytest.raises(TypeError):
-        UnifiedSegMetric(thing_class_inds=[1, 2], stuff_class_inds=[0], min_num_points=1)
+    """The five unused arguments are gone from the signature, the instance and the source.
+
+    Asserting on a TypeError would not work: mmdet3d's SegMetric.__init__ takes
+    **kwargs and silently drops whatever it does not know, so passing
+    min_num_points=1 raises nothing. Check the removal directly instead, and
+    check the source text so a future re-add is caught here rather than in a
+    config that quietly stops matching.
+    """
+    dead = ['min_num_points', 'id_offset', 'sem_mapping', 'inst_mapping', 'metric_meta']
+
+    params = inspect.signature(UnifiedSegMetric.__init__).parameters
+    assert [name for name in dead if name in params] == []
+
+    # metric() builds it with exactly the config's kwargs
+    # (stuff_class_inds=[0], thing_class_inds=list(range(1, num_semantic_classes))).
+    m = metric()
+    assert [name for name in dead if hasattr(m, name)] == []
+
+    source = Path(oneformer3d.unified_metric.__file__).read_text()
+    assert [name for name in dead if name in source] == []
 
 
 def test_scene_without_predictions_counts_zero_coverage():
