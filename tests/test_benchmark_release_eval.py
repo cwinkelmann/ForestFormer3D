@@ -6,8 +6,15 @@ pre-creates the preprocessing marker pkl (forainetv2_oneformer3d_infos_test.pkl)
 ff3d_preprocess takes its already-done branch under dry-run -- its own postcondition check
 (the real create_data call would produce that pkl, but under dry-run nothing really runs, so
 asserting on it would always fail; pre-seeding it is the documented workaround, see the task
-report). ff3d_prepare_checkpoint's docker call already resolves deterministically under
-dry-run (ff3d_run always returns 0, so it takes the "raw" branch) without needing torch/python.
+report).
+
+Per common.sh (ff3d_prepare_checkpoint, ff3d_daemonize -- see their comments): under
+FF3D_DRY_RUN=1 common.sh writes NOTHING to disk. ff3d_prepare_checkpoint prints the two
+commands it would have run and the three output paths it would have written, but does not
+determine or report a "raw"/"converted" layout (that can only be known by actually running
+the container). ff3d_daemonize, when FF3D_FOREGROUND is not already set, prints a
+"DRY: (daemonize skipped, continuing in foreground)" line and returns instead of forking --
+no log directory, no background process.
 
 No docker, no python subprocess side effects -- stdlib only.
 """
@@ -17,6 +24,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "benchmark" / "run_release_eval.sh"
+
+
+def _snapshot_files(d: Path) -> set:
+    if not d.exists():
+        return set()
+    return {str(p.relative_to(d)) for p in d.rglob("*") if p.is_file()}
 
 
 def _make_root(tmp_path):
@@ -71,9 +84,16 @@ def test_bash_syntax():
 def test_dry_run_prints_full_stage_sequence(tmp_path):
     root = _make_root(tmp_path)
     old = _make_old(tmp_path)
+    before = _snapshot_files(root / "work_dirs")
     r = _run(root, old)
     out = r.stdout
     assert r.returncode == 0, out
+
+    # a dry run writes nothing at all under work_dirs (no .layout/_converted/_raw files, no
+    # bench-release markers, no logs/ dir) -- per common.sh's ff3d_prepare_checkpoint and
+    # ff3d_daemonize dry-run contracts
+    after = _snapshot_files(root / "work_dirs")
+    assert after == before, f"dry run created/removed files under work_dirs: {after ^ before}"
 
     # 1. preprocessing marker already present -> skip branch, no docker call
     assert "preprocessing present, skipping" in out
@@ -176,16 +196,19 @@ def test_dry_run_never_writes_markers(tmp_path):
     root = _make_root(tmp_path)
     old = _make_old(tmp_path)
     bench_dir = root / "work_dirs" / "bench-release"
+    before = _snapshot_files(root / "work_dirs")
 
     r1 = _run(root, old)
     assert r1.returncode == 0, r1.stdout
     assert not bench_dir.exists() or list(bench_dir.glob(".done-*")) == []
+    assert _snapshot_files(root / "work_dirs") == before
 
     r2 = _run(root, old)
     out2 = r2.stdout
     assert r2.returncode == 0, out2
     assert not bench_dir.exists() or list(bench_dir.glob(".done-*")) == []
     assert "already done" not in out2
+    assert _snapshot_files(root / "work_dirs") == before
 
     fixed_test_lines = [
         l for l in out2.splitlines()
@@ -201,9 +224,10 @@ def test_dry_run_never_writes_markers(tmp_path):
     assert len(eval_lines) == 2, out2
 
 
-def test_foreground_default_daemonizes(tmp_path):
-    """Without FF3D_FOREGROUND=1, the script forks under nohup and returns immediately,
-    printing the log path (mirrors the manual check in the task brief)."""
+def test_dry_run_without_foreground_skips_fork(tmp_path):
+    """Per common.sh's ff3d_daemonize dry-run contract: with FF3D_DRY_RUN=1 and no
+    FF3D_FOREGROUND, the fork is skipped entirely (no log dir, no background process) and
+    the script continues in the foreground, printing its own dry-run output directly."""
     root = _make_root(tmp_path)
     old = _make_old(tmp_path)
     env = dict(
@@ -214,6 +238,37 @@ def test_foreground_default_daemonizes(tmp_path):
     )
     r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
+    assert "DRY: (daemonize skipped, continuing in foreground)" in r.stdout
+    assert "started release-eval pid" not in r.stdout
+    assert "release eval finished" in r.stdout
+    assert not (root / "work_dirs" / "logs").exists()
+
+
+def test_real_run_without_foreground_daemonizes(tmp_path):
+    """Without FF3D_DRY_RUN and without FF3D_FOREGROUND=1, the script forks under nohup and
+    returns immediately, printing the log path; the log then contains the same output a
+    foreground run would print (mirrors the manual check in the task brief). No checkpoint is
+    staged, so the forked run dies at the first precondition -- this only exercises the
+    daemonize/nohup re-exec path, not real inference."""
+    root = tmp_path / "root"
+    meta = root / "data" / "ForAINetV2" / "meta_data"
+    meta.mkdir(parents=True)
+    (meta / "test_list.txt").write_text("a_test\nb_test\n")
+    old = _make_old(tmp_path)
+    env = dict(os.environ, FF3D_ROOT=str(root), FF3D_OLD_ROOT=str(old))
+    r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout
     assert "started release-eval pid" in r.stdout
-    logs = list((root / "work_dirs" / "logs").glob("release-eval-*.log"))
+
+    import time
+    log_dir = root / "work_dirs" / "logs"
+    logs = []
+    for _ in range(50):
+        logs = list(log_dir.glob("release-eval-*.log"))
+        if logs and logs[0].read_text():
+            break
+        time.sleep(0.1)
     assert len(logs) == 1
+    text = logs[0].read_text()
+    assert "ERROR: missing" in text
+    assert "epoch_3000_fix.pth" in text

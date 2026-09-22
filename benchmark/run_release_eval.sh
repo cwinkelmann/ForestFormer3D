@@ -76,7 +76,15 @@ N_TEST="$(grep -c . "$FF3D_DATA/meta_data/test_list.txt")"
 ff3d_preprocess
 
 layout="$(ff3d_prepare_checkpoint work_dirs/clean_forestformer/epoch_3000_fix.pth work_dirs/clean_forestformer/epoch_3000)"
-ff3d_log "Zenodo checkpoint layout: $layout"
+# Under FF3D_DRY_RUN=1, ff3d_prepare_checkpoint writes nothing and $layout is its own
+# multi-line "DRY: (planned) ..." dump (the layout truly cannot be determined without
+# running the container), not a single "raw"/"converted" word -- print it as-is instead of
+# wrapping it in an ff3d_log line meant for a single-line real result.
+if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
+  printf '%s\n' "$layout"
+else
+  ff3d_log "Zenodo checkpoint layout: $layout"
+fi
 
 run_test_stage fixed work_dirs/clean_forestformer/epoch_3000_converted.pth "$FIXED_DIR" .done-fixed
 run_test_stage old   work_dirs/clean_forestformer/epoch_3000_raw.pth       "$OLD_DIR"   .done-old
