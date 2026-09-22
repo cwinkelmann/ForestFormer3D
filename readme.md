@@ -42,8 +42,7 @@ compiled for compute 8.0, 8.6, 8.9 and 9.0 (A100, A10/A40, L4/L40, H100). The pr
 CUDA 11.6 image is kept as `Dockerfile.a100-cu116` for reference; the manual steps 2 to 4
 below belong to that old image. With the new image nothing is reinstalled or copied by
 hand: `docker/entrypoint.sh` installs the `transforms_3d.py` patch and checks the CUDA
-extensions on every container start. (Until the training loop stops needing the `epoch`
-kwarg, `tools/train.py` still needs `loops.py` and `base_model.py` from step 4.)
+extensions on every container start.
 
 ```bash
 # Build, from the checkout root (30-60 min the first time; four CUDA architectures)

@@ -6,10 +6,6 @@
 #      segmentator/main.py imports .csrc.build.libsegmentator relative to the package.
 #   3. Verifies the CUDA extensions import.
 #   4. Executes the command given to `docker run` (default: bash).
-#
-# Until Phase 1 lands, tools/train.py additionally needs the two mmengine patches
-# (replace_mmdetection_files/loops.py and base_model.py, see readme.md step 4); the
-# smoke test calls model.loss() directly and does not need them.
 set -euo pipefail
 
 WORKSPACE="${WORKSPACE:-/workspace}"
