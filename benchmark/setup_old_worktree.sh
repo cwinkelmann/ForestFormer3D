@@ -73,7 +73,7 @@ ff3d_log "old worktree ready: $FF3D_OLD_ROOT @ $head"
 # creates).
 old_entrypoint="$FF3D_OLD_ROOT/docker/entrypoint.sh"
 mkdir -p "$FF3D_OLD_ROOT/docker"
-if [ ! -f "$old_entrypoint" ] || [ "$FF3D_ROOT/docker/entrypoint.sh" -nt "$old_entrypoint" ]; then
+if [ ! -f "$old_entrypoint" ] || ! cmp -s "$FF3D_ROOT/docker/entrypoint.sh" "$old_entrypoint"; then
   cp "$FF3D_ROOT/docker/entrypoint.sh" "$old_entrypoint"
   chmod +x "$old_entrypoint"
   ff3d_log "copied docker/entrypoint.sh into old worktree: $old_entrypoint"
