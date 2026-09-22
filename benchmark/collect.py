@@ -185,7 +185,7 @@ def render(date, release, training, epochs_target=200):
              '## Environment', '',
              'Hardware: carrot (H100), Docker image `forestformer3d:cu118` — the image (CUDA/Python/'
              'library versions) is the ONLY thing held constant between the two variants. Dataset: '
-             'ForAINetV2 test split (27 plots), scored in both cases with the FIXED `tools/final_eval.py`. '
+             'ForAINetV2 test split (28 plots), scored in both cases with the FIXED `tools/final_eval.py`. '
              'The **old** variant runs the ORIGINAL `main` @ 6a75c37 `tools/test.py`/`tools/train.py` '
              '*together with its own original config* (not the fixed config), checked out into a git '
              'worktree inside the same image — so code AND config both differ from the fixed variant, not '
