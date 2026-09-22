@@ -125,6 +125,11 @@ def _container_path(path: Path, repo: Path, what: str) -> str:
     return _shell_literal((CONTAINER_ROOT / rel).as_posix())
 
 
+def _interleave(first: list[Path], second: list[Path]) -> list[Path]:
+    """``[a1, b1, a2, b2, ...]`` -- keeps each tile's artefacts next to each other."""
+    return [path for pair in zip(first, second) for path in pair]
+
+
 def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
     """A step that sources benchmark/common.sh and runs ``inner`` via ``ff3d_docker``.
 
@@ -153,22 +158,51 @@ def plan_run(
 ) -> list[Step]:
     """Build the ordered step list for ``run`` without executing or writing anything.
 
+    ``las`` is one tile (path) or several (list of paths). Several tiles share ONE
+    ``preprocess`` and ONE ``inference`` step: the scan list simply gets one line per
+    tile, and ``tools/test.py`` writes one ``<stem>.ply`` per scan into ``--work-dir``.
+    The host-side steps run per tile and keep the single-tile output names, so a batch
+    of N tiles produces the same ``<out>/<stem>.{las,_trees.gpkg,_report.json,.md}`` as
+    N separate runs would.
+
     ``checkpoint`` and ``config`` are conventionally repo-relative (``work_dirs/...``,
     ``configs/...``); absolute ones must still point inside ``repo``. ``out`` defaults
-    to ``<repo>/work_dirs/tegel-<stem>``. ``timings`` (step name -> seconds) is filled
-    in by :func:`execute`; the report step reads ``timings["inference"]`` from it.
+    to ``<repo>/work_dirs/tegel-<stem>`` for a single tile and is required for several.
+    ``timings`` (step name -> seconds) is filled in by :func:`execute`; the report step
+    reads ``timings["inference"]`` from it (split evenly over the tiles of a batch).
     """
     repo = Path(repo).resolve()
-    las = Path(las).resolve()
-    stem = las.stem
-    if _UNSAFE_STEM.search(stem):
+    las_paths = [Path(p).resolve()
+                 for p in ([las] if isinstance(las, (str, Path)) else list(las))]
+    if not las_paths:
+        raise ValueError("--las needs at least one file")
+    stems = [p.stem for p in las_paths]
+    for stem in stems:
+        if _UNSAFE_STEM.search(stem):
+            raise ValueError(
+                f"scan name {stem!r} ends in _<digits>, which the ForAINetV2 data tools "
+                "treat as a block index and strip; rename the tile (e.g. ..._100m)"
+            )
+    if len(set(stems)) != len(stems):
         raise ValueError(
-            f"scan name {stem!r} ends in _<digits>, which the ForAINetV2 data tools "
-            "treat as a block index and strip; rename the tile (e.g. ..._100m)"
+            "--las contains duplicate scan names; every tile of a batch shares one "
+            f"scan list and one output dir, so the stems must be unique: {stems}"
         )
-    if origin is None:
-        origin = parse_origin(las.name)
-    out = _under_repo(Path(out) if out is not None else Path("work_dirs") / f"tegel-{stem}",
+    if len(las_paths) > 1:
+        # One origin cannot describe several tiles, and the default <out> is derived
+        # from a single stem: both have to be explicit (or parsed) per tile instead.
+        if origin is not None:
+            raise ValueError(
+                "--origin is only allowed with exactly one --las file; with several "
+                "tiles each origin is parsed from its own file name"
+            )
+        if out is None:
+            raise ValueError(
+                "--out must be given when several --las files are batched (the default "
+                "work_dirs/tegel-<stem> names a single tile)"
+            )
+    origins = [origin if origin is not None else parse_origin(p.name) for p in las_paths]
+    out = _under_repo(Path(out) if out is not None else Path("work_dirs") / f"tegel-{stems[0]}",
                       repo, "--out")
     config_rel = _repo_relative(Path(config), repo, "--config")
     checkpoint_rel = _repo_relative(Path(checkpoint), repo, "--checkpoint")
@@ -176,45 +210,53 @@ def plan_run(
 
     data_dir = repo / "data" / "ForAINetV2"
     instance_dir = data_dir / "forainetv2_instance_data"
-    input_ply = data_dir / "test_data" / f"{stem}.ply"
+    input_plys = [data_dir / "test_data" / f"{s}.ply" for s in stems]
     scan_list = out / "scan_list.txt"
     empty_list = out / "empty_list.txt"
-    sidecar = out / f"{stem}.sidecar.json"
-    result_ply = out / f"{stem}.ply"
-    offsets_npy = instance_dir / f"{stem}_offsets.npy"
-    vert_npy = instance_dir / f"{stem}_vert.npy"
+    sidecars = [out / f"{s}.sidecar.json" for s in stems]
+    result_plys = [out / f"{s}.ply" for s in stems]
+    offsets_npys = [instance_dir / f"{s}_offsets.npy" for s in stems]
+    vert_npys = [instance_dir / f"{s}_vert.npy" for s in stems]
     info_pkl = out / "forainetv2_oneformer3d_infos_test.pkl"
-    out_las = out / f"{stem}.las"
-    gpkg = out / f"{stem}_trees.gpkg"
-    report_json = out / f"{stem}_report.json"
-    report_md = out / f"{stem}_report.md"
+    out_lass = [out / f"{s}.las" for s in stems]
+    gpkgs = [out / f"{s}_trees.gpkg" for s in stems]
+    report_jsons = [out / f"{s}_report.json" for s in stems]
+    report_mds = [out / f"{s}_report.md" for s in stems]
     if timings is None:
         timings = {}
 
     def convert() -> None:
         out.mkdir(parents=True, exist_ok=True)
-        las_to_ply(las, input_ply, sidecar, origin=origin, epsg=epsg)
+        for src, input_ply, sidecar, tile_origin in zip(
+            las_paths, input_plys, sidecars, origins
+        ):
+            las_to_ply(src, input_ply, sidecar, origin=tile_origin, epsg=epsg)
 
     def prepare_inputs() -> None:
-        scan_list.write_text(f"{stem}\n")
+        # las_to_ply normally creates <out> first; mkdir here too so this step can
+        # also be run on its own (e.g. to rebuild only the scan list).
+        out.mkdir(parents=True, exist_ok=True)
+        scan_list.write_text("".join(f"{s}\n" for s in stems))
         empty_list.write_text("")
         # batch_load skips a scan whose _vert.npy already exists: drop stale exports
         # so a re-run really re-exports this tile.
         if instance_dir.is_dir():
-            for stale in instance_dir.glob(f"{stem}_*.npy"):
-                stale.unlink()
+            for stem in stems:
+                for stale in instance_dir.glob(f"{stem}_*.npy"):
+                    stale.unlink()
         # A previous run's result PLY must not survive: if this run's inference exits
         # 0 without writing one (e.g. an empty pkl), results_to_las would otherwise
         # silently georeference the old result.
-        if result_ply.is_file():
-            result_ply.unlink()
+        for result_ply in result_plys:
+            if result_ply.is_file():
+                result_ply.unlink()
 
     def check_preprocess() -> None:
         # batch_load reports a failed export on stderr but create_data only PRINTS
         # "no test scans with preprocessed data, skipping ..." and writes nothing, so
         # without these checks a preprocessing miss would only surface hours later,
         # after the GPU step, as a missing result PLY.
-        for path in (vert_npy, offsets_npy, info_pkl):
+        for path in (*_interleave(vert_npys, offsets_npys), info_pkl):
             if not path.is_file():
                 raise RuntimeError(
                     f"preprocessing did not produce {path}; see the container output above"
@@ -226,22 +268,39 @@ def plan_run(
             )
 
     def georeference() -> None:
-        results_to_las(result_ply, sidecar, offsets_npy, out_las)
+        for result_ply, sidecar, offsets_npy, out_las in zip(
+            result_plys, sidecars, offsets_npys, out_lass
+        ):
+            results_to_las(result_ply, sidecar, offsets_npy, out_las)
 
     def trees() -> None:
         # Imported lazily: geopandas is only needed for the reporting half.
         from ff3d_geo.trees import trees_to_gpkg
 
-        n = trees_to_gpkg(out_las, gpkg)
-        print(f"{gpkg}: {n} trees")
+        for out_las, gpkg in zip(out_lass, gpkgs):
+            n = trees_to_gpkg(out_las, gpkg)
+            print(f"{gpkg}: {n} trees")
 
     def report() -> None:
         # Imported lazily: geopandas is only needed for the reporting half.
         from ff3d_geo.report import build_report, report_markdown, write_report
 
-        rep = build_report(out_las, gpkg, runtime_s=timings.get("inference"))
-        write_report(rep, report_json, report_md)
-        print(report_markdown(rep))
+        # The whole batch went through one inference step, so charge each tile its
+        # share of that step's runtime rather than the batch total.
+        inference_s = timings.get("inference")
+        per_tile_s = None if inference_s is None else inference_s / len(stems)
+        for stem, out_las, gpkg, report_json, report_md in zip(
+            stems, out_lass, gpkgs, report_jsons, report_mds
+        ):
+            rep = build_report(out_las, gpkg, runtime_s=per_tile_s)
+            write_report(rep, report_json, report_md)
+            if len(stems) == 1:
+                print(report_markdown(rep))
+            else:
+                # N tiles of full markdown would bury the run; one line each instead
+                # (the per-tile markdown is still on disk as <stem>_report.md).
+                usable = "yes" if rep["recommendation"]["first_pass_usable"] else "no"
+                print(f"{stem}: {rep['n_trees']} trees, first pass usable: {usable}")
 
     preprocess_inner = (
         'bash -c "'
@@ -261,19 +320,33 @@ def plan_run(
         f"{_container_path(info_pkl, repo, 'info pkl')}"
     )
 
+    # Every detail is built as one "; "-joined entry per tile, so a single-tile plan
+    # renders exactly as it did before batching was added.
     return [
         Step(name="las_to_ply", func=convert,
-             name_detail=f"{las} -> {input_ply} (+ sidecar {sidecar})"),
+             name_detail="; ".join(
+                 f"{src} -> {input_ply} (+ sidecar {sidecar})"
+                 for src, input_ply, sidecar in zip(las_paths, input_plys, sidecars))),
         Step(name="prepare_inputs", func=prepare_inputs,
-             name_detail=f"write {scan_list}, {empty_list}; rm {instance_dir}/{stem}_*.npy"),
+             name_detail=f"write {scan_list}, {empty_list}; rm " + ", ".join(
+                 f"{instance_dir}/{s}_*.npy" for s in stems)),
         _docker_step("preprocess", preprocess_inner, repo, gpu),
         Step(name="check_preprocess", func=check_preprocess,
-             name_detail=f"require {vert_npy}, {offsets_npy}, {info_pkl}"),
+             name_detail="require " + ", ".join(
+                 str(p) for p in (*_interleave(vert_npys, offsets_npys), info_pkl))),
         _docker_step("inference", inference_inner, repo, gpu),
         Step(name="results_to_las", func=georeference,
-             name_detail=f"{result_ply} + {offsets_npy} -> {out_las}"),
-        Step(name="trees_to_gpkg", func=trees, name_detail=f"{out_las} -> {gpkg}"),
-        Step(name="report", func=report, name_detail=f"-> {report_json}, {report_md}"),
+             name_detail="; ".join(
+                 f"{result_ply} + {offsets_npy} -> {out_las}"
+                 for result_ply, offsets_npy, out_las in zip(
+                     result_plys, offsets_npys, out_lass))),
+        Step(name="trees_to_gpkg", func=trees,
+             name_detail="; ".join(f"{out_las} -> {gpkg}"
+                                   for out_las, gpkg in zip(out_lass, gpkgs))),
+        Step(name="report", func=report,
+             name_detail="-> " + "; ".join(
+                 f"{report_json}, {report_md}"
+                 for report_json, report_md in zip(report_jsons, report_mds))),
     ]
 
 
@@ -314,7 +387,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="convert, preprocess, infer, georeference, report")
-    run.add_argument("--las", required=True, type=Path, help="input ALS tile (LAS/LAZ)")
+    run.add_argument("--las", required=True, type=Path, nargs="+",
+                     help="input ALS tile(s) (LAS/LAZ); several sub-tiles share one "
+                          "preprocess and one inference step and then need --out")
     run.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT,
                      help="converted checkpoint, repo-relative (default: %(default)s)")
     run.add_argument("--out", type=Path, default=None,
@@ -360,8 +435,10 @@ def main(argv: list[str] | None = None) -> int:
         # and only then die inside laspy.read with a bare FileNotFoundError; check
         # up front, before any step runs, for a clear error instead. --dry-run only
         # prints the plan and is allowed to run ahead of the input file existing.
-        if not args.dry_run and not Path(args.las).is_file():
-            raise ValueError(f"--las {args.las} does not exist")
+        if not args.dry_run:
+            for path in args.las:
+                if not Path(path).is_file():
+                    raise ValueError(f"--las {path} does not exist")
         origin = tuple(args.origin) if args.origin else None
         timings: dict[str, float] = {}
         steps = plan_run(

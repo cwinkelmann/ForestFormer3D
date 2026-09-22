@@ -435,3 +435,41 @@ def test_module_entry_point_shows_help():
                           capture_output=True, text=True, cwd=str(REPO_ROOT))
     assert proc.returncode == 0
     assert "{run,convert,georef,report}" in proc.stdout
+
+
+# --- batched run: several --las sub-tiles in one preprocess + one inference ---------
+
+BATCH_A = "t_E381000_N5829000_100m"
+BATCH_B = "t_E381100_N5829000_100m"
+
+
+def test_run_accepts_several_las_files_in_one_batch(fake_repo, tmp_path):
+    a = tmp_path / f"{BATCH_A}.las"
+    a.write_bytes(b"")
+    b = tmp_path / f"{BATCH_B}.las"
+    b.write_bytes(b"")
+    steps = plan_run([a, b], out=fake_repo / "work_dirs" / "batch", repo=fake_repo, gpu="5")
+    names = [s.name for s in steps]
+    assert names == ["las_to_ply", "prepare_inputs", "preprocess", "check_preprocess",
+                     "inference", "results_to_las", "trees_to_gpkg", "report"]
+    rendered = "\n".join(s.render() for s in steps)
+    assert rendered.count("ff3d_docker") == 2  # one preprocess, one inference
+    assert BATCH_A in rendered and BATCH_B in rendered
+
+
+def test_run_batch_requires_out_and_rejects_origin(fake_repo, tmp_path):
+    a = tmp_path / f"{BATCH_A}.las"
+    b = tmp_path / f"{BATCH_B}.las"
+    with pytest.raises(ValueError, match="--out"):
+        plan_run([a, b], repo=fake_repo)
+    with pytest.raises(ValueError, match="--origin"):
+        plan_run([a, b], out=fake_repo / "work_dirs" / "x", origin=(1.0, 2.0), repo=fake_repo)
+
+
+def test_run_batch_prepare_inputs_writes_all_stems(fake_repo, tmp_path):
+    a = tmp_path / f"{BATCH_A}.las"
+    b = tmp_path / f"{BATCH_B}.las"
+    out = fake_repo / "work_dirs" / "batch"
+    steps = plan_run([a, b], out=out, repo=fake_repo)
+    next(s for s in steps if s.name == "prepare_inputs").func()
+    assert (out / "scan_list.txt").read_text().splitlines() == [a.stem, b.stem]
