@@ -32,20 +32,25 @@
 # and off by default; the primary intended usage is still wrapping the whole invocation
 # externally, as in the usage examples above.
 #
-# FF3D_DRY_RUN=1 postconditions: every file-existence check on an artefact this script's
-# OWN preceding command was supposed to just produce (epoch_<N>.pth after train.py, the
-# test-split .ply count after test.py, the F1 line in evaluation_total_test.txt after
-# final_eval.py) is skipped with a "DRY: (postcondition skipped) <path>" line instead of
-# ff3d_die, exactly like common.sh's ff3d_preprocess (commit 6738a5f) -- because under a
-# dry run the preceding docker command was only printed, never actually run, so none of
-# these artefacts exist yet. Preconditions on things the user must already have supplied
-# (the config, the data, the old worktree) are NOT touched by this and still die for real.
-# One exception: the train postcondition also stubs an empty epoch_<N>.pth file (not just
-# a log line) when skipped, because common.sh's ff3d_prepare_checkpoint (not owned by this
-# script) has its own unconditional, non-dry-run-aware precondition
-# `[ -f "$FF3D_ROOT/$in" ] || ff3d_die "checkpoint missing: ..."` on that exact path; without
-# the stub a fresh dry run of the whole pipeline could never reach the test/final_eval
-# stages.
+# FF3D_DRY_RUN=1: this script writes NOTHING under work_dirs, same contract as common.sh
+# (commits 6738a5f, b7000f8, 5c723ec):
+#   - every mutating filesystem command (mkdir, touch, rm) goes through common.sh's
+#     ff3d_run, which prints it instead of executing it, exactly like ff3d_docker/
+#     ff3d_docker_old already do for the docker invocations themselves.
+#   - every file-existence POSTcondition check on an artefact this script's own preceding
+#     command was supposed to just produce (epoch_<N>.pth after train.py, the test-split
+#     .ply count after test.py, the F1 line in evaluation_total_test.txt after
+#     final_eval.py) is skipped with a "DRY: (postcondition skipped) <path>" line instead
+#     of ff3d_die -- because under a dry run the preceding docker command was only
+#     printed, never actually run, so none of these artefacts exist yet, and (since
+#     nothing is written) never will.
+# PREconditions on things the user must already have supplied (the config, the data, the
+# old worktree) are untouched by any of this and still die for real under a dry run.
+# common.sh's ff3d_prepare_checkpoint (stage 2) has matching dry-run behaviour of its own:
+# it never touches the filesystem and cannot report a real layout (that requires actually
+# running the container), so `layout` here becomes its "DRY: ..." explanation text rather
+# than "raw"/"converted", which routes to the (harmless, informational) WARNING branch
+# below every dry run -- expected, not a bug.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -71,7 +76,7 @@ if [ "$VARIANT" = "old" ]; then RUNNER=ff3d_docker_old; else RUNNER=ff3d_docker;
 ff3d_log "train-${VARIANT}-200 start (root $FF3D_ROOT, image $FF3D_IMAGE, epochs $EPOCHS)"
 [ "$VARIANT" = "fixed" ] || [ -f "$FF3D_OLD/tools/test.py" ] || ff3d_die "missing old worktree (run benchmark/setup_old_worktree.sh)"
 ff3d_preprocess
-mkdir -p "$FF3D_ROOT/$WORK"
+ff3d_run mkdir -p "$FF3D_ROOT/$WORK"
 
 # 1. train
 if [ -f "$FF3D_ROOT/$WORK/.done-train" ]; then
@@ -87,11 +92,10 @@ else
   "$RUNNER" python tools/train.py "$FF3D_CONFIG" --work-dir "$WORK" ${RESUME[@]+"${RESUME[@]}"} --cfg-options "${CFG_OPTS[@]}"
   if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
     echo "DRY: (postcondition skipped) $FF3D_ROOT/$WORK/epoch_${EPOCHS}.pth"
-    : > "$FF3D_ROOT/$WORK/epoch_${EPOCHS}.pth"   # stub: see the FF3D_DRY_RUN header comment
   else
     [ -f "$FF3D_ROOT/$WORK/epoch_${EPOCHS}.pth" ] || ff3d_die "training finished without $WORK/epoch_${EPOCHS}.pth"
   fi
-  touch "$FF3D_ROOT/$WORK/.done-train"
+  ff3d_run touch "$FF3D_ROOT/$WORK/.done-train"
   ff3d_log "training done"
 fi
 
@@ -105,8 +109,8 @@ if [ "$VARIANT" = "old" ]; then CKPT="$WORK/epoch_${EPOCHS}_raw.pth"; else CKPT=
 if [ -f "$FF3D_ROOT/$TEST_OUT/.done-test" ]; then
   ff3d_log "test.py already done ($TEST_OUT)"
 else
-  mkdir -p "$FF3D_ROOT/$TEST_OUT"
-  rm -f "$FF3D_ROOT/$TEST_OUT"/*.ply
+  ff3d_run mkdir -p "$FF3D_ROOT/$TEST_OUT"
+  ff3d_run rm -f "$FF3D_ROOT/$TEST_OUT"/*.ply
   ff3d_log "tools/test.py ($VARIANT) $CKPT -> $TEST_OUT"
   "$RUNNER" python tools/test.py "$FF3D_CONFIG" "$CKPT" --work-dir "$TEST_OUT"
   if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
@@ -115,14 +119,14 @@ else
     n="$(find "$FF3D_ROOT/$TEST_OUT" -maxdepth 1 -name '*.ply' | wc -l | tr -d ' ')"
     [ "$n" = "$N_TEST" ] || ff3d_die "$VARIANT produced $n ply files, expected $N_TEST in $TEST_OUT"
   fi
-  touch "$FF3D_ROOT/$TEST_OUT/.done-test"
+  ff3d_run touch "$FF3D_ROOT/$TEST_OUT/.done-test"
 fi
 
 # 4. score with the fixed final_eval.py from the main checkout
 if [ -f "$FF3D_ROOT/$TEST_OUT/.done-eval" ]; then
   ff3d_log "final_eval already done ($TEST_OUT)"
 else
-  rm -f "$FF3D_ROOT/$TEST_OUT/evaluation_total_test.txt"
+  ff3d_run rm -f "$FF3D_ROOT/$TEST_OUT/evaluation_total_test.txt"
   ff3d_docker python tools/final_eval.py "$TEST_OUT"
   if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
     echo "DRY: (postcondition skipped) $FF3D_ROOT/$TEST_OUT/evaluation_total_test.txt"
@@ -130,7 +134,7 @@ else
     grep -q '^Instance Segmentation F1 score:' "$FF3D_ROOT/$TEST_OUT/evaluation_total_test.txt" \
       || ff3d_die "no F1 line in $TEST_OUT/evaluation_total_test.txt"
   fi
-  touch "$FF3D_ROOT/$TEST_OUT/.done-eval"
+  ff3d_run touch "$FF3D_ROOT/$TEST_OUT/.done-eval"
 fi
 if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
   echo "DRY: (postcondition skipped) $FF3D_ROOT/$TEST_OUT/evaluation_total_test.txt (F1 report line)"

@@ -1,20 +1,28 @@
 """benchmark/run_train_200.sh, stdlib-only (subprocess).
 
-Exercised entirely through FF3D_DRY_RUN=1 (common.sh's ff3d_run prints the docker command
-line instead of running it) plus FF3D_FOREGROUND=1 (skips the nohup self-daemonize). No
-docker, no GPU, no torch: this file only ever inspects the shell commands the script would
-have run.
+Exercised entirely through FF3D_DRY_RUN=1 (common.sh's ff3d_run prints the docker/mkdir/
+touch/rm command line instead of running it) plus FF3D_FOREGROUND=1 (skips the nohup
+self-daemonize). No docker, no GPU, no torch: this file only ever inspects the shell
+commands the script would have run.
 
-A dry run never actually produces epoch_200.pth / *.ply / evaluation_total_test.txt, so
-every postcondition check on one of THOSE artefacts is dry-run-aware in the script itself
-(commit "bench: run_train_200.sh postconditions are dry-run aware", mirroring common.sh's
-ff3d_preprocess fix in 6738a5f): it prints "DRY: (postcondition skipped) <path>" instead of
-dying. That means a single fresh dry run -- with NO post-training artefacts pre-seeded --
-now runs the complete sequence through final_eval and exits 0; the tests below rely on
-that rather than pre-seeding epoch_200.pth/checkpoints/markers to dodge each check in turn.
+Contract (common.sh commits 6738a5f, b7000f8, 5c723ec; run_train_200.sh "postconditions are
+dry-run aware" and "dry run creates no files"): under FF3D_DRY_RUN=1 NOTHING is written --
+not epoch_200.pth, not the .ply files, not evaluation_total_test.txt, and not even the
+.done-train/.done-test/.done-eval marker files or the work_dirs/... directories themselves
+(mkdir/touch/rm all go through ff3d_run). Every file-existence postcondition check on an
+artefact the script's own preceding command was supposed to just produce is skipped with a
+"DRY: (postcondition skipped) <path>" line instead of ff3d_die. That means a single fresh
+dry run -- with NOTHING pre-seeded beyond the data/preprocessing precondition -- runs the
+complete sequence through final_eval and exits 0, while leaving the temp FF3D_ROOT
+byte-for-byte as it started (verified with a directory snapshot before/after).
 
 Preconditions on things the user must actually supply (data present, old worktree present)
-are untouched by that fix and still fail for real -- covered separately below.
+are untouched by any of this and still fail for real -- covered separately below.
+
+common.sh's ff3d_prepare_checkpoint has its own matching dry-run branch: it can't determine
+a real layout without running the container, so it never prints "raw"/"converted" under a
+dry run -- run_train_200.sh's `layout` variable becomes that explanation text instead,
+which routes to its (harmless, informational) WARNING log line every dry run.
 """
 import os
 import subprocess
@@ -65,6 +73,11 @@ def _seed_old_worktree(old_root: Path):
     (old_root / "tools" / "test.py").write_text("# stub\n")
 
 
+def _snapshot(root: Path):
+    """All paths (files and dirs) under root, relative -- for before/after dry-run diffs."""
+    return {p.relative_to(root) for p in root.rglob("*")}
+
+
 def test_bash_syntax_ok():
     r = subprocess.run([BASH, "-n", str(SCRIPT)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -93,10 +106,11 @@ def test_old_variant_dies_without_old_worktree(tmp_path):
 
 
 @pytest.mark.parametrize("variant,ckpt_suffix", [("fixed", "converted"), ("old", "raw")])
-def test_dry_run_full_sequence_through_final_eval(tmp_path, variant, ckpt_suffix):
+def test_dry_run_full_sequence_creates_no_files(tmp_path, variant, ckpt_suffix):
     """Fresh run, NOTHING pre-seeded beyond the data/preprocessing precondition: the dry
     postconditions let the script run the complete sequence -- preprocess-skip, train.py,
-    checkpoint prep, test.py, final_eval.py -- and exit 0.
+    checkpoint prep, test.py, final_eval.py -- and exit 0, while writing nothing at all
+    under FF3D_ROOT (mkdir/touch/rm are all ff3d_run-gated too).
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -107,33 +121,47 @@ def test_dry_run_full_sequence_through_final_eval(tmp_path, variant, ckpt_suffix
     if old_root:
         _seed_old_worktree(old_root)
 
+    before = _snapshot(root)
     r = _run(_base_env(root, variant, old_root), [variant], cwd=root)
+    after = _snapshot(root)
     out = r.stdout + r.stderr
 
     assert r.returncode == 0, out
+    assert before == after, f"dry run wrote/removed paths under {root}: {after - before} / removed: {before - after}"
+
     assert "preprocessing present, skipping" in out
 
-    # 1. train.py: correct config, work-dir and the three cfg-options
+    # 1. train.py: correct config, work-dir and the three cfg-options; work-dir mkdir and
+    # the epoch_200.pth postcondition are both printed, not executed.
+    assert f"DRY: mkdir -p {root}/{work_rel}" in out
     assert "python tools/train.py configs/oneformer3d_qs_radius16_qp300_2many.py" in out
     assert f"--work-dir {work_rel}" in out
     assert "--cfg-options train_cfg.max_epochs=200 train_cfg.val_interval=20 default_hooks.checkpoint.max_keep_ckpts=2" in out
     assert f"DRY: (postcondition skipped) {root}/{work_rel}/epoch_200.pth" in out
+    assert f"DRY: touch {root}/{work_rel}/.done-train" in out
     assert "training done" in out
 
-    # 2. checkpoint prep on epoch_200.pth
+    # 2. checkpoint prep on epoch_200.pth: common.sh's own dry-run branch (never determines
+    # a real layout), which routes to the WARNING log line here.
+    assert f"DRY: (input not present yet) {work_rel}/epoch_200.pth" in out
     assert f"tools/fix_spconv_checkpoint.py --in-path {work_rel}/epoch_200.pth" in out
     assert f"--out-path {work_rel}/epoch_200_converted.pth" in out
-    assert "epoch_200.pth layout: raw" in out
+    assert "WARNING: freshly trained checkpoint reported as" in out
 
-    # 3. test.py uses the correct checkpoint file for this variant
+    # 3. test.py uses the correct checkpoint file for this variant. No files match the glob
+    # yet, so bash leaves it unexpanded and ff3d_run's `printf ' %q'` shell-quotes the literal
+    # "*" (-> "\*.ply") when it prints the command.
+    assert f"DRY: rm -f {root}/{work_rel}/test/\\*.ply" in out
     assert (f"python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py "
             f"{work_rel}/epoch_200_{ckpt_suffix}.pth "
             f"--work-dir {work_rel}/test") in out
     assert f"DRY: (postcondition skipped) {root}/{work_rel}/test/*.ply (expected 1)" in out
+    assert f"DRY: touch {root}/{work_rel}/test/.done-test" in out
 
     # 4. final_eval.py, always through the FIXED image/checkout even for the old variant
     assert f"python tools/final_eval.py {work_rel}/test" in out
     assert f"DRY: (postcondition skipped) {root}/{work_rel}/test/evaluation_total_test.txt" in out
+    assert f"DRY: touch {root}/{work_rel}/test/.done-eval" in out
 
     assert f"train-{variant}-200 finished" in out
 
@@ -147,18 +175,13 @@ def test_dry_run_full_sequence_through_final_eval(tmp_path, variant, ckpt_suffix
         assert f"-v {root}:/workspace" in out
         assert "old_prelude.sh" not in out
 
-    # the postcondition-skip stub + the real "done" markers this script always writes
-    work = root / work_rel
-    assert (work / "epoch_200.pth").exists()
-    assert (work / ".done-train").exists()
-    assert (work / "test" / ".done-test").exists()
-    assert (work / "test" / ".done-eval").exists()
-
 
 @pytest.mark.parametrize("variant,ckpt_suffix", [("fixed", "converted"), ("old", "raw")])
-def test_dry_run_skips_completed_stages(tmp_path, variant, ckpt_suffix):
-    """Train/checkpoint/test stages already marked done from a prior run -> re-running
-    skips straight to final_eval.py without re-invoking train.py/test.py.
+def test_dry_run_skips_completed_stages_and_creates_no_files(tmp_path, variant, ckpt_suffix):
+    """Train/checkpoint/test stages already marked done from a prior REAL run (files placed
+    directly by the test, not by this dry run) -> re-running skips straight to final_eval.py
+    without re-invoking train.py/test.py, and still writes nothing new (the final .done-eval
+    touch is ff3d_run-gated too).
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -178,13 +201,18 @@ def test_dry_run_skips_completed_stages(tmp_path, variant, ckpt_suffix):
     if old_root:
         _seed_old_worktree(old_root)
 
+    before = _snapshot(root)
     r = _run(_base_env(root, variant, old_root), [variant], cwd=root)
+    after = _snapshot(root)
     out = r.stdout + r.stderr
 
     assert r.returncode == 0, out
+    assert before == after, f"dry run wrote/removed paths under {root}: {after - before} / removed: {before - after}"
+
     assert "training already done" in out
     assert "test.py already done" in out
     assert "python tools/train.py" not in out
     assert "python tools/test.py" not in out
     assert f"python tools/final_eval.py work_dirs/bench-{variant}-200/test" in out
-    assert (test_out / ".done-eval").exists()
+    assert f"DRY: touch {test_out}/.done-eval" in out
+    assert not (test_out / ".done-eval").exists()
