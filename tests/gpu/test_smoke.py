@@ -115,7 +115,9 @@ def test_loss_is_finite_and_backpropagates(model, plot):
 
     # epoch > prepare_epoch (1000 in the config) exercises the query decoder and the
     # instance criterion, not only the discriminative / binary-semantic losses.
-    losses = model.loss(inputs, samples, epoch=2000)
+    from mmengine.logging import MessageHub
+    MessageHub.get_current_instance().update_info('epoch', 2000)
+    losses = model.loss(inputs, samples)
 
     assert "discriminative_loss" in losses and "semantic_loss_bi" in losses
     tensors = {k: v for k, v in losses.items() if torch.is_tensor(v)}

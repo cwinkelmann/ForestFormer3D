@@ -7,6 +7,7 @@ import MinkowskiEngine as ME
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import PointData
 from mmdet3d.models import Base3DDetector
+from mmengine.logging import MessageHub
 from .mask_matrix_nms import mask_matrix_nms
 import open3d as o3d
 import os
@@ -26,6 +27,23 @@ from sklearn.neighbors import NearestNeighbors
 from plyfile import PlyData, PlyElement
 
 import contextlib, time
+
+
+def current_epoch_from_hub() -> int:
+    """Epoch published by mmengine's RuntimeInfoHook; 0 when no runner is active."""
+    epoch = MessageHub.get_current_instance().get_info('epoch')
+    return 0 if epoch is None else int(epoch)
+
+
+def query_stage_active(prepare_epoch, epoch: int) -> bool:
+    """True when query/decoder losses are trained.
+
+    ``prepare_epoch=None`` disables the warm-up entirely; otherwise the decoder
+    is trained from epoch ``prepare_epoch + 1`` on (same comparison as before,
+    but 0 is no longer treated as "unset").
+    """
+    return prepare_epoch is None or epoch > prepare_epoch
+
 
 class UnionFind:
     def __init__(self, n):
@@ -1966,109 +1984,113 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         queries_inslabel = []
         queries_idx = []
 
-        if self.prepare_epoch:
-            if kwargs['epoch'] > self.prepare_epoch:
-                total_qscore_loss = 0
-                for i in range(batch_size):
-                    voxel_superpoints = inverse_mapping[coordinates[:, 0][inverse_mapping] == i]
-                    voxel_superpoints = torch.unique(voxel_superpoints, return_inverse=True)[1]
-                    pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
-                    instance_mask = batch_data_samples[i].gt_pts_seg.instance_mask
-                    valid_voxel_indices = torch.unique(voxel_superpoints[instance_mask])
+        if query_stage_active(self.prepare_epoch, current_epoch_from_hub()):
+            total_qscore_loss = 0
+            for i in range(batch_size):
+                voxel_superpoints = inverse_mapping[coordinates[:, 0][inverse_mapping] == i]
+                voxel_superpoints = torch.unique(voxel_superpoints, return_inverse=True)[1]
+                pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
+                instance_mask = batch_data_samples[i].gt_pts_seg.instance_mask
+                valid_voxel_indices = torch.unique(voxel_superpoints[instance_mask])
+                
+                with torch.no_grad():
+                    if valid_voxel_indices.numel() < 10:
+                        queries.append([])
+                        queries_inslabel.append([])
+                        continue
+                    voxel_instance_labels = self.get_voxel_instance_labels(
+                                        pts_instance_mask[instance_mask], 
+                                        voxel_superpoints[instance_mask]
+                                    )
                     
-                    with torch.no_grad():
-                        if valid_voxel_indices.numel() < 10:
-                            queries.append([])
-                            queries_inslabel.append([])
-                            continue
-                        voxel_instance_labels = self.get_voxel_instance_labels(
-                                            pts_instance_mask[instance_mask], 
-                                            voxel_superpoints[instance_mask]
-                                        )
-                        
-                        wood_class = 1
-                        
-                        semantic_predictions_bi = torch.argmax(bi_semantic_logits[i], dim=1)
-                        tree_indices = torch.where(semantic_predictions_bi == wood_class)[0]  #all voxel
-                        
-                        #FPS from all tree points
-                        batch_tensor_4 = torch.zeros(embed_logits[i][tree_indices].size(0), dtype=torch.long).to(embed_logits[i].device)  # Ensure batch_tensor on same device
-                        topk_indices_4 = fps(embed_logits[i][tree_indices], batch_tensor_4, ratio=min(self.query_point_num / embed_logits[i][tree_indices].size(0), torch.tensor([1.0]).to(embed_logits[i].device)))
-                        selected_indices_case4 = tree_indices[topk_indices_4]
+                    wood_class = 1
+                    
+                    semantic_predictions_bi = torch.argmax(bi_semantic_logits[i], dim=1)
+                    tree_indices = torch.where(semantic_predictions_bi == wood_class)[0]  #all voxel
+                    if tree_indices.numel() == 0:
+                        # no predicted foreground in this crop: nothing to sample queries from
+                        queries.append([])
+                        queries_inslabel.append([])
+                        continue
 
-                        # Retrieve relevant information for the selected points
-                        current_points = batch_inputs_dict['points'][i]
-                        current_points_add = scatter_add(current_points, voxel_superpoints, dim=0)
-                        voxel_counts = scatter_add(torch.ones_like(current_points[:, 0].float()), voxel_superpoints, dim=0)
-                        avg_points = current_points_add / voxel_counts.unsqueeze(-1).clamp(min=1)
+                    #FPS from all tree points
+                    batch_tensor_4 = torch.zeros(embed_logits[i][tree_indices].size(0), dtype=torch.long).to(embed_logits[i].device)  # Ensure batch_tensor on same device
+                    topk_indices_4 = fps(embed_logits[i][tree_indices], batch_tensor_4, ratio=min(self.query_point_num / embed_logits[i][tree_indices].size(0), torch.tensor([1.0]).to(embed_logits[i].device)))
+                    selected_indices_case4 = tree_indices[topk_indices_4]
 
-                        # add content queries
-                        queries.append(x[i][selected_indices_case4])
-                        
-                        pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
-                        voxel_instance_labels = self.get_voxel_instance_labels(
-                            pts_instance_mask, 
-                            voxel_superpoints
-                        )
+                    # Retrieve relevant information for the selected points
+                    current_points = batch_inputs_dict['points'][i]
+                    current_points_add = scatter_add(current_points, voxel_superpoints, dim=0)
+                    voxel_counts = scatter_add(torch.ones_like(current_points[:, 0].float()), voxel_superpoints, dim=0)
+                    avg_points = current_points_add / voxel_counts.unsqueeze(-1).clamp(min=1)
 
-                        # ins labels for queries
-                        queries_inslabel.append(voxel_instance_labels[selected_indices_case4])
+                    # add content queries
+                    queries.append(x[i][selected_indices_case4])
+                    
+                    pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
+                    voxel_instance_labels = self.get_voxel_instance_labels(
+                        pts_instance_mask, 
+                        voxel_superpoints
+                    )
 
-                        queries_idx.append(selected_indices_case4)
+                    # ins labels for queries
+                    queries_inslabel.append(voxel_instance_labels[selected_indices_case4])
 
-                if all(len(q) == 0 for q in queries):
-                    pass
+                    queries_idx.append(selected_indices_case4)
+
+            if all(len(q) == 0 for q in queries):
+                pass
+            else:
+                # First check if the length of x and queries are the same
+                if any(len(q) == 0 for q in queries):
+
+                    # Use list comprehension to filter out empty queries and save original indices
+                    filtered_results = [
+                        (x[i], queries[i], batch_data_samples[i], queries_inslabel[i], i)  # Keep the original index i
+                        for i in range(len(queries))
+                        if len(queries[i]) > 0  # Only keep non-empty queries
+                    ]
+                    # Unpack filtered results into separate lists
+                    x, queries, batch_data_samples, queries_inslabel, original_indices = zip(*filtered_results)
+                    # Convert the zipped result back to list format
+                    x = list(x)
+                    queries = list(queries)
+                    batch_data_samples = list(batch_data_samples)
+                    queries_inslabel = list(queries_inslabel)
+                    original_indices = list(original_indices)  # Keep track of original indices
                 else:
-                    # First check if the length of x and queries are the same
-                    if any(len(q) == 0 for q in queries):
+                    original_indices = list(range(len(batch_data_samples)))
+                    
+                x = self.decoder(x, queries)
 
-                        # Use list comprehension to filter out empty queries and save original indices
-                        filtered_results = [
-                            (x[i], queries[i], batch_data_samples[i], queries_inslabel[i], i)  # Keep the original index i
-                            for i in range(len(queries))
-                            if len(queries[i]) > 0  # Only keep non-empty queries
-                        ]
-                        # Unpack filtered results into separate lists
-                        x, queries, batch_data_samples, queries_inslabel, original_indices = zip(*filtered_results)
-                        # Convert the zipped result back to list format
-                        x = list(x)
-                        queries = list(queries)
-                        batch_data_samples = list(batch_data_samples)
-                        queries_inslabel = list(queries_inslabel)
-                        original_indices = list(original_indices)  # Keep track of original indices
-                    else:
-                        original_indices = list(range(len(batch_data_samples)))
-                        
-                    x = self.decoder(x, queries)
+                sp_gt_instances = []
+                for i in range(len(batch_data_samples)):
+                    voxel_superpoints = inverse_mapping[coordinates[:, 0][ \
+                                                                inverse_mapping] == original_indices[i]] #[326894]
+                    voxel_superpoints = torch.unique(voxel_superpoints,  
+                                                    return_inverse=True)[1]
+                    inst_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask 
+                    sem_mask = batch_data_samples[i].gt_pts_seg.pts_semantic_mask 
+                    assert voxel_superpoints.shape == inst_mask.shape
 
-                    sp_gt_instances = []
-                    for i in range(len(batch_data_samples)):
-                        voxel_superpoints = inverse_mapping[coordinates[:, 0][ \
-                                                                    inverse_mapping] == original_indices[i]] #[326894]
-                        voxel_superpoints = torch.unique(voxel_superpoints,  
-                                                        return_inverse=True)[1]
-                        inst_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask 
-                        sem_mask = batch_data_samples[i].gt_pts_seg.pts_semantic_mask 
-                        assert voxel_superpoints.shape == inst_mask.shape
+                    batch_data_samples[i].gt_instances_3d.sp_sem_masks = \
+                                        self.get_gt_semantic_masks(sem_mask,
+                                                                    voxel_superpoints,
+                                                                    self.num_classes)  
+                    batch_data_samples[i].gt_instances_3d.sp_inst_masks = \
+                                        self.get_gt_inst_masks(inst_mask,
+                                                            voxel_superpoints) 
+                    
+                    batch_data_samples[i].gt_instances_3d.labels_3d, batch_data_samples[i].gt_instances_3d.sp_inst_masks, batch_data_samples[i].gt_instances_3d.ratio_inspoint = \
+                                        self.filter_stuff_masks(batch_data_samples[i].gt_instances_3d, self.stuff_classes, batch_data_samples[i].gt_pts_seg.ratio_inspoint)
+                    
+                    batch_data_samples[i].gt_instances_3d.query_inslabel = queries_inslabel[i]
+                    
 
-                        batch_data_samples[i].gt_instances_3d.sp_sem_masks = \
-                                            self.get_gt_semantic_masks(sem_mask,
-                                                                        voxel_superpoints,
-                                                                        self.num_classes)  
-                        batch_data_samples[i].gt_instances_3d.sp_inst_masks = \
-                                            self.get_gt_inst_masks(inst_mask,
-                                                                voxel_superpoints) 
-                        
-                        batch_data_samples[i].gt_instances_3d.labels_3d, batch_data_samples[i].gt_instances_3d.sp_inst_masks, batch_data_samples[i].gt_instances_3d.ratio_inspoint = \
-                                            self.filter_stuff_masks(batch_data_samples[i].gt_instances_3d, self.stuff_classes, batch_data_samples[i].gt_pts_seg.ratio_inspoint)
-                        
-                        batch_data_samples[i].gt_instances_3d.query_inslabel = queries_inslabel[i]
-                        
+                    sp_gt_instances.append(batch_data_samples[i].gt_instances_3d)  
 
-                        sp_gt_instances.append(batch_data_samples[i].gt_instances_3d)  
-
-                    loss = self.criterion(x, sp_gt_instances) 
-                    loss_final.update(loss)
+                loss = self.criterion(x, sp_gt_instances) 
+                loss_final.update(loss)
         return loss_final
 
     #def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):

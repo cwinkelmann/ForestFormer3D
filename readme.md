@@ -153,15 +153,17 @@ pip install torch-cluster --no-cache-dir --no-deps
 
 ### **4. Replace required files**
 
-```bash
-# Find the mmengine package path
-pip show mmengine
+The Docker entrypoint (`docker/entrypoint.sh`) does this automatically. When running outside the image:
 
-# Replace the following files with updated versions:
-cp replace_mmdetection_files/loops.py /opt/conda/lib/python3.10/site-packages/mmengine/runner/
-cp replace_mmdetection_files/base_model.py /opt/conda/lib/python3.10/site-packages/mmengine/model/base_model/
+```bash
+# Find the mmdet3d package path
+pip show mmdet3d
+
+# The only file that must be replaced (adds vote_label handling to flip/rotate/scale):
 cp replace_mmdetection_files/transforms_3d.py /opt/conda/lib/python3.10/site-packages/mmdet3d/datasets/transforms/
 ```
+
+No mmengine files are patched any more: the model reads the current epoch from `mmengine.logging.MessageHub`, so `tools/dist_train.sh` works as well.
 
 ### **5. Run the program**
 
