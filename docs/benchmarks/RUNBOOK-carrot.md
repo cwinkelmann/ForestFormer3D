@@ -23,7 +23,8 @@ chown step.
 
 ```bash
 # on the Mac: VPN up, then
-ssh carrot                                   # alias for cwinkelmann@10.188.1.1
+ssh carrot                                   # the `carrot` alias in ~/.ssh/config points at
+                                              # cwinkelmann@10.188.1.1 (VPN required)
 cd /raid/cwinkelmann/ForestFormer3D
 docker image inspect forestformer3d:cu118 --format '{{.Id}}'   # already built; must succeed
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv   # confirm GPU 2/3/4 are free
@@ -140,15 +141,18 @@ Run once both the release eval and (at least one of) the trainings have produced
 
 ```bash
 DATE=$(date +%F)
-docker run --rm -e PYTHONPATH=/workspace -w /workspace \
+docker run --rm --entrypoint python -e PYTHONPATH=/workspace -w /workspace \
   -v /raid/cwinkelmann/ForestFormer3D:/workspace \
-  forestformer3d:cu118 python3 benchmark/collect.py --root /workspace --date "$DATE" --allow-missing
+  forestformer3d:cu118 benchmark/collect.py --root /workspace --date "$DATE" --allow-missing
 cat docs/benchmarks/$DATE-carrot-ff3d.md
 ```
-`collect.py` is pure Python + numpy (no torch/mmengine import, no GPU needed), so no `--gpus`
-flag; the container is used only so nothing extra has to be installed on the host. Drop
-`--allow-missing` once all four inputs (2 release `evaluation_total_test.txt`, 2 training
-work dirs) are complete, to fail loudly instead of silently on a missing one.
+`collect.py` is pure Python + numpy (no torch/mmengine import, no GPU needed) — but the image's
+baked `ENTRYPOINT docker/entrypoint.sh` asserts `torch.cuda.is_available()` before exec, so a
+plain `docker run ... forestformer3d:cu118 python ...` without `--gpus` would fail there; `
+--entrypoint python` bypasses that entrypoint entirely (no GPU needed, none requested).
+Running it directly with the host's `python3` also works, as long as `numpy` is installed
+there. Drop `--allow-missing` once all four inputs (2 release `evaluation_total_test.txt`, 2
+training work dirs) are complete, to fail loudly instead of silently on a missing one.
 
 ## 6. Bring the report home and commit
 
