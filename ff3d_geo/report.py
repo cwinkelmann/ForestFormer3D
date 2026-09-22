@@ -39,11 +39,18 @@ def build_report(las_path, gpkg_path, runtime_s: float | None = None) -> dict:
 
     model_ground = semantic == 0
     als_ground = classification == 2
+    # semantic == 255 means "no model vote" (nodata): exclude those points from
+    # both the agreement figure and the confusion counts so a tile with lots of
+    # unvoted points doesn't get counted as "model says vegetation".
+    voted = semantic != 255
+    n_voted = int(np.sum(voted))
+    nodata_fraction = float(np.mean(semantic == 255)) if semantic.size else 0.0
+    agreement = float(np.mean(model_ground[voted] == als_ground[voted])) if n_voted > 0 else None
     confusion = {
-        "model_ground_als_ground": int(np.sum(model_ground & als_ground)),
-        "model_ground_als_other": int(np.sum(model_ground & ~als_ground)),
-        "model_other_als_ground": int(np.sum(~model_ground & als_ground)),
-        "model_other_als_other": int(np.sum(~model_ground & ~als_ground)),
+        "model_ground_als_ground": int(np.sum(model_ground & als_ground & voted)),
+        "model_ground_als_other": int(np.sum(model_ground & ~als_ground & voted)),
+        "model_other_als_ground": int(np.sum(~model_ground & als_ground & voted)),
+        "model_other_als_other": int(np.sum(~model_ground & ~als_ground & voted)),
     }
     per_class = {
         f"semantic_{s}": {
@@ -60,7 +67,9 @@ def build_report(las_path, gpkg_path, runtime_s: float | None = None) -> dict:
         "chm_baseline_count": len(maxima),
         "height_stats": _stats(heights),
         "chm_height_stats": _stats(chm_heights),
-        "ground_vs_vegetation_agreement": float(np.mean(model_ground == als_ground)),
+        "ground_vs_vegetation_agreement": agreement,
+        "nodata_fraction": nodata_fraction,
+        "n_voted": n_voted,
         "confusion": confusion,
         "per_class_counts": per_class,
         "runtime_s": runtime_s,
@@ -74,12 +83,18 @@ def recommend(report: dict) -> dict:
     50 % of the CHM baseline and the median height within 3 m of the CHM median."""
     baseline = report["chm_baseline_count"]
     n_trees = report["n_trees"]
-    count_ok = baseline > 0 and abs(n_trees - baseline) <= COUNT_TOLERANCE * baseline
+    both_zero = baseline == 0 and n_trees == 0
+    count_ok = both_zero or (baseline > 0 and abs(n_trees - baseline) <= COUNT_TOLERANCE * baseline)
     hs, cs = report["height_stats"], report["chm_height_stats"]
     height_ok = hs is not None and cs is not None and abs(hs["median"] - cs["median"]) <= HEIGHT_TOLERANCE_M
     usable = bool(count_ok and height_ok)
+    count_reason = (
+        f"tree count {n_trees} vs CHM baseline {baseline} (ok, both zero)"
+        if both_zero
+        else f"tree count {n_trees} vs CHM baseline {baseline} ({'ok' if count_ok else 'outside +-50 %'})"
+    )
     reasons = [
-        f"tree count {n_trees} vs CHM baseline {baseline} ({'ok' if count_ok else 'outside +-50 %'})",
+        count_reason,
         (
             f"median height {hs['median']:.1f} m vs CHM median {cs['median']:.1f} m "
             f"({'ok' if height_ok else 'outside 3 m'})"
@@ -99,6 +114,8 @@ def report_markdown(report: dict) -> str:
     hs = report["height_stats"] or {"min": float("nan"), "median": float("nan"), "max": float("nan")}
     cs = report["chm_height_stats"] or {"min": float("nan"), "median": float("nan"), "max": float("nan")}
     runtime = "n/a" if report["runtime_s"] is None else f"{report['runtime_s']:.0f} s"
+    agreement = report["ground_vs_vegetation_agreement"]
+    agreement_str = "n/a (no voted points)" if agreement is None else f"{100 * agreement:.1f} %"
     c = report["confusion"]
     lines = [
         f"### {report['tile']}",
@@ -111,7 +128,8 @@ def report_markdown(report: dict) -> str:
         f"| Trees (CHM local maxima baseline) | {report['chm_baseline_count']} |",
         f"| Height min / median / max (model, m) | {hs['min']:.1f} / {hs['median']:.1f} / {hs['max']:.1f} |",
         f"| Height min / median / max (CHM, m) | {cs['min']:.1f} / {cs['median']:.1f} / {cs['max']:.1f} |",
-        f"| Ground vs vegetation agreement | {100 * report['ground_vs_vegetation_agreement']:.1f} % |",
+        f"| Ground vs vegetation agreement | {agreement_str} |",
+        f"| Nodata fraction (semantic 255, excluded above) | {100 * report['nodata_fraction']:.1f} % |",
         "",
         "| Model \\ ALS | class 2 (ground) | other |",
         "|---|---|---|",
