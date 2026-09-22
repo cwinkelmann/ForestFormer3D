@@ -23,6 +23,9 @@ def test_dry_run_echoes_commands_without_touching_files(tmp_path):
     tracked_list.write_text('sentinel-untouched\n')
     tracked_before = tracked_list.read_bytes()
 
+    tmp_dir = Path(os.environ.get('TMPDIR', '/tmp'))
+    temp_lists_before = set(tmp_dir.glob('ff3d_test_list.*'))
+
     env = {**os.environ, 'DRY_RUN': '1', 'WORK_DIR': str(work), 'ITERATIONS': '1',
            'SCORE_TH': '0.35', 'MODEL_PATH': '/ckpt/epoch_3000_fix.pth'}
     proc = subprocess.run(['bash', str(SCRIPT)], env=env, capture_output=True, text=True)
@@ -46,3 +49,29 @@ def test_dry_run_echoes_commands_without_touching_files(tmp_path):
 
     # The tracked meta_data/test_list.txt must never be touched by this script.
     assert tracked_list.read_bytes() == tracked_before
+
+    # The default temp scan list must be cleaned up on exit: no new
+    # ff3d_test_list.* files left behind beyond whatever pre-existed.
+    temp_lists_after = set(tmp_dir.glob('ff3d_test_list.*'))
+    assert temp_lists_after - temp_lists_before == set()
+
+
+def test_caller_supplied_test_list_is_never_deleted(tmp_path):
+    work = tmp_path / 'repo'
+    (work / 'data' / 'ForAINetV2' / 'meta_data').mkdir(parents=True)
+    (work / 'data' / 'ForAINetV2' / 'test_data').mkdir()
+    (work / 'data' / 'ForAINetV2' / 'meta_data' / 'test_list_initial.txt').write_text('plot_7\n')
+
+    caller_list = tmp_path / 'caller_owned_list.txt'
+    caller_list.write_text('caller-content\n')
+
+    env = {**os.environ, 'DRY_RUN': '1', 'WORK_DIR': str(work), 'ITERATIONS': '1',
+           'SCORE_TH': '0.35', 'MODEL_PATH': '/ckpt/epoch_3000_fix.pth',
+           'TEST_LIST': str(caller_list)}
+    proc = subprocess.run(['bash', str(SCRIPT)], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+    # The script must never delete a caller-supplied TEST_LIST, even though
+    # it deletes its own default temp file on exit.
+    assert caller_list.exists()
+    assert f'--test_scan_names_file {caller_list}' in proc.stdout

@@ -11,20 +11,31 @@ MODEL_PATH="${MODEL_PATH:-$WORK_DIR/work_dirs/clean_forestformer/epoch_3000_fix.
 ITERATIONS="${ITERATIONS:-2}"
 SCORE_TH="${SCORE_TH:-0.4}"
 BLUEPOINTS_DIR="${BLUEPOINTS_DIR:-$WORK_DIR/work_dirs/bluepoints}"
+# tools/create_data_forainetv2.py defaults --root-path to ./data/ForAINetV2
+# relative to its own cwd; overriding DATA_ROOT here does not move where it
+# reads/writes the info pkls.
 DATA_ROOT="${DATA_ROOT:-$WORK_DIR/data/ForAINetV2}"
 TEST_LIST_INIT="${TEST_LIST_INIT:-$DATA_ROOT/meta_data/test_list_initial.txt}"
 # Default to a private temp file so the tracked meta_data/test_list.txt is
 # never mutated by this script (same rule as "no sed on the tracked
-# config"); cleaned up on exit.
-TEST_LIST="${TEST_LIST:-$(mktemp "${TMPDIR:-/tmp}/ff3d_test_list.XXXXXX")}"
-trap 'rm -f "$TEST_LIST"' EXIT
+# config"); only the temp file this script itself created is cleaned up on
+# exit -- a caller-supplied TEST_LIST is never deleted.
+if [[ -z "${TEST_LIST:-}" ]]; then
+    TEST_LIST="$(mktemp "${TMPDIR:-/tmp}/ff3d_test_list.XXXXXX")"
+    TEST_LIST_IS_TEMP=1
+else
+    TEST_LIST_IS_TEMP=0
+fi
+trap '[[ "$TEST_LIST_IS_TEMP" == 1 ]] && rm -f "$TEST_LIST"' EXIT
 TEST_DATA_DIR="${TEST_DATA_DIR:-$DATA_ROOT/test_data}"
 DRY_RUN="${DRY_RUN:-0}"
 export PYTHONPATH="${PYTHONPATH:-$WORK_DIR}"
 
-run() {                       # run "$@" or echo it
+run() {                       # run "$@" or echo it, shell-quoted
     if [[ "$DRY_RUN" == "1" ]]; then
-        echo "DRY: $*"
+        printf 'DRY:'
+        printf ' %q' "$@"
+        printf '\n'
     else
         "$@"
     fi
