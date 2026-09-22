@@ -6,3 +6,6 @@ __pycache__/
 # Local tooling
 .superpowers/
 .idea/
+
+# Symlink to the image's segmentator build, created by docker/entrypoint.sh
+segmentator/csrc/build

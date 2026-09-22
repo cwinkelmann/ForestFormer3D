@@ -1,0 +1,7 @@
+.git
+data/
+work_dirs/
+.idea
+.pytest_cache
+**/__pycache__
+**/*.pyc
