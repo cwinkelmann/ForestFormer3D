@@ -47,11 +47,15 @@ def test_merge_visits_by_descending_score_regardless_of_input_order():
 
 
 def test_merge_accepts_index_lists():
+    # Non-boundary overlap: mask 0 has 4 points, 1 already assigned (0.25 <= 0.3), so
+    # it is kept and claims only its unassigned points. (A prior version of this test
+    # used a 1-of-3 overlap, i.e. 1/3 > 0.3, which should have been dropped -- that was
+    # an invalid boundary case, not a real bug in merge_instances_by_score.)
     labels, kept = merge_instances_by_score(
-        [torch.tensor([0, 1, 2]), torch.tensor([2, 3])], torch.tensor([0.5, 0.9]),
+        [torch.tensor([0, 1, 2, 4]), torch.tensor([2, 3])], torch.tensor([0.5, 0.9]),
         overlap_threshold=0.3, num_points=5)
     assert kept.tolist() == [1, 0]
-    assert labels.tolist() == [1, 1, 0, 0, -1]
+    assert labels.tolist() == [1, 1, 0, 0, 1]
 
 
 def test_merge_with_no_masks():
