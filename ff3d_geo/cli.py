@@ -45,6 +45,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
@@ -125,9 +126,27 @@ def _container_path(path: Path, repo: Path, what: str) -> str:
     return _shell_literal((CONTAINER_ROOT / rel).as_posix())
 
 
-def _interleave(first: list[Path], second: list[Path]) -> list[Path]:
-    """``[a1, b1, a2, b2, ...]`` -- keeps each tile's artefacts next to each other."""
-    return [path for pair in zip(first, second) for path in pair]
+def _run_per_tile(what: str, jobs: list[tuple[str, Callable[[], object]]]) -> None:
+    """Run every tile's ``fn``, then report ALL the failures in one error.
+
+    A batch has no resume: it shares one preprocess and one multi-hour GPU inference,
+    so letting tile *k* abort the loop would cost tiles *k+1...N* their ``.las`` /
+    ``_trees.gpkg`` / report even though their result PLYs are already on disk, and
+    re-running would redo everything. Each tile is therefore attempted independently
+    and only the ones that really failed are named.
+    """
+    failed: list[tuple[str, Exception]] = []
+    for stem, fn in jobs:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 - re-raised below, with the stem named
+            failed.append((stem, exc))
+    if failed:
+        detail = "".join(f"\n  {stem}: {type(exc).__name__}: {exc}" for stem, exc in failed)
+        raise RuntimeError(
+            f"{what} failed for {len(failed)} of {len(jobs)} tile(s); the other tiles "
+            f"were written:{detail}"
+        ) from failed[0][1]
 
 
 def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
@@ -216,8 +235,11 @@ def plan_run(
     sidecars = [out / f"{s}.sidecar.json" for s in stems]
     result_plys = [out / f"{s}.ply" for s in stems]
     offsets_npys = [instance_dir / f"{s}_offsets.npy" for s in stems]
-    vert_npys = [instance_dir / f"{s}_vert.npy" for s in stems]
     info_pkl = out / "forainetv2_oneformer3d_infos_test.pkl"
+    # every tile's exports, each tile's pair kept together, plus the one shared pkl
+    preprocess_artefacts = [
+        instance_dir / f"{s}_{kind}.npy" for s in stems for kind in ("vert", "offsets")
+    ] + [info_pkl]
     out_lass = [out / f"{s}.las" for s in stems]
     gpkgs = [out / f"{s}_trees.gpkg" for s in stems]
     report_jsons = [out / f"{s}_report.json" for s in stems]
@@ -256,7 +278,7 @@ def plan_run(
         # "no test scans with preprocessed data, skipping ..." and writes nothing, so
         # without these checks a preprocessing miss would only surface hours later,
         # after the GPU step, as a missing result PLY.
-        for path in (*_interleave(vert_npys, offsets_npys), info_pkl):
+        for path in preprocess_artefacts:
             if not path.is_file():
                 raise RuntimeError(
                     f"preprocessing did not produce {path}; see the container output above"
@@ -268,18 +290,23 @@ def plan_run(
             )
 
     def georeference() -> None:
-        for result_ply, sidecar, offsets_npy, out_las in zip(
-            result_plys, sidecars, offsets_npys, out_lass
-        ):
-            results_to_las(result_ply, sidecar, offsets_npy, out_las)
+        _run_per_tile("results_to_las", [
+            (stem, partial(results_to_las, result_ply, sidecar, offsets_npy, out_las))
+            for stem, result_ply, sidecar, offsets_npy, out_las in zip(
+                stems, result_plys, sidecars, offsets_npys, out_lass)
+        ])
 
     def trees() -> None:
         # Imported lazily: geopandas is only needed for the reporting half.
         from ff3d_geo.trees import trees_to_gpkg
 
-        for out_las, gpkg in zip(out_lass, gpkgs):
-            n = trees_to_gpkg(out_las, gpkg)
-            print(f"{gpkg}: {n} trees")
+        def one(out_las: Path, gpkg: Path) -> None:
+            print(f"{gpkg}: {trees_to_gpkg(out_las, gpkg)} trees")
+
+        _run_per_tile("trees_to_gpkg", [
+            (stem, partial(one, out_las, gpkg))
+            for stem, out_las, gpkg in zip(stems, out_lass, gpkgs)
+        ])
 
     def report() -> None:
         # Imported lazily: geopandas is only needed for the reporting half.
@@ -289,9 +316,9 @@ def plan_run(
         # share of that step's runtime rather than the batch total.
         inference_s = timings.get("inference")
         per_tile_s = None if inference_s is None else inference_s / len(stems)
-        for stem, out_las, gpkg, report_json, report_md in zip(
-            stems, out_lass, gpkgs, report_jsons, report_mds
-        ):
+
+        def one(stem: str, out_las: Path, gpkg: Path, report_json: Path,
+                report_md: Path) -> None:
             rep = build_report(out_las, gpkg, runtime_s=per_tile_s)
             write_report(rep, report_json, report_md)
             if len(stems) == 1:
@@ -301,6 +328,12 @@ def plan_run(
                 # (the per-tile markdown is still on disk as <stem>_report.md).
                 usable = "yes" if rep["recommendation"]["first_pass_usable"] else "no"
                 print(f"{stem}: {rep['n_trees']} trees, first pass usable: {usable}")
+
+        _run_per_tile("report", [
+            (stem, partial(one, stem, out_las, gpkg, report_json, report_md))
+            for stem, out_las, gpkg, report_json, report_md in zip(
+                stems, out_lass, gpkgs, report_jsons, report_mds)
+        ])
 
     preprocess_inner = (
         'bash -c "'
@@ -320,31 +353,33 @@ def plan_run(
         f"{_container_path(info_pkl, repo, 'info pkl')}"
     )
 
-    # Every detail is built as one "; "-joined entry per tile, so a single-tile plan
-    # renders exactly as it did before batching was added.
+    # A single tile keeps the one-line details it had before batching existed; a batch
+    # would run to ~20 kB on one line, so its per-tile entries go one per indented line.
+    one_tile = len(stems) == 1
+    tiles = "; " if one_tile else "\n    "  # joins per-tile entries
+    paths = ", " if one_tile else "\n    "  # joins a flat list of paths
     return [
         Step(name="las_to_ply", func=convert,
-             name_detail="; ".join(
+             name_detail=tiles.join(
                  f"{src} -> {input_ply} (+ sidecar {sidecar})"
                  for src, input_ply, sidecar in zip(las_paths, input_plys, sidecars))),
         Step(name="prepare_inputs", func=prepare_inputs,
-             name_detail=f"write {scan_list}, {empty_list}; rm " + ", ".join(
+             name_detail=f"write {scan_list}, {empty_list}; rm " + paths.join(
                  f"{instance_dir}/{s}_*.npy" for s in stems)),
         _docker_step("preprocess", preprocess_inner, repo, gpu),
         Step(name="check_preprocess", func=check_preprocess,
-             name_detail="require " + ", ".join(
-                 str(p) for p in (*_interleave(vert_npys, offsets_npys), info_pkl))),
+             name_detail="require " + paths.join(str(p) for p in preprocess_artefacts)),
         _docker_step("inference", inference_inner, repo, gpu),
         Step(name="results_to_las", func=georeference,
-             name_detail="; ".join(
+             name_detail=tiles.join(
                  f"{result_ply} + {offsets_npy} -> {out_las}"
                  for result_ply, offsets_npy, out_las in zip(
                      result_plys, offsets_npys, out_lass))),
         Step(name="trees_to_gpkg", func=trees,
-             name_detail="; ".join(f"{out_las} -> {gpkg}"
-                                   for out_las, gpkg in zip(out_lass, gpkgs))),
+             name_detail=tiles.join(f"{out_las} -> {gpkg}"
+                                    for out_las, gpkg in zip(out_lass, gpkgs))),
         Step(name="report", func=report,
-             name_detail="-> " + "; ".join(
+             name_detail="-> " + tiles.join(
                  f"{report_json}, {report_md}"
                  for report_json, report_md in zip(report_jsons, report_mds))),
     ]

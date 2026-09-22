@@ -473,3 +473,103 @@ def test_run_batch_prepare_inputs_writes_all_stems(fake_repo, tmp_path):
     steps = plan_run([a, b], out=out, repo=fake_repo)
     next(s for s in steps if s.name == "prepare_inputs").func()
     assert (out / "scan_list.txt").read_text().splitlines() == [a.stem, b.stem]
+
+
+def test_run_batch_rejects_duplicate_stems(fake_repo, tmp_path):
+    """Two identical stems would share one scan-list line, one sidecar and one result
+    PLY, so the second tile would silently georeference the first one's output."""
+    a = tmp_path / f"{BATCH_A}.las"
+    with pytest.raises(ValueError, match="duplicate"):
+        plan_run([a, a], out=fake_repo / "work_dirs" / "batch", repo=fake_repo)
+
+
+def test_check_preprocess_names_a_missing_artefact_of_the_second_tile(fake_repo, tmp_path):
+    out = fake_repo / "work_dirs" / "batch"
+    inst = fake_repo / "data/ForAINetV2/forainetv2_instance_data"
+    steps = plan_run([tmp_path / f"{BATCH_A}.las", tmp_path / f"{BATCH_B}.las"],
+                     out=out, repo=fake_repo)
+    next(s for s in steps if s.name == "prepare_inputs").func()
+    inst.mkdir(parents=True)
+    for stem in (BATCH_A, BATCH_B):
+        np.save(inst / f"{stem}_vert.npy", np.zeros((1, 3)))
+    np.save(inst / f"{BATCH_A}_offsets.npy", np.zeros(3))  # the second tile's is missing
+    (out / "forainetv2_oneformer3d_infos_test.pkl").write_bytes(b"fake pkl")
+
+    with pytest.raises(RuntimeError, match=re.escape(f"{BATCH_B}_offsets.npy")):
+        next(s for s in steps if s.name == "check_preprocess").func()
+
+
+# Two real synthetic tiles; distinct origins in the names, neither stem ends in _<digits>.
+BATCH_STEMS = ["a_tegel_E381300_N5828300_100m", "b_tegel_E381400_N5828300_100m"]
+
+
+def _two_tile_batch(tmp_path, monkeypatch, drop_result_for=None):
+    """Plan a two-tile batch and run it through ``inference`` with the docker steps faked.
+
+    Returns ``(out, steps, timings)``; the three host steps after ``inference`` are left
+    for the caller to run, so a test can assert on each of them separately.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    las = [write_two_cone_las(tmp_path / f"{stem}.las") for stem in BATCH_STEMS]
+    out = repo / "work_dirs" / "batch"
+    inst = repo / "data/ForAINetV2/forainetv2_instance_data"
+
+    def fake_run(argv, **kwargs):
+        if "batch_load_ForAINetV2_data.py" in argv[2]:
+            inst.mkdir(parents=True, exist_ok=True)
+            (out / "forainetv2_oneformer3d_infos_test.pkl").write_bytes(b"fake pkl")
+            for stem in BATCH_STEMS:
+                np.save(inst / f"{stem}_vert.npy", np.zeros((1, 3)))
+                _write_fake_result_ply(repo / "data/ForAINetV2/test_data" / f"{stem}.ply",
+                                       inst / f"{stem}_offsets.npy", out / f"{stem}.ply")
+            if drop_result_for is not None:
+                # inference exited 0 but wrote no result PLY for this tile
+                (out / f"{drop_result_for}.ply").unlink()
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    timings: dict[str, float] = {}
+    steps = plan_run(las, DEFAULT_CHECKPOINT, out, repo=repo, timings=timings)
+    execute(steps[:5], dry_run=False, timings=timings)
+    return out, steps, timings
+
+
+def test_batch_runs_every_tile_and_splits_the_inference_runtime(tmp_path, monkeypatch, capsys):
+    out, steps, timings = _two_tile_batch(tmp_path, monkeypatch)
+    execute(steps[5:], dry_run=False, timings=timings)
+
+    for stem in BATCH_STEMS:
+        assert (out / f"{stem}.las").is_file()
+        assert (out / f"{stem}_trees.gpkg").is_file()
+        assert (out / f"{stem}_report.md").is_file()
+    reports = [json.loads((out / f"{stem}_report.json").read_text()) for stem in BATCH_STEMS]
+    assert [r["tile"] for r in reports] == BATCH_STEMS
+    assert all(r["n_trees"] == 2 for r in reports)
+    # one shared inference step, so each tile is charged its share of it
+    assert all(r["runtime_s"] == pytest.approx(timings["inference"] / 2) for r in reports)
+
+    stdout = capsys.readouterr().out
+    assert "| Metric | Value |" not in stdout  # one line per tile, not N markdown blocks
+    for stem in BATCH_STEMS:
+        assert f"{stem}: 2 trees, first pass usable: " in stdout
+
+
+def test_batch_host_steps_finish_the_healthy_tiles_and_then_name_the_failed_one(
+    tmp_path, monkeypatch, capsys
+):
+    """One tile without a result PLY must not cost the others their outputs: a batch
+    shares one preprocess and one GPU inference, so there is nothing to resume from."""
+    good, bad = BATCH_STEMS
+    out, steps, timings = _two_tile_batch(tmp_path, monkeypatch, drop_result_for=bad)
+
+    for step in steps[5:]:
+        with pytest.raises(RuntimeError, match=re.escape(bad)) as excinfo:
+            step.func()
+        assert good not in str(excinfo.value)
+
+    assert (out / f"{good}.las").is_file()
+    assert (out / f"{good}_trees.gpkg").is_file()
+    assert json.loads((out / f"{good}_report.json").read_text())["n_trees"] == 2
+    assert not (out / f"{bad}.las").exists()
+    assert not (out / f"{bad}_report.json").exists()
