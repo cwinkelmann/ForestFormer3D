@@ -68,6 +68,10 @@ RUN git clone https://github.com/NVIDIA/MinkowskiEngine.git /opt/MinkowskiEngine
     && cd / && rm -rf /opt/MinkowskiEngine \
     && python -c "import MinkowskiEngine as ME; print('MinkowskiEngine', ME.__version__)"
 
+# torch-cluster imports scipy at import time; install the pinned scipy before the
+# --no-deps extension builds below (the numeric-pins layer further down re-pins it).
+RUN pip install --no-cache-dir scipy==1.10.1
+
 # torch-scatter 2.1.1 and torch-cluster 1.6.1 from source (tags are unprefixed) for the
 # same arch list. --no-build-isolation so setup.py sees the image's torch.
 RUN git clone --depth 1 --branch 2.1.1 https://github.com/rusty1s/pytorch_scatter.git /opt/pytorch_scatter \
