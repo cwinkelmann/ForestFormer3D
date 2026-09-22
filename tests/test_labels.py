@@ -2,7 +2,7 @@
 import numpy as np
 
 from oneformer3d.labels import (compact_instance_ids, compact_instance_ids_with_ratio,
-                                normalize_instance_gt)
+                                looks_raw, normalize_instance_gt)
 
 
 def test_normalize_raw_scene_marks_ground_and_unannotated():
@@ -71,3 +71,42 @@ def test_compact_instance_ids_with_ratio_handles_an_empty_scene():
     new_mask, ratio = compact_instance_ids_with_ratio(np.array([-1, -1]), {0: 1.0})
     assert new_mask.tolist() == [-1, -1]
     assert ratio == {}
+
+
+def test_looks_raw_raw_scene_with_ground():
+    # Raw files label every ground point with treeID 0.
+    semantic = np.array([0, 0, 1, 1, 2])
+    instance = np.array([0, 0, 7, 7, 0])
+    assert looks_raw(semantic, instance) is True
+
+
+def test_looks_raw_normalized_scene_with_ground():
+    # The crop pipeline labels ground -1, and id 0 is a real tree.
+    semantic = np.array([0, 0, 1, 1, 2])
+    instance = np.array([-1, -1, 0, 0, -1])
+    assert looks_raw(semantic, instance) is False
+
+
+def test_looks_raw_without_ground_and_ids_from_zero():
+    # No ground at all: fall back to the presence of -1, which only
+    # normalized data has.
+    semantic = np.array([1, 1, 2, 2])
+    instance = np.array([0, 0, 1, -1])
+    assert looks_raw(semantic, instance) is False
+
+
+def test_looks_raw_without_ground_with_raw_ids():
+    semantic = np.array([1, 1, 2, 2])
+    instance = np.array([5, 5, 7, 7])
+    assert looks_raw(semantic, instance) is True
+
+
+def test_looks_raw_drives_normalize_instance_gt():
+    # The two conventions must score the same scene identically.
+    semantic = np.array([0, 0, 1, 1, 1, 1])
+    raw = np.array([0, 0, 7, 7, 3, 3])
+    normalized = np.array([-1, -1, 0, 0, 1, 1])
+    for instance in (raw, normalized):
+        out = normalize_instance_gt(semantic, instance,
+                                    raw=looks_raw(semantic, instance))
+        assert out.tolist() == [-1, -1, 0, 0, 1, 1]

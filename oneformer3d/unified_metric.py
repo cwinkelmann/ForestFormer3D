@@ -8,7 +8,7 @@ from mmdet3d.evaluation.metrics import SegMetric
 from mmdet3d.registry import METRICS
 from mmdet3d.evaluation import panoptic_seg_eval, seg_eval
 from .instance_seg_eval import instance_seg_eval
-from .labels import normalize_instance_gt
+from .labels import looks_raw, normalize_instance_gt
 
 
 @METRICS.register_module()
@@ -75,12 +75,10 @@ class UnifiedSegMetric(SegMetric):
             ins_gt_raw = np.asarray(eval_ann['pts_instance_mask'])
             # Normalize the GT with the one shared rule (oneformer3d/labels.py):
             # ground and un-annotated points become -1, real trees get ids 0..K-1.
-            # Which convention arrived depends on the mode, so decide by content:
-            # raw full-plot GT (eval_ann_info in test mode) uses treeID 0 for
-            # ground/un-annotated and never contains -1, while GT that came
-            # through the crop pipeline (validation) is already normalized, so
-            # it does contain -1 and its id 0 is a real tree.
-            raw = not bool((ins_gt_raw < 0).any())
+            # Raw full-plot GT (eval_ann_info in test mode) and GT that came
+            # through the crop pipeline (validation) use different id
+            # conventions, so read which one arrived off the ground points.
+            raw = looks_raw(sem_gt_raw, ins_gt_raw)
             ins_gt_i = normalize_instance_gt(sem_gt_raw, ins_gt_raw, raw=raw)
 
             # Shift the semantic labels by 1 (0 is ignored)

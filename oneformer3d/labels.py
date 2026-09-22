@@ -72,6 +72,28 @@ def compact_instance_ids_with_ratio(
     return out, new_ratio
 
 
+def looks_raw(semantic: np.ndarray, instance: np.ndarray) -> bool:
+    """True when instance ids follow the raw file convention (ground and unannotated = 0).
+
+    Raw GT labels every ground point (semantic == 0) with instance 0; normalized GT
+    labels ground -1. Scenes without ground fall back to the presence of -1 (raw
+    data never has it).
+
+    Args:
+        semantic: (N,) semantic class ids; 0 is the ground class.
+        instance: (N,) instance ids in either convention.
+
+    Returns:
+        The value to pass as ``raw`` to :func:`normalize_instance_gt`.
+    """
+    semantic = np.asarray(semantic)
+    instance = np.asarray(instance)
+    ground = semantic == 0
+    if ground.any():
+        return bool((instance[ground] == 0).any())
+    return not bool((instance < 0).any())
+
+
 def normalize_instance_gt(semantic: np.ndarray, instance: np.ndarray,
                           raw: bool = True) -> np.ndarray:
     """Mark non-instance points as -1 and compact the remaining instance ids.
