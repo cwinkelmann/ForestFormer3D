@@ -1,0 +1,5 @@
+numpy
+plyfile
+scipy
+laspy
+pytest

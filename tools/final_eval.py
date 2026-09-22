@@ -1,10 +1,22 @@
 from pathlib import Path
 import glob
+import importlib.util
+import sys
 from collections import defaultdict
 from plyfile import PlyData, PlyElement
 import numpy as np
 from scipy import stats
 import os
+
+# oneformer3d/__init__.py imports torch/spconv/mmdet3d; labels.py is pure
+# numpy. Load it by file path (bypassing the package __init__) so this
+# benchmark script keeps working on machines without a torch install.
+_LABELS_PATH = Path(__file__).resolve().parents[1] / 'oneformer3d' / 'labels.py'
+_labels_spec = importlib.util.spec_from_file_location('oneformer3d.labels', _LABELS_PATH)
+_labels = importlib.util.module_from_spec(_labels_spec)
+_labels_spec.loader.exec_module(_labels)
+looks_raw = _labels.looks_raw
+normalize_instance_gt = _labels.normalize_instance_gt
 
 #This file produces stats about the total average F1 score, the average F1 score per forest region, and packs all F1 score within a forest region together
 #and save these stats in a file called "Eval_F1_per_region"
@@ -26,7 +38,12 @@ if __name__ == '__main__':
     thing_classes = [2,3]
     # Initialize...
     #test_sem_path = 'work_dirs/oneformer3d_outputfolder_continue'
-    
+
+    ply_files = sorted(glob.glob(test_sem_path + '/*.ply', recursive=False))
+    if not ply_files:
+        print(f'no .ply result files in {test_sem_path}', file=sys.stderr)
+        sys.exit(1)
+
     LOG_FOUT = open(test_sem_path + '/evaluation_total_test.txt', 'a')  # @Treeins: save evaluation file with name output_file_name
 
     def log_string(out_str, file=None):
@@ -51,7 +68,9 @@ if __name__ == '__main__':
     all_mean_cov_global = [[] for _ in range(NUM_CLASSES)]
     all_mean_weighted_cov_global = [[] for _ in range(NUM_CLASSES)]
 
-    ply_files = sorted(glob.glob(test_sem_path + '/*.ply', recursive=False))
+    true_positive_classes_bi_global = np.zeros(NUM_CLASSES)
+    positive_classes_bi_global = np.zeros(NUM_CLASSES)
+    gt_classes_bi_global = np.zeros(NUM_CLASSES)
 
     for ply_file in ply_files:
         true_positive_classes = np.zeros(NUM_CLASSES_sem)
@@ -85,10 +104,19 @@ if __name__ == '__main__':
         #sem_gt_i = data.elements[0].data["semantic_labels"] + 1
 
         ins_pre_i_ori = data.elements[0].data["instance_pred"]
-        ins_gt_i_ori = data.elements[0].data["instance_gt"]
         #ins_pre_i_ori = data.elements[0].data["instance_preds"]
         #ins_gt_i_ori = data.elements[0].data["instance_labels"]
 
+        # Test-set GT still uses the raw treeID convention, where ground points
+        # (semantic 0) and unannotated points both carry instance id 0. Without
+        # this normalization that shared id 0 forms a spurious GT instance;
+        # normalize_instance_gt marks it -1 instead, which the rest of this
+        # script already treats as "no instance" (see `g == -1` below).
+        raw_semantic_gt = data.elements[0].data["semantic_gt"]
+        raw_instance_gt = data.elements[0].data["instance_gt"]
+        ins_gt_i_ori = normalize_instance_gt(
+            raw_semantic_gt, raw_instance_gt,
+            raw=looks_raw(raw_semantic_gt, raw_instance_gt))
 
         pred_sem_complete = sem_pre_i
         gt_sem_complete = sem_gt_i
@@ -374,6 +402,10 @@ if __name__ == '__main__':
         positive_classes_global += positive_classes
         gt_classes_global += gt_classes
 
+        true_positive_classes_bi_global += true_positive_classes_bi
+        positive_classes_bi_global += positive_classes_bi
+        gt_classes_bi_global += gt_classes_bi
+
         total_gt_ins_global += total_gt_ins
         for i in range(NUM_CLASSES):
             tpsins_global[i] += tpsins[i]
@@ -409,9 +441,9 @@ if __name__ == '__main__':
     iou_list_bi_global = []
     sem_classcount_have_bi_global = []
     for i in range(NUM_CLASSES):
-        if gt_classes_bi[i] > 0:
+        if gt_classes_bi_global[i] > 0:
             sem_classcount_have_bi_global.append(i)
-            iou_bi_global = true_positive_classes_bi[i] / float(gt_classes_bi[i] + positive_classes_bi[i] - true_positive_classes_bi[i])
+            iou_bi_global = true_positive_classes_bi_global[i] / float(gt_classes_bi_global[i] + positive_classes_bi_global[i] - true_positive_classes_bi_global[i])
         else:
             iou_bi_global = 0.0
         iou_list_bi_global.append(iou_bi_global)
@@ -427,8 +459,8 @@ if __name__ == '__main__':
     set3_stuff_global = set1_stuff_global & set2_stuff_global
     stuff_classcount_final_global = list(set3_stuff_global)
 
-    log_string('Binary Semantic Segmentation oAcc: {}'.format(sum(true_positive_classes_bi) / float(sum(positive_classes_bi))))
-    log_string('Binary Semantic Segmentation mAcc: {}'.format(np.mean(true_positive_classes_bi[sem_classcount_final_bi_global] / gt_classes_bi[sem_classcount_final_bi_global])))
+    log_string('Binary Semantic Segmentation oAcc: {}'.format(sum(true_positive_classes_bi_global) / float(sum(positive_classes_bi_global))))
+    log_string('Binary Semantic Segmentation mAcc: {}'.format(np.mean(true_positive_classes_bi_global[sem_classcount_final_bi_global] / gt_classes_bi_global[sem_classcount_final_bi_global])))
     log_string('Binary Semantic Segmentation IoU: {}'.format(iou_list_bi_global))
     log_string('Binary Semantic Segmentation mIoU: {}'.format(1. * sum(iou_list_bi_global) / len(sem_classcount_final_bi_global)))
     log_string('  ')
