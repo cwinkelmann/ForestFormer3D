@@ -112,23 +112,26 @@ ff3d_preprocess() {
 # Produces <out_stem>_converted.pth (for the fixed tools/test.py), <out_stem>_raw.pth (for
 # the old tools/test.py, which permutes in memory) and <out_stem>.layout.
 # Prints the layout of <in.pth>: "converted" (fix script exited 2) or "raw" (exited 0).
+# Under FF3D_DRY_RUN=1 this never touches the filesystem -- not even when <in> already
+# exists: the real layout (raw vs. converted) can only be determined by actually running
+# tools/fix_spconv_checkpoint.py in the container, which a dry run does not do, so neither
+# branch of the case below (and its cp/echo writes) can run truthfully. It prints the two
+# commands that would run and the three output paths that would be written, then returns.
 ff3d_prepare_checkpoint() {
   local in="$1" stem="$2" rc
   local conv="${stem}_converted.pth" raw="${stem}_raw.pth" layout="${stem}.layout"
-  if [ ! -f "$FF3D_ROOT/$in" ]; then
-    if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
-      # Real runs die here (the checkpoint is required input); a dry run must never create
-      # files under work_dirs, and the checkpoint legitimately may not exist yet (e.g. it is
-      # itself the output of a training run a dry run is only previewing). Print what WOULD
-      # run/be written and return, touching nothing.
+  if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
+    if [ -f "$FF3D_ROOT/$in" ]; then
+      echo "DRY: (input present; layout undetermined without running the container)"
+    else
       echo "DRY: (input not present yet) $in"
-      echo "DRY: (planned) python tools/fix_spconv_checkpoint.py --in-path $in --out-path $conv"
-      echo "DRY: (planned) python benchmark/unfix_spconv_checkpoint.py --in-path $in --out-path $raw"
-      echo "DRY: (planned outputs) $conv $raw $layout"
-      return 0
     fi
-    ff3d_die "checkpoint missing: $FF3D_ROOT/$in"
+    echo "DRY: (planned) python tools/fix_spconv_checkpoint.py --in-path $in --out-path $conv"
+    echo "DRY: (planned) python benchmark/unfix_spconv_checkpoint.py --in-path $in --out-path $raw"
+    echo "DRY: (planned outputs) $conv $raw $layout"
+    return 0
   fi
+  [ -f "$FF3D_ROOT/$in" ] || ff3d_die "checkpoint missing: $FF3D_ROOT/$in"
   if [ -f "$FF3D_ROOT/$conv" ] && [ -f "$FF3D_ROOT/$raw" ] && [ -f "$FF3D_ROOT/$layout" ]; then
     cat "$FF3D_ROOT/$layout"
     return 0
@@ -156,9 +159,20 @@ ff3d_prepare_checkpoint() {
 
 # ff3d_daemonize <name> <script> [args...]
 # Re-executes <script> under nohup with FF3D_FOREGROUND=1 and exits. The log path is printed.
+# FF3D_LOGS is under $FF3D_ROOT/work_dirs, so `mkdir -p "$FF3D_LOGS"` is not safe to run
+# under a dry run. Under FF3D_DRY_RUN=1 this creates no directory, writes no log file and
+# starts no background process; it prints the command it would have run and returns like
+# FF3D_FOREGROUND=1 does, so the calling script continues in the foreground and its own
+# dry-run output is what the caller actually sees.
 ff3d_daemonize() {
   local name="$1"; shift
   if [ "${FF3D_FOREGROUND:-0}" = "1" ]; then
+    return 0
+  fi
+  if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
+    printf 'DRY: (daemonize skipped, continuing in foreground) nohup bash'
+    printf ' %q' "$@"
+    printf ' > %s/%s-<timestamp>.log 2>&1 &\n' "$FF3D_LOGS" "$name"
     return 0
   fi
   mkdir -p "$FF3D_LOGS"
