@@ -3,7 +3,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from plyfile import PlyData, PlyElement
+import pytest
+
+plyfile = pytest.importorskip("plyfile")
+PlyData, PlyElement = plyfile.PlyData, plyfile.PlyElement
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'data' / 'ForAINetV2' / 'batch_load_ForAINetV2_data.py'
