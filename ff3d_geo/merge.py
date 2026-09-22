@@ -1,0 +1,145 @@
+"""Stitch per-sub-tile result LAS files and tree GeoPackages back into one km tile.
+
+``merge_las`` concatenates the LAS 1.4 / point format 6 result files that
+``ff3d_geo.convert.results_to_las`` writes (extra dims ``treeID`` int32,
+``semantic`` uint8, ``score`` float32; CRS written as a WKT VLR), renumbering
+``treeID`` so every non-negative id is unique across sub-tiles. ``merge_trees``
+applies the same id offsets to the matching ``ff3d_geo.trees.trees_to_gpkg``
+GeoPackages (layer ``trees``, columns ``TREE_COLUMNS``) so the merged tree
+table's ``tree_id`` set matches the merged LAS's ``treeID >= 0`` set.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import geopandas as gpd
+import laspy
+import numpy as np
+import pandas as pd
+import pyproj
+
+
+def merge_las(las_paths, out_las) -> dict:
+    """Concatenate sub-tile result LAS files into one, with globally unique treeIDs.
+
+    Each input is LAS 1.4 point format 6 with extra dims ``treeID`` (int32,
+    -1 = none), ``semantic`` (uint8) and ``score`` (float32), CRS EPSG:25833.
+    Sub-tile ``k``'s non-negative ids get ``offset_k = sum(max_id_j + 1 for j
+    < k)`` added so ids never collide across sub-tiles; ``treeID == -1`` stays
+    -1. The output header uses scale 0.001 and offsets = floor of the global
+    minimum x/y/z, matching ``results_to_las``'s convention.
+
+    Returns ``{"n_points": int, "n_trees": int, "id_offsets": {path_str: offset_k}}``.
+    """
+    las_paths = [Path(p) for p in las_paths]
+    if not las_paths:
+        raise ValueError("merge_las: las_paths is empty")
+
+    n_points = 0
+    max_x = min_x = max_y = min_y = max_z = min_z = None
+    max_ids: list[int] = []
+    crs = None
+    extra_dim_names: list[str] | None = None
+
+    for p in las_paths:
+        with laspy.open(str(p)) as reader:
+            header = reader.header
+            n_points += int(header.point_count)
+            xs = (header.mins[0], header.maxs[0])
+            ys = (header.mins[1], header.maxs[1])
+            zs = (header.mins[2], header.maxs[2])
+            min_x = xs[0] if min_x is None else min(min_x, xs[0])
+            max_x = xs[1] if max_x is None else max(max_x, xs[1])
+            min_y = ys[0] if min_y is None else min(min_y, ys[0])
+            max_y = ys[1] if max_y is None else max(max_y, ys[1])
+            min_z = zs[0] if min_z is None else min(min_z, zs[0])
+            max_z = zs[1] if max_z is None else max(max_z, zs[1])
+            if crs is None:
+                crs = header.parse_crs()
+            names = list(header.point_format.extra_dimension_names)
+            if extra_dim_names is None:
+                extra_dim_names = names
+
+        las = laspy.read(str(p))
+        ids = np.asarray(las.treeID, dtype=np.int64)
+        positive = ids[ids >= 0]
+        max_ids.append(int(positive.max()) if positive.size else -1)
+
+    id_offsets: dict[str, int] = {}
+    running = 0
+    for p, max_id in zip(las_paths, max_ids):
+        id_offsets[str(p)] = running
+        running += max_id + 1
+
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001])
+    header.offsets = np.floor([min_x, min_y, min_z])
+    for name in extra_dim_names or []:
+        if name == "treeID":
+            header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.int32))
+        elif name == "semantic":
+            header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.uint8))
+        elif name == "score":
+            header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.float32))
+    if crs is not None:
+        header.add_crs(crs)
+    else:
+        header.add_crs(pyproj.CRS.from_epsg(25833))
+
+    out_las = Path(out_las)
+    out_las.parent.mkdir(parents=True, exist_ok=True)
+
+    all_ids: list[np.ndarray] = []
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        for p in las_paths:
+            las = laspy.read(str(p))
+            offset = id_offsets[str(p)]
+            ids = np.asarray(las.treeID, dtype=np.int32).copy()
+            ids[ids >= 0] += offset
+            las.treeID = ids
+            writer.write_points(las.points)
+            all_ids.append(ids)
+
+    merged_ids = np.concatenate(all_ids) if all_ids else np.empty(0, dtype=np.int32)
+    n_trees = int(np.unique(merged_ids[merged_ids >= 0]).size)
+
+    return {"n_points": n_points, "n_trees": n_trees, "id_offsets": id_offsets}
+
+
+def merge_trees(gpkg_paths, out_gpkg, id_offsets: dict) -> int:
+    """Concatenate sub-tile tree GeoPackages, offsetting ``tree_id`` by ``id_offsets``.
+
+    Reads layer ``trees`` from each GeoPackage (pyogrio engine), adds the
+    matching sub-tile's offset to ``tree_id``, concatenates in input order and
+    writes layer ``trees`` to ``out_gpkg`` with the same columns and CRS.
+    Returns the merged row count.
+
+    ``id_offsets`` is ``merge_las``'s return value keyed by the *LAS* paths
+    (in sub-tile order); ``gpkg_paths`` is the matching list of GeoPackage
+    paths for the same sub-tiles in the same order, so offsets are applied
+    positionally rather than by matching path strings.
+    """
+    gpkg_paths = [Path(p) for p in gpkg_paths]
+    offsets = list(id_offsets.values())
+    if len(offsets) != len(gpkg_paths):
+        raise ValueError(
+            f"merge_trees: {len(gpkg_paths)} gpkg_paths but {len(offsets)} id_offsets"
+        )
+
+    frames = []
+    crs = None
+    for p, offset in zip(gpkg_paths, offsets):
+        gdf = gpd.read_file(str(p), layer="trees", engine="pyogrio")
+        gdf = gdf.copy()
+        gdf["tree_id"] = gdf["tree_id"].astype(np.int64) + offset
+        if crs is None:
+            crs = gdf.crs
+        frames.append(gdf)
+
+    merged = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=crs)
+
+    out_gpkg = Path(out_gpkg)
+    out_gpkg.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_file(str(out_gpkg), layer="trees", driver="GPKG", engine="pyogrio")
+    return len(merged)
