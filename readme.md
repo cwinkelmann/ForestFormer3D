@@ -104,8 +104,14 @@ python3 -m venv .venv-cpu && .venv-cpu/bin/pip install -e ".[geo]"   # or: pip i
     --out work_dirs/<name> --gpu <N>          # add --dry-run to preview the 8 steps first
 ```
 
+`--las` takes several tiles: they share one preprocess and one inference pass and each
+still gets its own `<out>/<stem>.las`, `<stem>_trees.gpkg` and report. Tiles larger than
+the ~100 m the model is trained on are handled by bracketing that batched run with
+`python -m ff3d_geo split` (km tile -> local-coordinate 100 m sub-tiles) and
+`python -m ff3d_geo merge` (sub-tile results -> one km tile with globally unique tree ids).
+
 See `docs/benchmarks/RUNBOOK-tegel.md` for a full worked example (copying tiles to a GPU
-host over SSH, running both tiles, and filling in a report).
+host over SSH, running single tiles, and the split/batch/merge loop for km tiles).
 
 ---
 

@@ -5,27 +5,7 @@ laspy = pytest.importorskip("laspy")
 
 from ff3d_geo.origin import parse_origin
 from ff3d_geo.split import split_las, subtile_origins
-
-
-def _write_las(path, xyz, classification):
-    header = laspy.LasHeader(point_format=6, version="1.4")
-    scales = np.array([0.001, 0.001, 0.001])
-    # Offsets must be near the data: LAS X/Y/Z are int32, and scale 0.001 with a
-    # zero offset overflows for UTM-scale (~5.8e6) northing values.
-    offsets = np.floor(xyz.min(axis=0))
-    header.scales = scales
-    header.offsets = offsets
-    # LAS storage is lossy (int32 at 0.001 m). Quantize xyz in place to what will
-    # actually be written/read back, so a point is judged the same way by
-    # split_las and by this test's own sel mask. Truncate (rather than round to
-    # nearest) so a point already inside a 100 m grid cell can't get nudged onto
-    # the cell boundary by rounding and land in a neighboring (possibly sparse,
-    # min_points-filtered) sub-tile instead.
-    xyz[:] = offsets + np.floor((xyz - offsets) / scales) * scales
-    las = laspy.LasData(header)
-    las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    las.classification = classification
-    las.write(path)
+from geo_fixtures import write_grid_las as _write_las
 
 
 def test_subtile_origins_are_grid_aligned():

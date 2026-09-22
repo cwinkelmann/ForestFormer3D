@@ -70,3 +70,32 @@ def write_two_cone_las(path, with_predictions=False):
         las.score = np.where(tid >= 0, 0.9, 0.0).astype(np.float32)
     las.write(str(path))
     return path
+
+
+def write_grid_las(path, xyz, classification):
+    """Write ``xyz`` (N, 3) + ``classification`` as LAS 1.4 / point format 6.
+
+    Used by the split tests and the CLI's ``split`` round trip: the source of a
+    ``split_las`` call is a plain ALS tile in absolute (UTM) coordinates, so the
+    header offsets are placed near the data -- LAS X/Y/Z are int32, and scale
+    0.001 with a zero offset overflows for UTM-scale (~5.8e6) northings.
+
+    ``xyz`` is quantized IN PLACE to what LAS will actually store, so a caller can
+    compare against the same values ``split_las`` sees. The quantization truncates
+    rather than rounds to nearest, so a point already inside a 100 m grid cell
+    cannot get nudged onto the cell boundary and land in a neighboring (possibly
+    sparse, ``min_points``-filtered) sub-tile instead.
+    """
+    import laspy
+
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    scales = np.array([0.001, 0.001, 0.001])
+    offsets = np.floor(xyz.min(axis=0))
+    header.scales = scales
+    header.offsets = offsets
+    xyz[:] = offsets + np.floor((xyz - offsets) / scales) * scales
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    las.classification = classification
+    las.write(str(path))
+    return path

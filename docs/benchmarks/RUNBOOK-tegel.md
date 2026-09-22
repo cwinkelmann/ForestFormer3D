@@ -63,6 +63,11 @@ python -m ff3d_geo run --las inputs/r13_spandau_E376400_N5827400_100m.las \
   2>&1 | tee work_dirs/logs/tegel-r13-$(date +%Y%m%d-%H%M%S).log
 ```
 
+`--las` accepts several tiles in one call (`--las a.las b.las ...`): they share one
+preprocess and one inference step, and each tile still gets its own `<out>/<stem>.las`,
+`<stem>_trees.gpkg` and `<stem>_report.json/.md`. That is what section 8 uses for the km
+tiles; for the two 100 m tiles above, one call per tile keeps the logs readable.
+
 For a long run, put it in the background instead and poll the log:
 `nohup python -m ff3d_geo run ... > work_dirs/logs/<name>.log 2>&1 &`, then
 `tail -5 work_dirs/logs/<name>.log` every minute or two. A 100 m ALS tile is minutes,
@@ -167,3 +172,63 @@ The second line must match `n_trees` and the height quantiles in `..._report.jso
 Paste `<stem>_report.md` from each `berlin_out/tegel-r1?/` into
 `docs/benchmarks/2026-09-22-tegel-als.md`, add the screenshots, complete the
 recommendation with the decision rule printed in the block, commit.
+
+## 8. Berlin ALS 2021 km tiles
+
+The three 1 km x 1 km tiles around Revier 12 Tegelsee (`3dm_33_380_5828_1_be`,
+`3dm_33_381_5828_1_be`, `3dm_33_381_5829_1_be`) are far bigger than the ~100 m extent
+the model is trained on, so each one is cut into 100 m sub-tiles, inferred as a batch,
+and stitched back together:
+
+```bash
+cd /raid/cwinkelmann/ForestFormer3D && source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
+mkdir -p work_dirs/logs
+for T in 3dm_33_380_5828_1_be 3dm_33_381_5828_1_be 3dm_33_381_5829_1_be; do
+  python -m ff3d_geo split --las inputs/berlin/$T.las --out inputs/berlin/sub/$T > work_dirs/logs/split-$T.txt
+  python -m ff3d_geo run --las inputs/berlin/sub/$T/*.las --checkpoint work_dirs/clean_forestformer/epoch_3000_fix.pth \
+      --out work_dirs/berlin-$T --gpu 5 2>&1 | tee work_dirs/logs/berlin-$T-$(date +%Y%m%d-%H%M%S).log
+  python -m ff3d_geo merge --las work_dirs/berlin-$T/*_100m.las --gpkg work_dirs/berlin-$T/*_100m_trees.gpkg \
+      --out-las work_dirs/berlin-$T/$T.las --out-gpkg work_dirs/berlin-$T/${T}_trees.gpkg \
+      --report-json work_dirs/berlin-$T/${T}_report.json --report-md work_dirs/berlin-$T/${T}_report.md
+done
+```
+
+Notes:
+
+- `split` prints one sub-tile path per line (also captured in `split-$T.txt`); a ~23 M
+  point km tile splits in about five seconds and yields up to 100 sub-tiles named
+  `<prefix>_E<easting>_N<northing>_100m.las` in local coordinates, with sub-tiles under
+  `--min-points` (default 1000) left out entirely - water, roofs and tile edges.
+- `--las inputs/berlin/sub/$T/*.las` relies on the **shell** to expand the glob into one
+  batched `run`: one preprocess and one `tools/test.py` pass for the whole km tile. The
+  sub-tile LAS files in `work_dirs/berlin-$T/` are the georeferenced *results* named
+  `<stem>.las`, distinct from those inputs under `inputs/berlin/sub/`.
+- Both `merge` globs expand in the same sorted order, which is what makes them line up;
+  the command still checks pairwise that `<stem>.las` goes with `<stem>_trees.gpkg` and
+  refuses the merge otherwise, because the tree-id offsets are applied positionally.
+- GPU 5 only (`--gpu 5`): GPUs 2-4 may be running Phase 2 benchmark jobs.
+- Expect roughly 25-40 s of GPU time per sub-tile, so about 45-70 min per km tile plus a
+  few minutes of host-side georeferencing/reporting. Run the three tiles **sequentially**,
+  as one `nohup`'d script under `work_dirs/logs/`, and poll the log every few minutes
+  rather than in a tight loop.
+- A batch has no resume. If the run dies part-way, the sub-tiles whose `<stem>.ply`
+  already exists can be finished from the host venv with `ff3d_geo georef` / `report`
+  (section 3), or the whole `run` can simply be repeated - it re-exports everything.
+- On a host where a 100-sub-tile batch is too much in one go, split the list into chunks
+  of ~25 and issue several `run` calls into the **same** `--out`. That is safe: each call
+  rewrites `<out>/scan_list.txt` and `<out>/empty_list.txt` for its own stems only, and
+  `results_to_las` / `trees_to_gpkg` / `report` only ever touch the stems of that call.
+  The stems must differ between chunks (they do - one per sub-tile).
+
+Copy the results back to the Mac (no PLYs, and no per-sub-tile LAS/GeoPackage - the
+merged km files are what matters):
+
+```bash
+mkdir -p ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021
+rsync -av --exclude '*.ply' --exclude '*_100m.las' --exclude '*_100m_trees.gpkg' \
+  carrot:/raid/cwinkelmann/ForestFormer3D/work_dirs/berlin-*/ \
+  ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021/
+```
+
+Then fill in `docs/benchmarks/2026-09-22-tegel-berlin-2021.md` from the three
+`<T>_report.md` blocks.

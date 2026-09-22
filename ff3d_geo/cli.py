@@ -1,4 +1,10 @@
-"""``python -m ff3d_geo``: run / convert / georef / report.
+"""``python -m ff3d_geo``: run / convert / georef / report / split / merge.
+
+``split`` and ``merge`` bracket a batched ``run`` for tiles larger than the ~100 m
+the model is trained on: ``split`` cuts a 1 km ALS tile into local-coordinate
+sub-tiles, ``run --las <sub-tiles>`` infers them in one preprocess + one inference
+pass, and ``merge`` stitches the per-sub-tile result LAS files and tree
+GeoPackages back into one km tile with globally unique tree ids.
 
 Execution model (see the Phase 3 plan, ruling G7): this CLI runs on the HOST, in a
 plain CPU venv with laspy/plyfile/geopandas but no torch. The two GPU/pipeline steps
@@ -459,7 +465,51 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--json", required=True, type=Path)
     rep.add_argument("--md", type=Path, default=None, help="default: --json with a .md suffix")
     rep.add_argument("--runtime-s", type=float, default=None)
+
+    spl = sub.add_parser("split", help="1 km LAS tile -> local-coordinate sub-tiles")
+    spl.add_argument("--las", required=True, type=Path, help="source km tile (LAS/LAZ)")
+    spl.add_argument("--out", required=True, type=Path, help="directory for the sub-tiles")
+    spl.add_argument("--size", type=int, default=100, metavar="M",
+                     help="sub-tile edge length in metres (default: %(default)s)")
+    spl.add_argument("--min-points", type=int, default=1000,
+                     help="skip a sub-tile with fewer points (default: %(default)s)")
+    spl.add_argument("--prefix", default=None,
+                     help="sub-tile name prefix (default: the source stem without _1_be)")
+
+    mrg = sub.add_parser("merge", help="sub-tile result LAS + GeoPackages -> one km tile")
+    mrg.add_argument("--las", required=True, type=Path, nargs="+",
+                     help="sub-tile result LAS files, in sub-tile order")
+    mrg.add_argument("--gpkg", required=True, type=Path, nargs="+",
+                     help="the matching tree GeoPackages, in the SAME order as --las")
+    mrg.add_argument("--out-las", required=True, type=Path)
+    mrg.add_argument("--out-gpkg", required=True, type=Path)
+    mrg.add_argument("--report-json", type=Path, default=None,
+                     help="also build a report over the merged files and write it here")
+    mrg.add_argument("--report-md", type=Path, default=None,
+                     help="default: --report-json with a .md suffix")
     return parser
+
+
+def _pair_subtiles(las_paths: list[Path], gpkg_paths: list[Path]) -> None:
+    """Require ``--las``/``--gpkg`` to describe the same sub-tiles in the same order.
+
+    ``merge_trees`` applies ``merge_las``'s ``id_offsets`` POSITIONALLY (it zips the
+    offsets' insertion order onto ``gpkg_paths``), so a mismatched or differently
+    ordered pair of lists would not fail -- it would silently renumber every tree of
+    one sub-tile with another sub-tile's offset. Two shell globs sort the same way,
+    but only if both really expanded to the same sub-tiles, so check it explicitly.
+    """
+    if len(las_paths) != len(gpkg_paths):
+        raise ValueError(
+            f"merge: --las and --gpkg must list the same number of sub-tiles, in the "
+            f"same order; got {len(las_paths)} LAS and {len(gpkg_paths)} GeoPackage(s)"
+        )
+    for las, gpkg in zip(las_paths, gpkg_paths):
+        if gpkg.stem != f"{las.stem}_trees":
+            raise ValueError(
+                f"merge: --las and --gpkg are not in the same sub-tile order: "
+                f"{las.name} is paired with {gpkg.name}, expected {las.stem}_trees.gpkg"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -508,6 +558,34 @@ def main(argv: list[str] | None = None) -> int:
         rep = build_report(args.las, args.gpkg, runtime_s=args.runtime_s)
         write_report(rep, args.json, md)
         print(report_markdown(rep))
+        return 0
+
+    if args.command == "split":
+        # Imported lazily, like the reporting half: split only needs laspy/numpy, but
+        # keeping the import here means `--help` on any other subcommand costs nothing.
+        from ff3d_geo.split import split_las
+
+        for path in split_las(args.las, args.out, size_m=args.size,
+                              min_points=args.min_points, prefix=args.prefix):
+            print(path)
+        return 0
+
+    if args.command == "merge":
+        from ff3d_geo.merge import merge_las, merge_trees
+
+        _pair_subtiles(list(args.las), list(args.gpkg))
+        info = merge_las(args.las, args.out_las)
+        print(f"wrote {args.out_las} ({info['n_points']} points, {info['n_trees']} trees)")
+        n_trees = merge_trees(args.gpkg, args.out_gpkg, info["id_offsets"])
+        print(f"wrote {args.out_gpkg} ({n_trees} trees)")
+        if args.report_json is not None:
+            from ff3d_geo.report import build_report, report_markdown, write_report
+
+            md = (args.report_md if args.report_md is not None
+                  else Path(args.report_json).with_suffix(".md"))
+            rep = build_report(args.out_las, args.out_gpkg)
+            write_report(rep, args.report_json, md)
+            print(report_markdown(rep))
         return 0
 
     raise AssertionError(args.command)  # pragma: no cover - argparse enforces the choices

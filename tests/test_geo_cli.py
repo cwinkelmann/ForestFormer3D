@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -421,7 +422,7 @@ def test_georef_subcommand_writes_las_and_optional_gpkg(tmp_path):
     assert out_las.is_file() and gpkg.is_file()
 
 
-def test_parser_exposes_the_four_subcommands_and_defaults():
+def test_parser_exposes_the_run_subcommand_defaults():
     parser = build_parser()
     args = parser.parse_args(["run", "--las", "a.las"])
     assert args.checkpoint == DEFAULT_CHECKPOINT
@@ -434,7 +435,7 @@ def test_module_entry_point_shows_help():
     proc = subprocess.run([sys.executable, "-m", "ff3d_geo", "--help"],
                           capture_output=True, text=True, cwd=str(REPO_ROOT))
     assert proc.returncode == 0
-    assert "{run,convert,georef,report}" in proc.stdout
+    assert "{run,convert,georef,report,split,merge}" in proc.stdout
 
 
 # --- batched run: several --las sub-tiles in one preprocess + one inference ---------
@@ -573,3 +574,130 @@ def test_batch_host_steps_finish_the_healthy_tiles_and_then_name_the_failed_one(
     assert json.loads((out / f"{good}_report.json").read_text())["n_trees"] == 2
     assert not (out / f"{bad}.las").exists()
     assert not (out / f"{bad}_report.json").exists()
+
+
+# --- split / merge subcommands ------------------------------------------------------
+
+
+def test_parser_exposes_split_and_merge():
+    parser = build_parser()
+    args = parser.parse_args(["split", "--las", "a.las", "--out", "sub"])
+    assert args.size == 100 and args.min_points == 1000 and args.prefix is None
+    args = parser.parse_args([
+        "merge", "--las", "a.las", "b.las", "--gpkg", "a_trees.gpkg", "b_trees.gpkg",
+        "--out-las", "m.las", "--out-gpkg", "m.gpkg"])
+    assert [str(p) for p in args.las] == ["a.las", "b.las"]
+    assert [str(p) for p in args.gpkg] == ["a_trees.gpkg", "b_trees.gpkg"]
+    assert args.report_json is None and args.report_md is None
+
+
+@pytest.mark.parametrize("command", ["split", "merge"])
+def test_split_and_merge_help_parse(command):
+    proc = subprocess.run([sys.executable, "-m", "ff3d_geo", command, "--help"],
+                          capture_output=True, text=True, cwd=str(REPO_ROOT))
+    assert proc.returncode == 0, proc.stderr
+    assert f"python -m ff3d_geo {command}" in proc.stdout
+
+
+def test_split_subcommand_round_trip_prints_the_written_subtiles(tmp_path, capsys):
+    from geo_fixtures import write_grid_las
+
+    rng = np.random.default_rng(0)
+    n = 6000
+    xyz = np.column_stack([
+        381000 + rng.uniform(0, 200, n),
+        5829000 + rng.uniform(0, 100, n),
+        rng.uniform(30, 60, n)])
+    src = tmp_path / "3dm_33_381_5829_1_be.las"
+    write_grid_las(src, xyz, rng.choice([2, 3, 4, 5], n).astype(np.uint8))
+    out = tmp_path / "sub"
+
+    rc = main(["split", "--las", str(src), "--out", str(out), "--min-points", "10"])
+    assert rc == 0
+
+    printed = capsys.readouterr().out.split()
+    assert printed == [
+        str(out / "3dm_33_381_5829_E381000_N5829000_100m.las"),
+        str(out / "3dm_33_381_5829_E381100_N5829000_100m.las"),
+    ]
+    assert all(Path(p).is_file() for p in printed)
+
+
+def test_merge_rejects_lists_of_different_length(tmp_path):
+    with pytest.raises(ValueError, match="same number"):
+        main(["merge", "--las", "a_100m.las", "b_100m.las",
+              "--gpkg", "a_100m_trees.gpkg",
+              "--out-las", str(tmp_path / "m.las"), "--out-gpkg", str(tmp_path / "m.gpkg")])
+
+
+def test_merge_rejects_lists_in_a_different_order(tmp_path):
+    with pytest.raises(ValueError, match=r"a_100m\.las.*b_100m_trees\.gpkg"):
+        main(["merge", "--las", "a_100m.las", "b_100m.las",
+              "--gpkg", "b_100m_trees.gpkg", "a_100m_trees.gpkg",
+              "--out-las", str(tmp_path / "m.las"), "--out-gpkg", str(tmp_path / "m.gpkg")])
+
+
+def _merge_inputs(tmp_path):
+    """Two sub-tile result LAS files + their tree GeoPackages, correctly paired."""
+    from ff3d_geo.trees import trees_to_gpkg
+
+    paths = []
+    for dx in (0, 100):
+        stem = f"t_E{381300 + dx}_N5828300_100m"
+        las = tmp_path / f"{stem}.las"
+        write_two_cone_las(las, with_predictions=True)
+        # write_two_cone_las always writes at TILE_ORIGIN; shift the second tile east
+        # so the merged tile really spans two sub-tiles.
+        if dx:
+            import laspy
+            data = laspy.read(str(las))
+            data.x = np.asarray(data.x) + dx
+            data.write(str(las))
+        gpkg = tmp_path / f"{stem}_trees.gpkg"
+        trees_to_gpkg(las, gpkg)
+        paths.append((las, gpkg))
+    return paths
+
+
+def test_merge_subcommand_writes_merged_las_gpkg_and_report(tmp_path, capsys):
+    import geopandas as gpd
+    import laspy
+
+    pairs = _merge_inputs(tmp_path)
+    out_las = tmp_path / "km.las"
+    out_gpkg = tmp_path / "km_trees.gpkg"
+    report_json = tmp_path / "km_report.json"
+    report_md = tmp_path / "km_report.md"
+
+    rc = main([
+        "merge",
+        "--las", *[str(p[0]) for p in pairs],
+        "--gpkg", *[str(p[1]) for p in pairs],
+        "--out-las", str(out_las), "--out-gpkg", str(out_gpkg),
+        "--report-json", str(report_json), "--report-md", str(report_md),
+    ])
+    assert rc == 0
+
+    merged = laspy.read(out_las)
+    ids = np.asarray(merged.treeID)
+    # each sub-tile has trees 1 and 2; merge_las offsets the second by max_id + 1
+    assert set(ids[ids >= 0].tolist()) == {1, 2, 4, 5}
+    trees = gpd.read_file(out_gpkg, layer="trees")
+    assert sorted(trees["tree_id"].tolist()) == [1, 2, 4, 5]
+    assert json.loads(report_json.read_text())["n_trees"] == 4
+    assert report_md.is_file()
+    assert "First pass usable" in capsys.readouterr().out
+
+
+def test_merge_without_report_json_writes_no_report(tmp_path):
+    pairs = _merge_inputs(tmp_path)
+    out_las = tmp_path / "km.las"
+    rc = main([
+        "merge",
+        "--las", *[str(p[0]) for p in pairs],
+        "--gpkg", *[str(p[1]) for p in pairs],
+        "--out-las", str(out_las), "--out-gpkg", str(tmp_path / "km_trees.gpkg"),
+    ])
+    assert rc == 0
+    assert out_las.is_file()
+    assert not (tmp_path / "km_report.json").exists()
