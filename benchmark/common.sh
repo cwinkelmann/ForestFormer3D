@@ -115,7 +115,20 @@ ff3d_preprocess() {
 ff3d_prepare_checkpoint() {
   local in="$1" stem="$2" rc
   local conv="${stem}_converted.pth" raw="${stem}_raw.pth" layout="${stem}.layout"
-  [ -f "$FF3D_ROOT/$in" ] || ff3d_die "checkpoint missing: $FF3D_ROOT/$in"
+  if [ ! -f "$FF3D_ROOT/$in" ]; then
+    if [ "${FF3D_DRY_RUN:-0}" = "1" ]; then
+      # Real runs die here (the checkpoint is required input); a dry run must never create
+      # files under work_dirs, and the checkpoint legitimately may not exist yet (e.g. it is
+      # itself the output of a training run a dry run is only previewing). Print what WOULD
+      # run/be written and return, touching nothing.
+      echo "DRY: (input not present yet) $in"
+      echo "DRY: (planned) python tools/fix_spconv_checkpoint.py --in-path $in --out-path $conv"
+      echo "DRY: (planned) python benchmark/unfix_spconv_checkpoint.py --in-path $in --out-path $raw"
+      echo "DRY: (planned outputs) $conv $raw $layout"
+      return 0
+    fi
+    ff3d_die "checkpoint missing: $FF3D_ROOT/$in"
+  fi
   if [ -f "$FF3D_ROOT/$conv" ] && [ -f "$FF3D_ROOT/$raw" ] && [ -f "$FF3D_ROOT/$layout" ]; then
     cat "$FF3D_ROOT/$layout"
     return 0
