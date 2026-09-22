@@ -32,6 +32,20 @@
 # and off by default; the primary intended usage is still wrapping the whole invocation
 # externally, as in the usage examples above.
 #
+# Warm-up length (model.prepare_epoch): the config's default is 1000 (out of a 3000-epoch
+# paper run) -- the instance decoder stays frozen/untrained until
+# `epoch > model.prepare_epoch`. A 200-epoch benchmark run at that same default would NEVER
+# leave warm-up, so the decoder is never trained and val/test F1 comes back 0.0 for both
+# variants (this is exactly what the first real runs hit). --cfg-options
+# model.prepare_epoch=<N> is always added, default FF3D_PREPARE_EPOCH=60: the same ~30%
+# warm-up ratio as the paper's 1000/3000 (60/200 = 30%). Applies identically to both
+# variants: the old ForAINetV2OneFormer3D_XAwarequery.__init__ (git 6a75c37,
+# oneformer3d/oneformer3d.py) takes `prepare_epoch` as a constructor arg read straight from
+# the config the same way the fixed model class does, so overriding model.prepare_epoch via
+# --cfg-options works the same for both. FF3D_EXTRA_CFG_OPTIONS (space-separated
+# key=value tokens, e.g. "a.b=1 c.d=2") is appended to the same --cfg-options call for
+# future runs that need to override something else, without editing this script.
+#
 # FF3D_DRY_RUN=1: this script writes NOTHING under work_dirs, same contract as common.sh
 # (commits 6738a5f, b7000f8, 5c723ec):
 #   - every mutating filesystem command (mkdir, touch, rm) goes through common.sh's
@@ -69,7 +83,13 @@ WORK="work_dirs/bench-${VARIANT}-200"
 TEST_OUT="$WORK/test"
 EPOCHS="${FF3D_EPOCHS:-200}"
 VAL_INTERVAL="${FF3D_VAL_INTERVAL:-20}"
-CFG_OPTS=(train_cfg.max_epochs="$EPOCHS" train_cfg.val_interval="$VAL_INTERVAL" default_hooks.checkpoint.max_keep_ckpts=2)
+PREPARE_EPOCH="${FF3D_PREPARE_EPOCH:-60}"
+CFG_OPTS=(train_cfg.max_epochs="$EPOCHS" train_cfg.val_interval="$VAL_INTERVAL" default_hooks.checkpoint.max_keep_ckpts=2 model.prepare_epoch="$PREPARE_EPOCH")
+if [ -n "${FF3D_EXTRA_CFG_OPTIONS:-}" ]; then
+  # Intentional word-splitting: FF3D_EXTRA_CFG_OPTIONS is a space-separated list of
+  # key=value tokens, each becoming its own --cfg-options item.
+  CFG_OPTS+=(${FF3D_EXTRA_CFG_OPTIONS})
+fi
 N_TEST="$(grep -c . "$FF3D_DATA/meta_data/test_list.txt")"
 if [ "$VARIANT" = "old" ]; then RUNNER=ff3d_docker_old; else RUNNER=ff3d_docker; fi
 

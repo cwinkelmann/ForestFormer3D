@@ -23,6 +23,13 @@ common.sh's ff3d_prepare_checkpoint has its own matching dry-run branch: it can'
 a real layout without running the container, so it never prints "raw"/"converted" under a
 dry run -- run_train_200.sh's `layout` variable becomes that explanation text instead,
 which routes to its (harmless, informational) WARNING log line every dry run.
+
+model.prepare_epoch: the config's default (1000, out of a 3000-epoch paper run) means a
+200-epoch benchmark run never leaves the warm-up phase and the instance decoder is never
+trained (val/test F1 comes back 0.0 for both variants -- what the first real runs hit).
+--cfg-options always includes model.prepare_epoch=<FF3D_PREPARE_EPOCH, default 60> (the
+same ~30% warm-up ratio as the paper's 1000/3000), and FF3D_EXTRA_CFG_OPTIONS (a
+space-separated list of key=value tokens) is appended after it for future overrides.
 """
 import os
 import subprocess
@@ -136,7 +143,8 @@ def test_dry_run_full_sequence_creates_no_files(tmp_path, variant, ckpt_suffix):
     assert f"DRY: mkdir -p {root}/{work_rel}" in out
     assert "python tools/train.py configs/oneformer3d_qs_radius16_qp300_2many.py" in out
     assert f"--work-dir {work_rel}" in out
-    assert "--cfg-options train_cfg.max_epochs=200 train_cfg.val_interval=20 default_hooks.checkpoint.max_keep_ckpts=2" in out
+    assert ("--cfg-options train_cfg.max_epochs=200 train_cfg.val_interval=20 "
+            "default_hooks.checkpoint.max_keep_ckpts=2 model.prepare_epoch=60") in out
     assert f"DRY: (postcondition skipped) {root}/{work_rel}/epoch_200.pth" in out
     assert f"DRY: touch {root}/{work_rel}/.done-train" in out
     assert "training done" in out
@@ -174,6 +182,46 @@ def test_dry_run_full_sequence_creates_no_files(tmp_path, variant, ckpt_suffix):
     else:
         assert f"-v {root}:/workspace" in out
         assert "old_prelude.sh" not in out
+
+
+@pytest.mark.parametrize("variant", ["fixed", "old"])
+def test_ff3d_prepare_epoch_overrides_default(tmp_path, variant):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    old_root = tmp_path / "old" if variant == "old" else None
+    if old_root:
+        _seed_old_worktree(old_root)
+
+    env = _base_env(root, variant, old_root)
+    env["FF3D_PREPARE_EPOCH"] = "120"
+    r = _run(env, [variant], cwd=root)
+    out = r.stdout + r.stderr
+
+    assert r.returncode == 0, out
+    assert "model.prepare_epoch=120" in out
+    assert "model.prepare_epoch=60" not in out
+
+
+@pytest.mark.parametrize("variant", ["fixed", "old"])
+def test_ff3d_extra_cfg_options_appended(tmp_path, variant):
+    root = tmp_path / "root"
+    root.mkdir()
+    _seed_common(root)
+    old_root = tmp_path / "old" if variant == "old" else None
+    if old_root:
+        _seed_old_worktree(old_root)
+
+    env = _base_env(root, variant, old_root)
+    env["FF3D_EXTRA_CFG_OPTIONS"] = "a.b=1 c.d=2"
+    r = _run(env, [variant], cwd=root)
+    out = r.stdout + r.stderr
+
+    assert r.returncode == 0, out
+    # model.prepare_epoch=60 (the default) stays, plus both extra tokens appended after it
+    assert ("--cfg-options train_cfg.max_epochs=200 train_cfg.val_interval=20 "
+            "default_hooks.checkpoint.max_keep_ckpts=2 model.prepare_epoch=60 "
+            "a.b=1 c.d=2") in out
 
 
 @pytest.mark.parametrize("variant,ckpt_suffix", [("fixed", "converted"), ("old", "raw")])
