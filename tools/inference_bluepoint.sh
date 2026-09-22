@@ -13,7 +13,11 @@ SCORE_TH="${SCORE_TH:-0.4}"
 BLUEPOINTS_DIR="${BLUEPOINTS_DIR:-$WORK_DIR/work_dirs/bluepoints}"
 DATA_ROOT="${DATA_ROOT:-$WORK_DIR/data/ForAINetV2}"
 TEST_LIST_INIT="${TEST_LIST_INIT:-$DATA_ROOT/meta_data/test_list_initial.txt}"
-TEST_LIST="${TEST_LIST:-$DATA_ROOT/meta_data/test_list.txt}"
+# Default to a private temp file so the tracked meta_data/test_list.txt is
+# never mutated by this script (same rule as "no sed on the tracked
+# config"); cleaned up on exit.
+TEST_LIST="${TEST_LIST:-$(mktemp "${TMPDIR:-/tmp}/ff3d_test_list.XXXXXX")}"
+trap 'rm -f "$TEST_LIST"' EXIT
 TEST_DATA_DIR="${TEST_DATA_DIR:-$DATA_ROOT/test_data}"
 DRY_RUN="${DRY_RUN:-0}"
 export PYTHONPATH="${PYTHONPATH:-$WORK_DIR}"
@@ -48,7 +52,7 @@ while IFS= read -r scan_name || [[ -n "${scan_name:-}" ]]; do
         echo "Iteration $iteration for $current_scan_name"
         write_list "$current_scan_name" "$TEST_LIST"
 
-        ( cd "$DATA_ROOT" && run python batch_load_ForAINetV2_data.py --test_scan_names_file meta_data/test_list.txt )
+        ( cd "$DATA_ROOT" && run python batch_load_ForAINetV2_data.py --test_scan_names_file "$TEST_LIST" )
         ( cd "$WORK_DIR" && run python tools/create_data_forainetv2.py forainetv2 )
         ( cd "$WORK_DIR" && CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" run python tools/test.py "$CONFIG_FILE" "$MODEL_PATH" \
             --work-dir "$BLUEPOINTS_DIR" \
