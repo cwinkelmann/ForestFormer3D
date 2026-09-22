@@ -21,6 +21,54 @@ import pandas as pd
 import pyproj
 
 
+def _describe_dim(dim) -> str:
+    """``name type "description"`` for one extra dimension, for an error message."""
+    return f'{dim.name} {dim.dtype} "{dim.description}"'
+
+
+def _format_difference(expected, actual) -> str:
+    """Say how point format ``actual`` differs from ``expected``, in one clause.
+
+    laspy compares point formats dimension by dimension and a ``DimensionInfo``
+    carries its ``description``, so two formats with identical dimension NAMES can
+    still compare unequal -- that is exactly the bug the caller guards against.
+    Printing the names alone would then show two identical lists, so spell out the
+    first dimension that really differs, description included.
+    """
+    if expected.id != actual.id:
+        return f"point format {actual.id} instead of {expected.id}"
+    exp_dims = list(expected.extra_dimensions)
+    act_dims = list(actual.extra_dimensions)
+    if len(exp_dims) != len(act_dims):
+        return (f"extra dims {[d.name for d in act_dims]} instead of "
+                f"{[d.name for d in exp_dims]}")
+    for exp, act in zip(exp_dims, act_dims):
+        if exp != act:
+            return (f"extra dim {_describe_dim(act)} instead of {_describe_dim(exp)} "
+                    "(name, type AND description must match)")
+    return "the standard dimensions differ"
+
+
+def _reject_duplicates(what: str, argument: str, paths: list[Path]) -> None:
+    """Raise unless ``paths`` are all distinct, naming the first repeated one.
+
+    ``merge_las`` keys ``id_offsets`` by path string, so the same sub-tile passed
+    twice (two overlapping globs, say) collapses to ONE entry: both copies would
+    then be written with the same offset and their tree ids would collide, and
+    ``merge_trees`` would only notice afterwards, via the length mismatch, with a
+    wrong merged LAS already on disk. Checked before anything is read or written.
+    """
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            raise ValueError(
+                f"{what}: {argument} lists {path} more than once; every sub-tile must "
+                "appear exactly once (overlapping shell globs are the usual cause)"
+            )
+        seen.add(key)
+
+
 def merge_las(las_paths, out_las) -> dict:
     """Concatenate sub-tile result LAS files into one, with globally unique treeIDs.
 
@@ -36,6 +84,7 @@ def merge_las(las_paths, out_las) -> dict:
     las_paths = [Path(p) for p in las_paths]
     if not las_paths:
         raise ValueError("merge_las: las_paths is empty")
+    _reject_duplicates("merge_las", "las_paths", las_paths)
 
     n_points = 0
     max_x = min_x = max_y = min_y = max_z = min_z = None
@@ -70,11 +119,9 @@ def merge_las(las_paths, out_las) -> dict:
                 version = str(header.version)
             elif header.point_format != point_format:
                 raise ValueError(
-                    f"merge_las: {p} has point format {header.point_format.id} with extra "
-                    f"dims {list(header.point_format.extra_dimension_names)}, which differs "
-                    f"from {las_paths[0]} (format {point_format.id}, extra dims "
-                    f"{list(point_format.extra_dimension_names)}); all sub-tile results "
-                    "must come from the same results_to_las version"
+                    f"merge_las: {p} does not have the same point format as "
+                    f"{las_paths[0]}: {_format_difference(point_format, header.point_format)}"
+                    "; all sub-tile results must come from the same results_to_las version"
                 )
 
         las = laspy.read(str(p))
@@ -130,6 +177,7 @@ def merge_trees(gpkg_paths, out_gpkg, id_offsets: dict) -> int:
     positionally rather than by matching path strings.
     """
     gpkg_paths = [Path(p) for p in gpkg_paths]
+    _reject_duplicates("merge_trees", "gpkg_paths", gpkg_paths)
     offsets = list(id_offsets.values())
     if len(offsets) != len(gpkg_paths):
         raise ValueError(

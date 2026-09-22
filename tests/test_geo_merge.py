@@ -100,3 +100,41 @@ def test_merge_las_names_a_sub_tile_with_a_different_point_format(tmp_path):
     las.write(str(b))
     with pytest.raises(ValueError, match="same results_to_las version"):
         merge_las([a, b], tmp_path / "merged.las")
+
+
+def test_merge_las_error_spells_out_a_description_only_mismatch(tmp_path):
+    """Names alone would print two identical lists for the 11d850b failure mode."""
+    a = _result_las(tmp_path / "a.las", (381000, 5829000), [-1, 0, 1], [0, 1, 2])
+    b = tmp_path / "b.las"
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.scales = np.array([0.001] * 3)
+    header.offsets = np.array([381100.0, 5829000.0, 0.0])
+    for name, dtype in (("treeID", np.int32), ("semantic", np.uint8), ("score", np.float32)):
+        header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=dtype))  # no description
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = [381100.0], [5829000.0], [1.0]
+    las.write(str(b))
+    with pytest.raises(ValueError) as excinfo:
+        merge_las([a, b], tmp_path / "merged.las")
+    message = str(excinfo.value)
+    assert "ForestFormer3D instance, -1 none" in message
+    assert "description must match" in message
+
+
+def test_merge_las_rejects_the_same_sub_tile_twice(tmp_path):
+    """A repeated path would collapse in id_offsets and collide the two copies' ids."""
+    a = _result_las(tmp_path / "a.las", (381000, 5829000), [-1, 0, 1, 2], [0, 1, 2, 2])
+    out = tmp_path / "merged.las"
+    with pytest.raises(ValueError, match=r"a\.las more than once"):
+        merge_las([a, a], out)
+    assert not out.exists()
+
+
+def test_merge_trees_rejects_the_same_gpkg_twice(tmp_path):
+    a = _result_las(tmp_path / "a.las", (381000, 5829000), [-1, 0, 1, 2], [0, 1, 2, 2])
+    ga = tmp_path / "a.gpkg"
+    trees_to_gpkg(a, ga)
+    out = tmp_path / "merged.gpkg"
+    with pytest.raises(ValueError, match=r"a\.gpkg more than once"):
+        merge_trees([ga, ga], out, {str(a): 0, "other": 3})
+    assert not out.exists()

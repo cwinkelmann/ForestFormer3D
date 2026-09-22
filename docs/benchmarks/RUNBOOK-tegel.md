@@ -207,10 +207,11 @@ Notes:
   the command still checks pairwise that `<stem>.las` goes with `<stem>_trees.gpkg` and
   refuses the merge otherwise, because the tree-id offsets are applied positionally.
 - GPU 5 only (`--gpu 5`): GPUs 2-4 may be running Phase 2 benchmark jobs.
-- Expect roughly 25-40 s of GPU time per sub-tile, so about 45-70 min per km tile plus a
-  few minutes of host-side georeferencing/reporting. Run the three tiles **sequentially**,
-  as one `nohup`'d script under `work_dirs/logs/`, and poll the log every few minutes
-  rather than in a tight loop.
+- Expect about 55-60 s per sub-tile, so roughly 1 h 35 min per km tile including the
+  shared preprocess and the host-side georeferencing/reporting (measured 2026-09-22 on
+  carrot's H100: 92-99 min per km tile, 4 h 47 min for all three). Run the three tiles
+  **sequentially**, as one `nohup`'d script under `work_dirs/logs/`, and poll the log
+  every few minutes rather than in a tight loop.
 - A batch has no resume. If the run dies part-way, the sub-tiles whose `<stem>.ply`
   already exists can be finished from the host venv with `ff3d_geo georef` / `report`
   (section 3), or the whole `run` can simply be repeated - it re-exports everything.
@@ -224,11 +225,19 @@ Copy the results back to the Mac (no PLYs, and no per-sub-tile LAS/GeoPackage - 
 merged km files are what matters):
 
 ```bash
-mkdir -p ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021
-rsync -av --exclude '*.ply' --exclude '*_100m.las' --exclude '*_100m_trees.gpkg' \
-  carrot:/raid/cwinkelmann/ForestFormer3D/work_dirs/berlin-*/ \
-  ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021/
+for T in 3dm_33_380_5828_1_be 3dm_33_381_5828_1_be 3dm_33_381_5829_1_be; do
+  mkdir -p ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021/$T
+  rsync -av --exclude '*.ply' --exclude '*_100m.las' --exclude '*_100m_trees.gpkg' \
+    carrot:/raid/cwinkelmann/ForestFormer3D/work_dirs/berlin-$T/ \
+    ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021/$T/
+done
 ```
+
+One destination directory **per km tile**: every `<out>` holds a `scan_list.txt`, an
+`empty_list.txt`, a config copy and one `2026...` mmengine log dir per `run` call, and
+copying all three tiles into one directory would overwrite the first three and pile up
+the log dirs. The merged `<T>.las` / `<T>_trees.gpkg` / `<T>_report.json/.md` are the
+files that matter and they are uniquely named either way.
 
 Then fill in `docs/benchmarks/2026-09-22-tegel-berlin-2021.md` from the three
 `<T>_report.md` blocks.
