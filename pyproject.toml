@@ -1,0 +1,13 @@
+[project]
+name = "forestformer3d"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["oneformer3d*", "ff3d_geo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs CUDA and the Docker image"]
+addopts = "-m 'not gpu'"
