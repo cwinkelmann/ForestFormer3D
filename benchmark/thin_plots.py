@@ -74,23 +74,43 @@ def thinned_name(stem: str, density: float, mode: str) -> str:
     return f"{stem}_thin{density_tag(density)}{MODE_SUFFIX[mode]}"
 
 
+#: Above this point count, ``hull_area`` reduces the input to hull candidates
+#: before handing it to shapely (shapely 1.8 builds a MultiPoint point by point).
+HULL_CANDIDATE_LIMIT = 20_000
+#: Bin width (m) of that reduction.
+HULL_BIN = 0.1
+
+
+def _extreme_indices(key: np.ndarray, value: np.ndarray) -> np.ndarray:
+    """For each distinct ``key``, the indices of the smallest and largest ``value``."""
+    order = np.lexsort((value, key))
+    sorted_key = key[order]
+    boundary = sorted_key[1:] != sorted_key[:-1]
+    first = np.concatenate([[True], boundary])
+    last = np.concatenate([boundary, [True]])
+    return np.concatenate([order[first], order[last]])
+
+
 def hull_area(x: np.ndarray, y: np.ndarray) -> float:
     """Area (m2) of the 2D convex hull of the xy footprint."""
     from shapely.geometry import MultiPoint
 
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
     if x.size < 3:
         return 0.0
-    coords = np.column_stack([np.asarray(x, dtype=np.float64),
-                              np.asarray(y, dtype=np.float64)])
-    # Deduplicating on a coarse grid first keeps GEOS off multi-million-point
-    # inputs; the hull of the deduplicated set differs from the full hull by at
-    # most one grid cell at the rim, which is far below the precision the
-    # density target needs.
-    if coords.shape[0] > 200_000:
-        keys = np.round(coords / 0.1).astype(np.int64)
-        _, keep = np.unique(keys, axis=0, return_index=True)
-        coords = coords[np.sort(keep)]
-    return float(MultiPoint(coords).convex_hull.area)
+    if x.size > HULL_CANDIDATE_LIMIT:
+        # Every convex-hull vertex is, within one bin, the topmost or bottommost
+        # point of its x column or the leftmost/rightmost of its y row. Keeping
+        # only those few thousand candidates is what makes this affordable on
+        # multi-million-point plots; the hull can shrink by at most HULL_BIN at
+        # the rim, far below the precision the density target needs.
+        xb = np.floor(x / HULL_BIN).astype(np.int64)
+        yb = np.floor(y / HULL_BIN).astype(np.int64)
+        keep = np.unique(np.concatenate([_extreme_indices(xb, y),
+                                         _extreme_indices(yb, x)]))
+        x, y = x[keep], y[keep]
+    return float(MultiPoint(np.column_stack([x, y])).convex_hull.area)
 
 
 def uniform_indices(n_points: int, target: int, rng: np.random.Generator) -> np.ndarray:
