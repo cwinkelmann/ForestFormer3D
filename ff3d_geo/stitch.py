@@ -23,7 +23,11 @@ This module puts them back together:
    tiles remain a partition. A point no sub-tile core claimed keeps the nodata values
    ``treeID = -1 / semantic = 255 / score = -1`` (the older ``ff3d_geo.merge`` path left
    such points out of the merged LAS entirely). A km tile that only supplied halo points
-   to a neighbour's split owns nothing and is not written at all.
+   to a neighbour's split owns nothing and is not written at all;
+5. the tree table is built ONCE over the whole mosaic and each tree's row is written to
+   the single km tile holding most of its points, measured over ALL of its points. A
+   tree unified across a km border would otherwise get a partial row in both tiles'
+   ``<T>_trees.gpkg``, double-counting it and describing each half as a whole tree.
 
 Everything that touches point arrays is vectorised: a km tile is 25 M points over 100
 sub-tiles with 20 m halos (~1.96x its core each), so a per-instance Python pass over
@@ -37,13 +41,15 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import geopandas as gpd
 import laspy
 import numpy as np
+from shapely.geometry import MultiPoint, Point
 
 from ff3d_geo.convert import result_point_header
-from ff3d_geo.report import build_report, write_report
+from ff3d_geo.report import build_report, recommend, write_report
 from ff3d_geo.split import IDENT_DTYPE
-from ff3d_geo.trees import trees_to_gpkg
+from ff3d_geo.trees import TREE_COLUMNS, ground_surface
 
 __all__ = [
     "IDENT_DTYPE",
@@ -569,6 +575,147 @@ def _write_source_las(source: dict, out_las: Path, tree_id: np.ndarray,
         raise
 
 
+def _hull_vertices(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """The 2D convex hull of a tree's points, as the few vertices that define it.
+
+    Keeping the hull instead of the points makes the per-tile parts mergeable: the hull
+    of a union is the hull of the union of the hulls, so a tree split over two km tiles
+    gets its true crown area without either tile holding the other's points.
+    """
+    points = np.column_stack([np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)])
+    if len(points) <= 3:
+        return points
+    hull = MultiPoint(points).convex_hull
+    if hull.geom_type == "Polygon":
+        return np.asarray(hull.exterior.coords)[:-1]
+    if hull.geom_type == "LineString":
+        return np.asarray(hull.coords)
+    return points[:1]
+
+
+def _hull_area(points: np.ndarray) -> float:
+    """Convex hull area of ``(n, 2)`` points; 0.0 when they are collinear or fewer than 3.
+
+    Same rule as :func:`ff3d_geo.trees.trees_to_gpkg`: a degenerate hull is a LineString
+    or a Point, not a Polygon, and scores no crown area.
+    """
+    if len(points) < 3:
+        return 0.0
+    hull = MultiPoint(points).convex_hull
+    return float(hull.area) if hull.geom_type == "Polygon" else 0.0
+
+
+def _tile_tree_parts(las_path: Path, ground_grid_m: float = 1.0):
+    """Per-tree partial aggregates for one km tile, plus its ground grid and CRS.
+
+    The aggregates are chosen so that two tiles' parts for the same global id can be
+    merged EXACTLY (see :func:`_mosaic_tree_rows`): counts and score sums add, ``top_z``
+    and ``min_z`` are extrema, crown hulls compose, and the "lowest metre" band is kept
+    as points because the stem position is a median over it. The band is taken at this
+    tile's own ``min_z``, which is always at or above the global one, so it is a superset
+    of the points the merged band needs.
+    """
+    las = laspy.read(str(las_path))
+    x = np.asarray(las.x, dtype=np.float64)
+    y = np.asarray(las.y, dtype=np.float64)
+    z = np.asarray(las.z, dtype=np.float64)
+    tree_id = np.asarray(las.treeID, dtype=np.int64)
+    semantic = np.asarray(las.semantic, dtype=np.int64)
+    classification = np.asarray(las.classification, dtype=np.int64)
+    score = np.asarray(las.score, dtype=np.float64)
+
+    ground, extent = ground_surface(x, y, z, semantic, classification, ground_grid_m)
+
+    # One sort instead of a `tree_id == tid` pass per tree (see trees.trees_to_gpkg).
+    order = np.argsort(tree_id, kind="stable")
+    sorted_ids = tree_id[order]
+    first_real = int(np.searchsorted(sorted_ids, 0, side="left"))
+    ids, starts = np.unique(sorted_ids[first_real:], return_index=True)
+    starts = starts + first_real
+    stops = np.append(starts[1:], sorted_ids.size)
+
+    parts: dict[int, dict] = {}
+    for tid, start, stop in zip(ids.tolist(), starts.tolist(), stops.tolist()):
+        member = order[start:stop]
+        tx, ty, tz = x[member], y[member], z[member]
+        low = tz <= tz.min() + 1.0
+        parts[int(tid)] = {
+            "n": int(member.size),
+            "score_sum": float(score[member].sum()),
+            "top_z": float(tz.max()),
+            "min_z": float(tz.min()),
+            "low": np.column_stack([tx[low], ty[low], tz[low]]),
+            "hull": _hull_vertices(tx, ty),
+        }
+    return parts, ground, extent, las.header.parse_crs()
+
+
+def _mosaic_tree_rows(parts_by_tile: dict, ground_by_tile: dict, extent_by_tile: dict):
+    """Assign every global tree id to ONE owner tile and build its row from all its points.
+
+    A tree unified across a km border has points in two source tiles. Running
+    ``trees_to_gpkg`` per tile would then give it a partial row in each: mosaic-wide
+    counts would double it and every attribute (height, crown area, n_points) would
+    describe a fragment. Here each id goes to the tile holding the majority of its
+    points -- ties to the tile holding its highest point, then to the first tile name, so
+    the choice is deterministic -- and its row is computed over ALL of its points, with
+    the height taken against the OWNER tile's ground grid at the stem.
+
+    Returns ``({tile stem: [row, ...]}, n_cross_km_trees)``.
+    """
+    tiles_of: dict[int, list[str]] = {}
+    for stem, parts in parts_by_tile.items():
+        for gid in parts:
+            tiles_of.setdefault(gid, []).append(stem)
+
+    rows_by_tile: dict[str, list[dict]] = {stem: [] for stem in parts_by_tile}
+    n_cross_km_trees = 0
+    for gid in sorted(tiles_of):
+        stems = sorted(tiles_of[gid])
+        if len(stems) > 1:
+            n_cross_km_trees += 1
+        pieces = [parts_by_tile[stem][gid] for stem in stems]
+        owner = min(stems, key=lambda s: (-parts_by_tile[s][gid]["n"],
+                                          -parts_by_tile[s][gid]["top_z"], s))
+
+        n_points = sum(p["n"] for p in pieces)
+        top_z = max(p["top_z"] for p in pieces)
+        min_z = min(p["min_z"] for p in pieces)
+        low = np.vstack([p["low"] for p in pieces])
+        low = low[low[:, 2] <= min_z + 1.0]
+        stem_x = float(np.median(low[:, 0]))
+        stem_y = float(np.median(low[:, 1]))
+        ix, iy = extent_by_tile[owner].index(stem_x, stem_y)
+        ground_z = float(ground_by_tile[owner][iy, ix])
+        rows_by_tile[owner].append({
+            "tree_id": int(gid),
+            "x": stem_x,
+            "y": stem_y,
+            "top_z": top_z,
+            "height": top_z - ground_z,
+            "crown_area_m2": _hull_area(np.vstack([p["hull"] for p in pieces])),
+            "n_points": n_points,
+            "mean_score": sum(p["score_sum"] for p in pieces) / n_points,
+        })
+    return rows_by_tile, n_cross_km_trees
+
+
+def _write_tree_table(rows: list[dict], crs, gpkg_path: Path) -> int:
+    """Write ``rows`` as layer ``trees``, with the columns ``trees_to_gpkg`` produces."""
+    frame = {column: [row[column] for row in rows] for column in TREE_COLUMNS}
+    geoms = [Point(row["x"], row["y"]) for row in rows]
+    gdf = gpd.GeoDataFrame(frame, geometry=gpd.GeoSeries(geoms, crs=crs), crs=crs)
+    if not rows:
+        gdf = gdf.astype({"tree_id": "int64", "x": "float64", "y": "float64",
+                          "top_z": "float64", "height": "float64",
+                          "crown_area_m2": "float64", "n_points": "int64",
+                          "mean_score": "float64"})
+    gpkg_path = Path(gpkg_path)
+    gpkg_path.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_file(str(gpkg_path), driver="GPKG", layer="trees")
+    return len(rows)
+
+
 def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
            min_shared: int = 20, runtime_s: float | None = None,
            epsg: int = EPSG) -> dict:
@@ -582,6 +729,12 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
     should set to whatever ``las_to_ply`` used), ``<S>_trees.gpkg`` and
     ``<S>_report.json``/``.md``, plus ``<out>/stitch_ids.npy`` (the
     ``(gid, stem, local)`` id map) and ``<out>/stitch.json``.
+
+    Every tree appears in exactly ONE ``<S>_trees.gpkg`` -- the tile holding most of its
+    points -- with attributes measured over all of its points across tiles, so the tables
+    of a mosaic concatenate to exactly ``n_trees`` rows and the per-tile reports count
+    each tree once. ``stitch.json``'s ``n_cross_km_trees`` says how many trees have
+    points in more than one km tile.
 
     Only the sources that OWN at least one sub-tile are written. ``Mosaic.sources`` also
     holds the km tiles that merely supplied halo points to somebody else's split
@@ -686,23 +839,45 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
 
         out_las = out_dir / f"{source_stem}.las"
         _write_source_las(source, out_las, tree_id, semantic, score, epsg=epsg)
-        out_gpkg = out_dir / f"{source_stem}_trees.gpkg"
-        n_trees_in_tile = trees_to_gpkg(out_las, out_gpkg)
-        report = build_report(out_las, out_gpkg, runtime_s=runtime_s)
-        write_report(report, out_dir / f"{source_stem}_report.json",
-                     out_dir / f"{source_stem}_report.md")
         tiles[source_stem] = {
             "las": str(out_las),
-            "gpkg": str(out_gpkg),
+            "gpkg": str(out_dir / f"{source_stem}_trees.gpkg"),
             "n_points": n_points,
-            "n_trees_in_tile": int(n_trees_in_tile),
         }
+
+    # The tree table is built ONCE over the whole mosaic and then split by owner tile:
+    # a tree unified across a km border has points in two km tiles and must be counted,
+    # and measured, once. Only after every km LAS is on disk, since the parts are read
+    # back from them.
+    parts_by_tile, ground_by_tile, extent_by_tile, crs_by_tile = {}, {}, {}, {}
+    for source_stem, tile in tiles.items():
+        (parts_by_tile[source_stem], ground_by_tile[source_stem],
+         extent_by_tile[source_stem], crs_by_tile[source_stem]) = _tile_tree_parts(tile["las"])
+    rows_by_tile, n_cross_km_trees = _mosaic_tree_rows(
+        parts_by_tile, ground_by_tile, extent_by_tile)
+
+    for source_stem, tile in tiles.items():
+        out_las = Path(tile["las"])
+        out_gpkg = Path(tile["gpkg"])
+        tile["n_trees_in_tile"] = _write_tree_table(
+            rows_by_tile[source_stem], crs_by_tile[source_stem], out_gpkg)
+        report = build_report(out_las, out_gpkg, runtime_s=runtime_s)
+        # build_report counts the distinct treeIDs in the LAS, which counts a km-border
+        # tree in BOTH of the tiles it reaches into. The tree table is the authority
+        # here, so the report reports the trees this tile OWNS (the mosaic's per-tile
+        # counts then add up to n_trees) and keeps the LAS figure alongside it.
+        report["n_trees_in_las"] = int(report["n_trees"])
+        report["n_trees"] = int(tile["n_trees_in_tile"])
+        report["recommendation"] = recommend(report)
+        write_report(report, out_dir / f"{source_stem}_report.json",
+                     out_dir / f"{source_stem}_report.md")
 
     info = {
         "n_trees": int(n_trees),
         "n_pairs_tested": int(n_pairs_tested),
         "n_unified": int(n_unified),
         "n_cross_km": int(n_cross_km),
+        "n_cross_km_trees": int(n_cross_km_trees),
         "tiles": tiles,
     }
     (out_dir / "stitch.json").write_text(json.dumps({

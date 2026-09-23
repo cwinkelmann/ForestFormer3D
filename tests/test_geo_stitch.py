@@ -345,6 +345,28 @@ def test_stitch_over_a_real_two_km_tile_neighbour_split(tmp_path):
     assert len(set(assigned)) == 5           # no id shared between two trees
     assert sorted(np.unique(all_ids[all_ids >= 0]).tolist()) == list(range(info["n_trees"]))
 
+    # (e) each tree's row is written ONCE, in the tile holding most of its points, and
+    # measured over all of its points -- not once per tile as a fragment.
+    tables = {key: gpd.read_file(out / f"{key}_1_be_trees.gpkg", layer="trees")
+              for key in sources}
+    assert sum(len(t) for t in tables.values()) == info["n_trees"]
+    assert json.loads((out / "stitch.json").read_text())["n_cross_km_trees"] == 1
+    border_id = next(iter(per_tree[5]))
+    holders = [key for key, t in tables.items() if border_id in set(t["tree_id"])]
+    assert len(holders) == 1                        # exactly one gpkg lists the straddler
+    row = tables[holders[0]].set_index("tree_id").loc[border_id]
+    assert row["n_points"] == int((all_gt == 5).sum())   # ... with its FULL point count
+    west_points = int((sources["3dm_33_381_5829"]["gt"] == 5).sum())
+    assert 0 < west_points < row["n_points"]        # the tree really does span both tiles
+    assert row["top_z"] == pytest.approx(
+        max(float(sources[k]["xyz"][sources[k]["gt"] == 5, 2].max()) for k in sources))
+    for key, table in tables.items():
+        assert table["tree_id"].is_unique
+        assert (key == holders[0]) or border_id not in set(table["tree_id"])
+    # the reports count the owner-assigned rows, so the mosaic total is n_trees
+    assert sum(json.loads((out / f"{key}_1_be_report.json").read_text())["n_trees"]
+               for key in sources) == info["n_trees"]
+
     # (d) determinism: reversed manifest order and reversed pair order give the same ids.
     info_rev = stitch(manifests[::-1], results[::-1], tmp_path / "out_rev")
     for key in sources:
