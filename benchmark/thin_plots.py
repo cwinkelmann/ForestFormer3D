@@ -98,13 +98,17 @@ def hull_area(x: np.ndarray, y: np.ndarray) -> float:
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     if x.size < 3:
-        return 0.0
+        raise ValueError(
+            f"a footprint needs at least 3 points to have an area, got {x.size}")
     if x.size > HULL_CANDIDATE_LIMIT:
-        # Every convex-hull vertex is, within one bin, the topmost or bottommost
-        # point of its x column or the leftmost/rightmost of its y row. Keeping
-        # only those few thousand candidates is what makes this affordable on
-        # multi-million-point plots; the hull can shrink by at most HULL_BIN at
-        # the rim, far below the precision the density target needs.
+        # Every convex-hull vertex is within one bin of a point that is the
+        # topmost/bottommost of its x column or the leftmost/rightmost of its y
+        # row. The candidate set is therefore NOT guaranteed to contain every
+        # true hull vertex (measured: it drops 1 of 171 on a disc), but the hull
+        # it yields can only shrink, and by at most HULL_BIN at the rim --
+        # measured area error below 0.003 %, far under what the density target
+        # needs. Keeping only those few thousand candidates is what makes this
+        # affordable on multi-million-point plots.
         xb = np.floor(x / HULL_BIN).astype(np.int64)
         yb = np.floor(y / HULL_BIN).astype(np.int64)
         keep = np.unique(np.concatenate([_extreme_indices(xb, y),
@@ -133,6 +137,14 @@ def _allocate(counts: np.ndarray, target: int, rng: np.random.Generator) -> np.n
     if n_cells >= target:
         # Fewer points in the budget than occupied cells: one point from each of
         # ``target`` randomly chosen cells (cells are the unit of coverage here).
+        # This is a MODE FLIP -- the cells are picked at random rather than by
+        # height, so ground-only cells win as often as canopy ones and the result
+        # is no longer canopy-biased at all. With 0.5 m cells it starts at about
+        # 4 pts/m2 and gets worse below that; warn rather than degrade silently.
+        print(f"WARNING: canopy mode degenerated: {n_cells} occupied cells but a "
+              f"budget of only {target} points, so the result is one randomly "
+              f"chosen point per cell and is NOT canopy-biased. Use a larger "
+              f"--density or a coarser cell.", file=sys.stderr)
         k = np.zeros(n_cells, dtype=np.int64)
         k[rng.choice(n_cells, size=target, replace=False)] = 1
         return k
@@ -192,6 +204,11 @@ def thin_one(src_ply: Path, dst_ply: Path, density: float, mode: str,
     n_points = x.size
     area = hull_area(x, y)
     target = int(round(density * area))
+    # Deliberately re-seeded per plot with the SAME seed: every plot is thinned
+    # from its own fresh stream, so a plot's output depends only on that plot and
+    # the seed, never on how many plots ran before it. (Deriving the stream from
+    # the scan name would be equally defensible but is not stable across Python
+    # processes, and would change the published 2026-09-23 results.)
     rng = np.random.default_rng(seed)
 
     if mode == "uniform":

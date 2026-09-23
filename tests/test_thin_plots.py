@@ -161,3 +161,18 @@ def test_cli_writes_files_and_scan_list(tmp_path, capsys):
     assert (tmp_path / "dst" / "plot_a_test_thin25c.ply").is_file()
     assert (tmp_path / "dst" / "plot_b_test_thin25c.ply").is_file()
     assert out_list.read_text().split() == ["plot_a_test_thin25c", "plot_b_test_thin25c"]
+
+
+def test_hull_area_needs_three_points():
+    with pytest.raises(ValueError, match="at least 3 points"):
+        thin_plots.hull_area(np.array([0.0, 1.0]), np.array([0.0, 1.0]))
+
+
+def test_canopy_warns_when_the_budget_is_below_the_cell_count(tmp_path, capsys):
+    """Below ~4 pts/m2 with 0.5 m cells canopy mode stops being canopy-biased."""
+    src = tmp_path / "plot_e_test.ply"
+    make_plot(src, side=10.0, per_cell=20)          # 400 cells over ~90 m2
+    out = tmp_path / "sparse.ply"
+    row = thin_plots.thin_one(src, out, density=1.0, mode="canopy", seed=0)
+    assert row["kept"] == row["target"] < 400
+    assert "canopy mode degenerated" in capsys.readouterr().err

@@ -14,17 +14,32 @@ separate ground-truth files: the GT travelled with the prediction.
 Per plot and pooled over plots it reports
 
   gt          number of GT trees (``instance_gt`` normalized: ground and
-              unannotated points, which share raw id 0, become -1)
+              unannotated points, which share raw id 0, become -1). A tree with
+              no points in the file does not exist here at all.
   pred        number of predicted instances (``instance_pred >= 0``)
   matched     GT trees with an optimally matched prediction at IoU >= 0.5
               (Hungarian assignment on the full IoU matrix)
-  frag/tree   mean number of predictions that put >= 20 % of THEIR OWN points
-              inside one GT tree -- the fragment count of that tree
-  split       fraction of GT trees with >= 2 such fragments
-  merged      fraction of predictions that cover >= 20 % of two or more GT trees
-  h_pred      median predicted-instance height (max z of the instance minus the
-              plot's min z)
-  h_gt        the same for GT trees
+  frag/gt     mean number of predictions that put >= 20 % of THEIR OWN points
+              inside one GT tree -- the fragment count of that tree -- averaged
+              over ALL GT trees
+  split%gt    fraction of ALL GT trees with >= 2 such fragments
+  det         GT trees with >= 1 fragment ("detected")
+  frag/det    the same fragment count, averaged over DETECTED trees only
+  split%det   fraction of DETECTED trees with >= 2 fragments
+  merged%     fraction of predictions that cover >= 20 % of two or more GT trees
+  dz_med      median of (predicted top z - GT top z) over the MATCHED pairs
+  dz_mean     the mean of the same
+  h_pred      median predicted-instance height (max z minus the plot's min z)
+  h_gt        the same over all GT trees
+
+The ``gt``-denominated fragment columns fall when recall falls -- a GT tree that
+no prediction came near contributes 0 fragments -- so they say nothing on their
+own about whether the surviving predictions fragment more. The ``det`` columns
+condition on the trees the model actually found and are the ones to compare
+across conditions with different recall. Likewise ``h_pred`` vs ``h_gt`` compares
+two different populations (surviving predictions vs all GT trees) and moves with
+recall alone; ``dz_med`` / ``dz_mean`` compare each prediction with the tree it
+was matched to and do not.
 
 Usage::
 
@@ -103,39 +118,41 @@ def diagnose_plot(path: Path) -> dict | None:
         return None
     z = np.asarray(data["z"], dtype=np.float64)
     pred, n_pred = compact(np.asarray(data["instance_pred"]))
-    gt = normalize_gt(np.asarray(data["semantic_gt"]),
-                      np.asarray(data["instance_gt"]))
-    n_gt = int(gt.max()) + 1 if gt.size and gt.max() >= 0 else 0
+    gt, n_gt = compact(normalize_gt(np.asarray(data["semantic_gt"]),
+                                    np.asarray(data["instance_gt"])))
 
     inter, pred_sizes, gt_sizes = contingency(pred, n_pred, gt, n_gt)
     union = pred_sizes[:, None] + gt_sizes[None, :] - inter
     iou = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
 
+    z_min = float(z.min()) if z.size else 0.0
+    pred_h = top_heights(pred, n_pred, z, z_min)
+    gt_h = top_heights(gt, n_gt, z, z_min)
+
+    # Hungarian assignment maximises total IoU; a pair counts as a detection at
+    # IoU >= MATCH_IOU. The height delta is taken over exactly those pairs, so it
+    # compares a prediction with THE tree it found instead of comparing the
+    # surviving predictions against all GT trees (which recall loss alone would
+    # bias, see docs/benchmarks/2026-09-23-als-density-eval.md).
     matched = 0
+    height_delta = np.zeros(0)
     if n_pred and n_gt:
         from scipy.optimize import linear_sum_assignment
 
         rows, cols = linear_sum_assignment(-iou)
-        matched = int((iou[rows, cols] >= MATCH_IOU).sum())
+        hit = iou[rows, cols] >= MATCH_IOU
+        matched = int(hit.sum())
+        height_delta = pred_h[rows[hit]] - gt_h[cols[hit]]
 
     # fragments: predictions whose OWN points are >=20 % inside this GT tree
-    with np.errstate(invalid="ignore", divide="ignore"):
-        share_of_pred = np.divide(inter, pred_sizes[:, None],
-                                  out=np.zeros_like(inter),
-                                  where=pred_sizes[:, None] > 0)
-        share_of_gt = np.divide(inter, gt_sizes[None, :],
-                                out=np.zeros_like(inter),
-                                where=gt_sizes[None, :] > 0)
-    frags = (share_of_pred >= OVERLAP_FRACTION).sum(axis=0) if n_pred else \
-        np.zeros(n_gt)
-    covers = (share_of_gt >= OVERLAP_FRACTION).sum(axis=1) if n_gt else \
-        np.zeros(n_pred)
-
-    z_min = float(z.min()) if z.size else 0.0
-    pred_h = np.array([z[pred == i].max() - z_min for i in range(n_pred)]) \
-        if n_pred else np.zeros(0)
-    gt_h = np.array([z[gt == i].max() - z_min for i in range(n_gt)]) \
-        if n_gt else np.zeros(0)
+    share_of_pred = np.divide(inter, pred_sizes[:, None],
+                              out=np.zeros_like(inter),
+                              where=pred_sizes[:, None] > 0)
+    share_of_gt = np.divide(inter, gt_sizes[None, :],
+                            out=np.zeros_like(inter),
+                            where=gt_sizes[None, :] > 0)
+    frags = (share_of_pred >= OVERLAP_FRACTION).sum(axis=0)
+    covers = (share_of_gt >= OVERLAP_FRACTION).sum(axis=1)
 
     return dict(
         scan=path.stem,
@@ -146,42 +163,106 @@ def diagnose_plot(path: Path) -> dict | None:
         covers=covers.astype(np.int64),
         pred_h=pred_h,
         gt_h=gt_h,
+        height_delta=height_delta,
     )
 
 
+def top_heights(ids: np.ndarray, n: int, z: np.ndarray, z_min: float) -> np.ndarray:
+    """Per-instance top z minus ``z_min``, in one pass over the points."""
+    out = np.full(n, -np.inf)
+    valid = ids >= 0
+    if n:
+        np.maximum.at(out, ids[valid], z[valid])
+    return out - z_min
+
+
+def _stats(plots: list[dict], key: str) -> np.ndarray:
+    return (np.concatenate([p[key] for p in plots]) if plots else np.zeros(0))
+
+
+def _median(values: np.ndarray) -> float:
+    return float(np.median(values)) if values.size else float("nan")
+
+
+def _mean(values: np.ndarray) -> float:
+    return float(values.mean()) if values.size else float("nan")
+
+
 def summarize(plots: list[dict]) -> dict:
-    """Pool per-plot diagnostics into one row."""
-    frags = np.concatenate([p["frags"] for p in plots]) if plots else np.zeros(0)
-    covers = np.concatenate([p["covers"] for p in plots]) if plots else np.zeros(0)
-    pred_h = np.concatenate([p["pred_h"] for p in plots]) if plots else np.zeros(0)
-    gt_h = np.concatenate([p["gt_h"] for p in plots]) if plots else np.zeros(0)
+    """Pool per-plot diagnostics into one row.
+
+    Two flavours of the fragmentation numbers are reported:
+
+    * ``frag_per_tree`` / ``split_frac`` are over **all** GT trees. A tree that
+      no prediction came near contributes 0 fragments, so both numbers fall when
+      recall falls, whether or not the surviving predictions fragment more.
+    * ``frag_per_detected_tree`` / ``split_frac_detected`` are over the
+      ``n_detected`` GT trees that got at least one fragment. These answer "when
+      the model does find a tree, how often does it cut it in two?" and are the
+      ones to compare across conditions with different recall.
+    """
+    frags = _stats(plots, "frags")
+    covers = _stats(plots, "covers")
+    detected = frags[frags >= 1]
     n_gt = int(sum(p["n_gt"] for p in plots))
     n_pred = int(sum(p["n_pred"] for p in plots))
+    matched = int(sum(p["matched"] for p in plots))
+    delta = _stats(plots, "height_delta")
     return dict(
         plots=len(plots),
+        plots_no_pred=int(sum(1 for p in plots if p["n_pred"] == 0)),
         n_gt=n_gt,
         n_pred=n_pred,
-        matched=int(sum(p["matched"] for p in plots)),
-        match_rate=(sum(p["matched"] for p in plots) / n_gt) if n_gt else float("nan"),
-        frag_per_tree=float(frags.mean()) if frags.size else float("nan"),
+        matched=matched,
+        match_rate=(matched / n_gt) if n_gt else float("nan"),
+        frag_per_tree=_mean(frags),
         split_frac=float((frags >= 2).mean()) if frags.size else float("nan"),
+        n_detected=int(detected.size),
+        frag_per_detected_tree=_mean(detected),
+        split_frac_detected=(float((detected >= 2).mean()) if detected.size
+                             else float("nan")),
         merged_frac=float((covers >= 2).mean()) if covers.size else float("nan"),
-        pred_h_median=float(np.median(pred_h)) if pred_h.size else float("nan"),
-        gt_h_median=float(np.median(gt_h)) if gt_h.size else float("nan"),
+        pred_h_median=_median(_stats(plots, "pred_h")),
+        gt_h_median=_median(_stats(plots, "gt_h")),
+        dz_median=_median(delta),
+        dz_mean=_mean(delta),
+    )
+
+
+def plot_row(p: dict) -> dict:
+    """Per-plot row; every numeric field is a float (NaN, never None)."""
+    frags, covers, delta = p["frags"], p["covers"], p["height_delta"]
+    detected = frags[frags >= 1]
+    return dict(
+        scan=p["scan"], n_gt=p["n_gt"], n_pred=p["n_pred"], matched=p["matched"],
+        frag_per_tree=_mean(frags),
+        split_frac=float((frags >= 2).mean()) if frags.size else float("nan"),
+        n_detected=int(detected.size),
+        frag_per_detected_tree=_mean(detected),
+        split_frac_detected=(float((detected >= 2).mean()) if detected.size
+                             else float("nan")),
+        merged_frac=float((covers >= 2).mean()) if covers.size else float("nan"),
+        pred_h_median=_median(p["pred_h"]),
+        gt_h_median=_median(p["gt_h"]),
+        dz_median=_median(delta),
+        dz_mean=_mean(delta),
     )
 
 
 HEADER = (f"{'run':<14} {'plots':>5} {'gt':>6} {'pred':>6} {'matched':>7} "
-          f"{'match%':>7} {'frag/tree':>9} {'split%':>7} {'merged%':>8} "
-          f"{'h_pred':>7} {'h_gt':>6}")
+          f"{'match%':>7} {'frag/gt':>7} {'split%gt':>8} {'det':>6} "
+          f"{'frag/det':>8} {'split%det':>9} {'merged%':>8} "
+          f"{'dz_med':>7} {'dz_mean':>7} {'h_pred':>7} {'h_gt':>6}")
 
 
 def format_row(label: str, s: dict) -> str:
     return (f"{label:<14} {s['plots']:>5d} {s['n_gt']:>6d} {s['n_pred']:>6d} "
             f"{s['matched']:>7d} {100 * s['match_rate']:>6.1f}% "
-            f"{s['frag_per_tree']:>9.2f} {100 * s['split_frac']:>6.1f}% "
-            f"{100 * s['merged_frac']:>7.1f}% {s['pred_h_median']:>7.1f} "
-            f"{s['gt_h_median']:>6.1f}")
+            f"{s['frag_per_tree']:>7.2f} {100 * s['split_frac']:>7.1f}% "
+            f"{s['n_detected']:>6d} {s['frag_per_detected_tree']:>8.2f} "
+            f"{100 * s['split_frac_detected']:>8.1f}% "
+            f"{100 * s['merged_frac']:>7.1f}% {s['dz_median']:>7.2f} "
+            f"{s['dz_mean']:>7.2f} {s['pred_h_median']:>7.1f} {s['gt_h_median']:>6.1f}")
 
 
 def main(argv=None) -> int:
@@ -221,30 +302,25 @@ def main(argv=None) -> int:
             print(f"{label}: {len(skipped)} PLY(s) without GT fields, skipped",
                   file=sys.stderr)
         pooled = summarize(plots)
-        out["runs"][label] = {
-            "dir": str(directory),
-            "pooled": pooled,
-            "per_plot": [
-                dict(scan=p["scan"], n_gt=p["n_gt"], n_pred=p["n_pred"],
-                     matched=p["matched"],
-                     frag_per_tree=float(p["frags"].mean()) if p["frags"].size else None,
-                     split_frac=float((p["frags"] >= 2).mean()) if p["frags"].size else None,
-                     merged_frac=float((p["covers"] >= 2).mean()) if p["covers"].size else None,
-                     pred_h_median=float(np.median(p["pred_h"])) if p["pred_h"].size else None,
-                     gt_h_median=float(np.median(p["gt_h"])) if p["gt_h"].size else None)
-                for p in plots
-            ],
-        }
+        per_plot = [plot_row(p) for p in plots]
+        out["runs"][label] = {"dir": str(directory), "pooled": pooled,
+                              "per_plot": per_plot}
         print(format_row(label, pooled))
+        if pooled["plots_no_pred"]:
+            print(f"  note: {pooled['plots_no_pred']} plot(s) produced no instance "
+                  f"at all", file=sys.stderr)
         if args.per_plot:
-            for p in out["runs"][label]["per_plot"]:
-                print(f"  {p['scan'][:44]:<44} gt={p['n_gt']:>4d} pred={p['n_pred']:>4d} "
-                      f"matched={p['matched']:>4d} frag={p['frag_per_tree']:.2f} "
-                      f"split={100 * p['split_frac']:.0f}% "
-                      f"h_pred={p['pred_h_median']:.1f} h_gt={p['gt_h_median']:.1f}")
+            for p in per_plot:
+                print(f"  {p['scan'][:40]:<40} gt={p['n_gt']:>4d} pred={p['n_pred']:>4d} "
+                      f"matched={p['matched']:>4d} frag/gt={p['frag_per_tree']:.2f} "
+                      f"det={p['n_detected']:>4d} split%det={100 * p['split_frac_detected']:.0f}% "
+                      f"dz_med={p['dz_median']:.2f} h_pred={p['pred_h_median']:.1f} "
+                      f"h_gt={p['gt_h_median']:.1f}")
 
     if args.json_out:
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+        # allow_nan=True (the default) writes bare NaN, which Python's json
+        # reads back; strict JSON parsers need their own NaN handling.
         Path(args.json_out).write_text(json.dumps(out, indent=2))
         print(f"wrote {args.json_out}")
     return 0
