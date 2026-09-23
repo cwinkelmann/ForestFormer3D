@@ -1,4 +1,4 @@
-"""``python -m ff3d_geo``: run / convert / georef / report / split / merge / masks.
+"""``python -m ff3d_geo``: run / convert / georef / report / split / merge / masks / ams3d.
 
 ``split`` and ``merge`` bracket a batched ``run`` for tiles larger than the ~100 m
 the model is trained on: ``split`` cuts a 1 km ALS tile into local-coordinate
@@ -7,6 +7,9 @@ pass, and ``merge`` stitches the per-sub-tile result LAS files and tree
 GeoPackages back into one km tile with globally unique tree ids.
 ``masks`` is the optional last step: it rasterises a (merged) result LAS into
 instance/semantic GeoTIFFs plus a crown-polygon GeoPackage for GIS work.
+``ams3d`` is the CPU-only benchmark method (``ff3d_geo.ams3d``): the same
+split/merge/masks/report chain around an adaptive mean shift segmentation instead
+of the model, producing the same files under ``--out``.
 
 Execution model (see the Phase 3 plan, ruling G7): this CLI runs on the HOST, in a
 plain CPU venv with laspy/plyfile/geopandas but no torch. The two GPU/pipeline steps
@@ -511,6 +514,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="sub-tile edge length in metres (default: %(default)s)")
     spl.add_argument("--min-points", type=int, default=1000,
                      help="skip a sub-tile with fewer points (default: %(default)s)")
+    spl.add_argument("--buffer", type=float, default=0.0, metavar="M",
+                     help="also write the points within M metres outside each sub-tile's "
+                          "core (local coordinates then run -M..size+M); default 0")
     spl.add_argument("--prefix", default=None,
                      help="sub-tile name prefix (default: the source stem without _1_be)")
 
@@ -528,6 +534,23 @@ def build_parser() -> argparse.ArgumentParser:
     mrg.add_argument("--runtime-s", type=float, default=None,
                      help="inference wall time for the whole km tile, for the merged "
                           "report's 'Inference runtime' (default: n/a)")
+
+    ams = sub.add_parser("ams3d", help="adaptive mean shift crown segmentation (CPU) -> "
+                                       "the same LAS/GeoPackage/GeoTIFF/report set as run+merge+masks")
+    ams.add_argument("--las", required=True, type=Path,
+                     help="a km tile in projected coordinates, or a local-coordinate tile "
+                          "with an E<x>_N<y> origin token in its name")
+    ams.add_argument("--out", required=True, type=Path, help="output directory")
+    ams.add_argument("--buffer", type=float, default=10.0, metavar="M",
+                     help="context around each 100 m sub-tile of a km tile (default 10)")
+    ams.add_argument("--workers", type=int, default=None,
+                     help="process pool size (default: os.cpu_count() // 2)")
+    ams.add_argument("--config", default="C", choices=["default", "A", "B", "C"],
+                     help="parameter set from the spike write-up (default C)")
+    ams.add_argument("--size", type=int, default=100, metavar="M", help="sub-tile size (default 100)")
+    ams.add_argument("--epsg", type=int, default=DEFAULT_EPSG)
+    ams.add_argument("--keep-subtiles", action="store_true",
+                     help="keep <out>/ams3d_subtiles_{in,out}/ after the merge")
 
     msk = sub.add_parser("masks", help="result LAS -> instance/semantic GeoTIFFs + crown polygons")
     msk.add_argument("--las", required=True, type=Path, help="a georeferenced result LAS")
@@ -617,8 +640,22 @@ def main(argv: list[str] | None = None) -> int:
         from ff3d_geo.split import split_las
 
         for path in split_las(args.las, args.out, size_m=args.size,
-                              min_points=args.min_points, prefix=args.prefix):
+                              min_points=args.min_points, prefix=args.prefix,
+                              buffer_m=args.buffer):
             print(path)
+        return 0
+
+    if args.command == "ams3d":
+        # Lazy: scipy/geopandas/rasterio are only needed here.
+        from ff3d_geo.ams3d import CONFIGS, run_ams3d_pipeline
+
+        if not Path(args.las).is_file():
+            raise ValueError(f"--las {args.las} does not exist")
+        run_ams3d_pipeline(
+            args.las, args.out, CONFIGS[args.config], buffer_m=args.buffer,
+            workers=args.workers, size_m=args.size, epsg=args.epsg,
+            keep_subtiles=args.keep_subtiles, config_name=args.config,
+        )
         return 0
 
     if args.command == "merge":

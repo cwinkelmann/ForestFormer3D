@@ -21,5 +21,5 @@ include = ["oneformer3d*", "ff3d_geo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["gpu: needs CUDA and the Docker image"]
+markers = ["gpu: needs CUDA and the Docker image", "slow: minutes-long CPU tests on real tiles (tests/test_geo_ams3d.py)"]
 addopts = "-m 'not gpu'"

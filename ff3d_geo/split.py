@@ -77,12 +77,22 @@ def split_las(
     size_m: int = 100,
     min_points: int = 1000,
     prefix: str | None = None,
+    buffer_m: float = 0.0,
 ) -> list[Path]:
     """Split ``las_path`` into ``size_m``-metre local-coordinate sub-tiles under ``out_dir``.
 
     Returns the sorted list of written sub-tile paths; sub-tiles with fewer than
-    ``min_points`` points are not written. Reads the source LAS in bounded chunks
+    ``min_points`` CORE points are not written. Reads the source LAS in bounded chunks
     so the whole tile is never loaded into memory at once.
+
+    With ``buffer_m > 0`` every sub-tile also receives the source points that lie
+    within ``buffer_m`` outside its ``size_m`` core, so the local coordinates run
+    ``-buffer_m .. size_m + buffer_m`` and a point near a grid line is written to
+    each sub-tile whose buffered extent contains it. Callers that segment the
+    sub-tiles independently (``ff3d_geo.ams3d``) use the buffer as context for the
+    edge trees and crop their result back to the ``0 .. size_m`` core before
+    merging, so no point is counted twice. The conservation check below is on the
+    core assignment only, which is still exactly one sub-tile per point.
 
     Every source point must land in exactly one sub-tile: the grid is derived from
     the header's ``mins``/``maxs``, which laspy does NOT re-derive from the points,
@@ -115,6 +125,9 @@ def split_las(
 
             writers: dict[tuple[int, int], "laspy.LasWriter"] = {}
             counts: dict[tuple[int, int], int] = {origin: 0 for origin in origins}
+            buffer_m = float(buffer_m)
+            if buffer_m < 0:
+                raise ValueError(f"split_las: buffer_m must be >= 0, got {buffer_m}")
 
             try:
                 for origin in origins:
@@ -131,7 +144,15 @@ def split_las(
                     ny = y0_grid + iy * size_m
 
                     for origin in origins:
-                        mask = (ex == origin[0]) & (ny == origin[1])
+                        core = (ex == origin[0]) & (ny == origin[1])
+                        counts[origin] += int(core.sum())
+                        if buffer_m > 0:
+                            mask = (
+                                (x >= origin[0] - buffer_m) & (x < origin[0] + size_m + buffer_m)
+                                & (y >= origin[1] - buffer_m) & (y < origin[1] + size_m + buffer_m)
+                            )
+                        else:
+                            mask = core
                         n_sel = int(mask.sum())
                         if n_sel == 0:
                             continue
@@ -152,7 +173,6 @@ def split_las(
                             setattr(new_rec, dim, np.asarray(getattr(sub, dim)))
 
                         writer.write_points(new_rec)
-                        counts[origin] += n_sel
             finally:
                 for writer in writers.values():
                     writer.close()
