@@ -315,5 +315,10 @@ of the two is closer to the real trees cannot be decided from these files.
   `sat_raw/final_results/*_out.laz` + `eval.log`), `work_dirs/sat-r12/`, logs
   `work_dirs/logs/sat/`, octrees `work_dirs/logs/potree/out_sat/<T>/`.
 - 2TB volume: `/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_sat/<T>/` (the products
-  above without `sat_raw`), Potree site `berlin_potree/pointclouds_sat/<T>/` +
-  `data/<T>_sat_*` with the Method switch in `index.html`.
+  above without `sat_raw`, all eleven tiles, 8.4 GB), Potree site
+  `berlin_potree/pointclouds_sat/<T>/` (all eleven octrees, 8.5 GB) + `data/<T>_sat_*`
+  with the Method switch in `index.html` (`?method=sat`). Checked in a browser via
+  `benchmark/serve_potree.py`: the SegmentAnyTree octrees load, colour by `treeID`, the
+  tile list shows the SegmentAnyTree counts, and switching methods reloads the checked
+  tiles from the other octree; not checked by eye: the SAT instance-mask drape and the
+  SAT crown outlines / markers (the same code path as the ForestFormer3D ones).
