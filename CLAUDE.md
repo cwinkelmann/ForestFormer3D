@@ -101,6 +101,17 @@ Training: lower `radius` in the config. Inference is per-cylinder with no batchi
 
 `docs/known-issues.md` collects findings from the fix pass that were deliberately left alone; check it before assuming an oddity is new.
 
+## Skills
+
+Project skills under `.claude/skills/<name>/SKILL.md` capture the geospatial workflow end to end:
+
+- `ff3d-carrot` — the carrot GPU server (and the T14): ssh/VPN, checkout, `forestformer3d:cu118`, `benchmark/common.sh`, the host geo venv, data layout, GPU etiquette, test suites.
+- `ff3d-als-download` — Berlin ALS 2021 km tiles via the INSPIRE ATOM feed with `benchmark/fetch_berlin_als.py`; CRS, density, and the Brandenburg LGB tiles as contrast.
+- `ff3d-orthophoto-download` — DOP 2021 / DOP 2025 spring / TrueDOP 2025 summer GeoTIFFs with `benchmark/fetch_berlin_dop.py`, service discovery and the georeferencing check.
+- `ff3d-inference-km-tiles` — the production run on new tiles: `benchmark/berlin_run_gpu.sh` (split → run → merge → masks), logs, recovery, cleanup, timings, decision rule.
+- `ff3d-outputs-and-viewers` — the LAS/tree-table/crown/mask/report contracts, `ff3d_geo convert|georef|report|masks`, the figure scripts, QGIS and the Potree viewer.
+- `ff3d-evaluation` — the 28-plot benchmark, the ALS-density thinning study, instance diagnostics, the nondeterminism noise floor and the `region_step_factor` trade-off.
+
 ---
 
 # context-mode — MANDATORY routing rules
