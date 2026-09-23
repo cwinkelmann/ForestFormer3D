@@ -148,7 +148,7 @@ def test_results_to_las_rejects_point_count_mismatch(tmp_path):
 
     # Truncate the result PLY to simulate a mismatch against sidecar n_points
     # (which would silently misalign point order if not caught).
-    result = PlyData.read(str(result_ply))["vertex"].data[:2]
+    result = PlyData.read(str(result_ply))["vertex"].data[:2].copy()  # copy: writing over a file that is still memory-mapped is SIGBUS on Linux
     PlyData([PlyElement.describe(result, "vertex")], text=False, byte_order="<").write(
         str(result_ply)
     )
