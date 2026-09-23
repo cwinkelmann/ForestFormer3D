@@ -10,7 +10,7 @@ orthophotos, crown outlines and clickable tree markers.
 `README.md` documents every control, the attribute mapping and how to add a tile.
 
 ```bash
-cd /Volumes/2TB/winmol/ALS_Data/berlin_potree && python3 -m http.server 8080
+cd /Volumes/2TB/winmol/ALS_Data/berlin_potree && python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree
 # then http://localhost:8080/
 ```
 
@@ -73,3 +73,29 @@ The page was checked by serving the folder over `python3 -m http.server` and fet
 1.8.2 sources for every API it calls. It has **not** been opened in a browser, so the
 rendering itself — octree display, the LUT texture upload, the draped planes and the
 marker picking — is unverified.
+
+## Serving and two viewer fixes (verified in a browser)
+
+The site must be served by something that answers HTTP Range requests. Potree 2.0 reads every
+octree node as a byte range out of one large `octree.bin`; `python3 -m http.server` ignores the
+`Range` header and returns the whole file with `200`, so the viewer decodes the wrong bytes and
+the cloud appears as scattered blobs with no error anywhere. `benchmark/serve_potree.py` answers
+`206 Partial Content` and is threaded for the parallel node requests:
+
+```bash
+python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree --port 8080
+```
+
+Two fixes in `benchmark/potree_index.html`, both found by driving the page in a headless browser:
+
+- **proj4 has no EPSG:25833.** Potree's per-frame update passes the point cloud's CRS to proj4 for
+  its map view; an unknown code throws, the exception kills the requestAnimationFrame loop, and the
+  page freezes after a few frames. The page now registers the definition before the viewer starts.
+- **Extra attributes are not normalised.** Potree 1.8.2 assumes extra attributes arrive in [0,1],
+  but its decoder only rescales types larger than four bytes, so `treeID` (int32), `semantic`
+  (uint8) and `score` (float) reach the shader raw and every tree clamps to a single colour.
+  Setting the attribute's `initialRange` to [0,1] makes the renderer compute the right scale and
+  offset, and the per-tree colours appear.
+
+Empty crown geometries (24 to 155 per tile, trees whose hull degenerates) also aborted the vector
+build; the crown loop now skips them.
