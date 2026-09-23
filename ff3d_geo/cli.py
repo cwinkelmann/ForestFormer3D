@@ -1,4 +1,5 @@
-"""``python -m ff3d_geo``: run / convert / georef / report / split / merge / masks / ams3d.
+"""``python -m ff3d_geo``: run / convert / georef / report / split / merge / stitch /
+masks / ams3d / border-check.
 
 ``split`` and ``merge`` bracket a batched ``run`` for tiles larger than the ~100 m
 the model is trained on: ``split`` cuts a 1 km ALS tile into local-coordinate
@@ -11,6 +12,14 @@ instance/semantic GeoTIFFs plus a crown-polygon GeoPackage for GIS work.
 2021 tiles carry no building class, so the model predicts trees on roofs; this masks
 the ALKIS footprints out of the result LAS and regenerates the trees/crowns/masks/
 report set next to the masked LAS.
+``stitch`` is the alternative to ``merge`` for a split run with a halo
+(``split --buffer M [--neighbours <km tiles>]``): instead of offsetting each sub-tile's
+ids into a disjoint range, it recognises the SAME tree in two sub-tiles by their
+overlap in the shared halo and gives it one id across the whole mosaic, km-tile
+borders included, then writes one LAS/GeoPackage/report set per km tile.
+``border-check`` measures what is left of the seams in a (stitched or merged) result
+LAS: the strip of unlabelled vegetation along the sub-tile grid lines and the crowns
+those lines cut in two.
 ``ams3d`` is the CPU-only benchmark method (``ff3d_geo.ams3d``): the same
 split/merge/masks/report chain around an adaptive mean shift segmentation instead
 of the model, producing the same files under ``--out``.
@@ -53,6 +62,7 @@ scripts -- and touches nothing at all.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -521,8 +531,32 @@ def build_parser() -> argparse.ArgumentParser:
     spl.add_argument("--buffer", type=float, default=0.0, metavar="M",
                      help="also write the points within M metres outside each sub-tile's "
                           "core (local coordinates then run -M..size+M); default 0")
+    spl.add_argument("--neighbours", type=Path, nargs="+", default=[], metavar="LAS",
+                     help="further km tiles whose points fill the halo of the sub-tiles "
+                          "on the source tile's border (ignored without --buffer)")
     spl.add_argument("--prefix", default=None,
                      help="sub-tile name prefix (default: the source stem without _1_be)")
+
+    sti = sub.add_parser("stitch", help="halo-overlap sub-tile results -> km tiles with "
+                                        "mosaic-wide tree ids")
+    sti.add_argument("--manifest", required=True, type=Path, nargs="+",
+                     help="split_manifest.json of every split that fed this run")
+    sti.add_argument("--results", required=True, type=Path, nargs="+",
+                     help="directories holding the per-sub-tile result <stem>.las "
+                          "(searched in the order given)")
+    sti.add_argument("--out", required=True, type=Path,
+                     help="directory for the km-tile LAS/GeoPackage/report set")
+    sti.add_argument("--iou", type=float, default=0.5,
+                     help="halo-overlap IoU an instance pair must reach to be unified "
+                          "(default: %(default)s)")
+    sti.add_argument("--min-shared", type=int, default=20,
+                     help="halo points an instance pair must share (default: %(default)s)")
+    sti.add_argument("--runtime-s", type=float, default=None,
+                     help="inference wall time for the whole mosaic, for each tile "
+                          "report's 'Inference runtime' (default: n/a)")
+    sti.add_argument("--epsg", type=int, default=DEFAULT_EPSG,
+                     help="CRS of the written km tiles; must be the one las_to_ply used "
+                          "(default: %(default)s)")
 
     mrg = sub.add_parser("merge", help="sub-tile result LAS + GeoPackages -> one km tile")
     mrg.add_argument("--las", required=True, type=Path, nargs="+",
@@ -583,6 +617,17 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--no-masks", action="store_true",
                      help="skip the mask GeoTIFFs / crown GeoPackage (LAS + trees + "
                           "report only)")
+
+    bch = sub.add_parser("border-check",
+                         help="result LAS -> sub-tile seam metrics (unlabelled strip "
+                              "along the grid lines, crowns split by them)")
+    bch.add_argument("--las", required=True, type=Path, help="a georeferenced result LAS")
+    bch.add_argument("--size", type=float, default=100.0, metavar="M",
+                     help="sub-tile grid period; every multiple of it on either axis is "
+                          "treated as a seam line (default: %(default)s)")
+    bch.add_argument("--json", type=Path, default=None,
+                     help="also write the full metrics (the distance-profile bins "
+                          "included) here")
 
     return parser
 
@@ -664,8 +709,31 @@ def main(argv: list[str] | None = None) -> int:
 
         for path in split_las(args.las, args.out, size_m=args.size,
                               min_points=args.min_points, prefix=args.prefix,
-                              buffer_m=args.buffer):
+                              buffer_m=args.buffer, neighbours=list(args.neighbours)):
             print(path)
+        return 0
+
+    if args.command == "stitch":
+        # Lazy like split/merge: stitch pulls in laspy + the geopandas reporting stack.
+        from ff3d_geo.stitch import stitch
+
+        info = stitch(args.manifest, args.results, args.out, iou_threshold=args.iou,
+                      min_shared=args.min_shared, runtime_s=args.runtime_s,
+                      epsg=args.epsg)
+        for stem, tile in info["tiles"].items():
+            print(f"wrote {tile['las']} ({tile['n_points']} points, "
+                  f"{tile['n_trees_in_tile']} trees in tile)")
+            print(f"wrote {tile['gpkg']}")
+        print(f"unified {info['n_unified']} of {info['n_pairs_tested']} tested pairs "
+              f"({info['n_cross_km']} across km tiles); {info['n_trees']} trees in the "
+              "mosaic")
+        # The reports are written by stitch itself; echo each one the way
+        # `merge --report-json` echoes its single merged report.
+        for stem in info["tiles"]:
+            md = Path(args.out) / f"{stem}_report.md"
+            if md.is_file():
+                print(f"\n## {stem}\n")
+                print(md.read_text())
         return 0
 
     if args.command == "ams3d":
@@ -741,6 +809,28 @@ def main(argv: list[str] | None = None) -> int:
         rep = build_report(out_las, gpkg, buildings=info)
         write_report(rep, report_json, report_json.with_suffix(".md"))
         print(f"wrote {report_json}")
+        return 0
+
+    if args.command == "border-check":
+        # Lazy: border only needs numpy + laspy, but keep the import off every other
+        # subcommand's --help like the rest of them.
+        from ff3d_geo.border import border_check
+
+        metrics = border_check(args.las, size_m=args.size)
+        print(f"{args.las} ({metrics['n_points']} points, size {args.size} m)")
+        bin_m = (metrics["bins"][1] - metrics["bins"][0]) if len(metrics["bins"]) > 1 else 0.0
+        for lo, frac, n in zip(metrics["bins"], metrics["frac"], metrics["n"]):
+            print(f"  {lo:5.1f}-{lo + bin_m:5.1f} m  {100 * frac:6.2f}% unlabelled  "
+                  f"({n} veg points)")
+        print(f"  interior      {100 * metrics['interior_frac']:6.2f}% unlabelled")
+        print(f"strip excess {metrics['strip_excess_pp']:+.2f} pp over the interior")
+        print(f"touching {metrics['n_touching']}/{metrics['n_trees']} trees "
+              f"({metrics['touching_frac']:.3f}), crossing {metrics['n_crossing']}, "
+              f"paired {metrics['n_pairs']}")
+        if args.json is not None:
+            payload = {"las": str(args.las), "size_m": float(args.size), **metrics}
+            Path(args.json).write_text(json.dumps(payload, indent=2))
+            print(f"wrote {args.json}")
         return 0
 
     raise AssertionError(args.command)  # pragma: no cover - argparse enforces the choices

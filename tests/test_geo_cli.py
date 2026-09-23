@@ -30,6 +30,7 @@ from plyfile import PlyData, PlyElement  # noqa: E402
 from ff3d_geo.cli import (  # noqa: E402
     DEFAULT_CHECKPOINT,
     DEFAULT_CONFIG,
+    DEFAULT_EPSG,
     DEFAULT_GPU,
     REPO_ROOT,
     Step,
@@ -437,10 +438,10 @@ def test_module_entry_point_shows_help():
     assert proc.returncode == 0
     # Matched name by name rather than as one literal choice list, so adding a
     # subcommand does not break this test.
-    choices = re.search(r"\{([a-z0-9,]+)\}", proc.stdout)
+    choices = re.search(r"\{([a-z0-9,-]+)\}", proc.stdout)
     assert choices is not None, proc.stdout
-    assert {"run", "convert", "georef", "report", "split", "merge", "masks",
-            "buildings"} <= set(choices.group(1).split(","))
+    assert {"run", "convert", "georef", "report", "split", "merge", "stitch", "masks",
+            "buildings", "border-check"} <= set(choices.group(1).split(","))
 
 
 # --- batched run: several --las sub-tiles in one preprocess + one inference ---------
@@ -719,3 +720,97 @@ def test_merge_without_report_json_writes_no_report(tmp_path):
     assert rc == 0
     assert out_las.is_file()
     assert not (tmp_path / "km_report.json").exists()
+
+
+# --- split halo / stitch / border-check ---------------------------------------------
+
+
+def test_parser_exposes_split_halo_and_stitch():
+    parser = build_parser()
+    args = parser.parse_args(["split", "--las", "a.las", "--out", "sub", "--buffer", "20",
+                              "--neighbours", "b.las", "c.las"])
+    assert args.buffer == 20.0 and [p.name for p in args.neighbours] == ["b.las", "c.las"]
+    args = parser.parse_args(["stitch", "--manifest", "m.json", "--results", "r1", "r2", "--out", "o"])
+    assert [p.name for p in args.manifest] == ["m.json"] and len(args.results) == 2
+    assert args.iou == 0.5 and args.min_shared == 20 and args.runtime_s is None
+    assert args.epsg == DEFAULT_EPSG
+    args = parser.parse_args(["border-check", "--las", "t.las"])
+    assert args.las.name == "t.las" and args.size == 100.0 and args.json is None
+
+
+def test_stitch_subcommand_writes_km_tiles_and_prints_the_summary(tmp_path, capsys):
+    from test_geo_stitch import _mosaic
+
+    manifest, res, xyz, _ = _mosaic(tmp_path)
+    out = tmp_path / "out"
+    rc = main(["stitch", "--manifest", str(manifest), "--results", str(res), "--out", str(out)])
+    assert rc == 0
+    printed = capsys.readouterr().out
+    assert f"wrote {out / '3dm_33_381_5829_1_be.las'} ({len(xyz)} points, 3 trees in tile)" in printed
+    assert "unified 1 of 1 tested pairs (0 across km tiles); 3 trees in the mosaic" in printed
+    assert (out / "3dm_33_381_5829_1_be_trees.gpkg").is_file()
+    # the per-tile report markdown is echoed, like `merge --report-json` does
+    assert "First pass usable" in printed
+    assert json.loads((out / "stitch.json").read_text())["epsg"] == DEFAULT_EPSG
+
+
+def test_split_subcommand_passes_halo_and_neighbours_through(tmp_path, capsys):
+    from geo_fixtures import write_grid_las
+
+    rng = np.random.default_rng(3)
+    a = np.column_stack([381000 + rng.uniform(0, 100, 2000), 5829000 + rng.uniform(0, 100, 2000),
+                         rng.uniform(1, 9, 2000)])
+    b = np.column_stack([381100 + rng.uniform(0, 100, 2000), 5829000 + rng.uniform(0, 100, 2000),
+                         rng.uniform(1, 9, 2000)])
+    src = write_grid_las(tmp_path / "3dm_33_381_5829_1_be.las", a, np.full(2000, 5, np.uint8))
+    nb = write_grid_las(tmp_path / "3dm_33_382_5829_1_be.las", b, np.full(2000, 5, np.uint8))
+    out = tmp_path / "sub"
+    assert main(["split", "--las", str(src), "--out", str(out), "--buffer", "20",
+                 "--neighbours", str(nb), "--min-points", "10"]) == 0
+    ident = np.load(out / "3dm_33_381_5829_E381000_N5829000_100m_ident.npy")
+    assert (ident["tile"] == 1).sum() == int((b[:, 0] < 381120).sum())
+    assert str(out / "3dm_33_381_5829_E381000_N5829000_100m.las") in capsys.readouterr().out
+
+
+def _border_las(tmp_path):
+    """A result LAS with one unlabelled strip at x = 381100 and a tree on each side.
+
+    The strip is 1 m wide, so each tree's extent stops within ``split_pairs``'
+    default ``tol_m = 1.0`` of the x = 381100 line: both trees count as touching
+    and the two fragments pair up, which is what the printed headline shows.
+    """
+    import laspy
+
+    from geo_fixtures import write_result_las
+
+    rng = np.random.default_rng(2)
+    n = 5000
+    x, y = 381000 + rng.uniform(50, 150, n), 5829000 + rng.uniform(20, 80, n)
+    tid = np.where(np.abs(x - 381100) < 0.5, -1, (x > 381100).astype(np.int32))
+    las = write_result_las(tmp_path / "t.las", x, y, rng.uniform(1, 20, n), tid,
+                           np.full(n, 2, np.uint8))
+    data = laspy.read(las)
+    data.classification = np.full(n, 5, np.uint8)
+    data.write(las)
+    return las, n
+
+
+def test_border_check_subcommand_prints_the_headline_numbers(tmp_path, capsys):
+    las, n = _border_las(tmp_path)
+    out_json = tmp_path / "t_border.json"
+    assert main(["border-check", "--las", str(las), "--json", str(out_json)]) == 0
+    printed = capsys.readouterr().out
+    assert f"{las} ({n} points, size 100.0 m)" in printed
+    assert "strip excess" in printed and " pp" in printed
+    assert "touching 2/2 trees (1.000), crossing 0, paired 1" in printed
+    assert f"wrote {out_json}" in printed
+    saved = json.loads(out_json.read_text())
+    assert saved["n_points"] == n and saved["n_trees"] == 2 and saved["n_pairs"] == 1
+    assert saved["las"] == str(las) and saved["size_m"] == 100.0
+
+
+def test_border_check_without_json_writes_nothing(tmp_path, capsys):
+    las, _ = _border_las(tmp_path)
+    assert main(["border-check", "--las", str(las), "--size", "50"]) == 0
+    assert "size 50.0 m" in capsys.readouterr().out
+    assert not list(tmp_path.glob("*.json"))
