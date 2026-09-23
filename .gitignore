@@ -20,3 +20,4 @@ data/ForAINetV2/*.pkl
 downloads/
 inputs/
 data/ForAINetV2/test_data_thin*/
+.playwright-mcp/
