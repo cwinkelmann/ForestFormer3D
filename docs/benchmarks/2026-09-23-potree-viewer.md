@@ -63,6 +63,8 @@ python3 benchmark/potree_convert_tile.py \
 All eleven km² tiles are in the site: 379_5828, 379_5829, 380_5828, 380_5829,
 381_5828, 381_5829, 381_5830, 382_5828, 382_5829, 383_5828, 383_5829 — the last one
 finished inferring on carrot while the site was being built and was converted last.
+227 M points, 300 452 trees, 8.5 GB of octrees and 374 MB of overlays; conversion took
+4–10 s per tile on carrot and the octree came out roughly the size of the source LAS.
 
 ## Not verified
 

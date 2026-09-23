@@ -293,7 +293,7 @@ def main() -> int:
     p.add_argument("--dop2021-dir", default=None)
     p.add_argument("--dop2025-dir", default=None)
     p.add_argument("--tiles", nargs="*", default=None, help="subset of tile names")
-    p.add_argument("--texture-px", type=int, default=2048, help="orthophoto texture size")
+    p.add_argument("--texture-px", type=int, default=1792, help="orthophoto texture size")
     p.add_argument("--chm-cell", type=float, default=0.5)
     p.add_argument("--dtm-cell", type=float, default=2.0)
     p.add_argument("--jobs", type=int, default=4)
