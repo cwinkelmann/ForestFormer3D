@@ -144,7 +144,7 @@ and the generally larger 2025 crowns where the stand simply grew into its outlin
 Left: the eleven fetched DOP tiles laid out on their real EPSG:25833 grid (grey =
 no tile at that grid cell in the benchmark set — only `381_5830` exists in the
 northern row). Right: the same mosaic behind a 50 m crown-centroid density map built
-from the `<tile>_trees.gpkg` files of the six tiles that have ForestFormer3D results
+from the `<tile>_trees.gpkg` files of all eleven tiles (all have ForestFormer3D results)
 (156,230 trees). Look for: density tracking the forest exactly, dropping to zero over
 the lake in the south-west, the sports field at `E380400 N5829400` and the road
 corridors, and peaking above 120 crowns per 50 m cell in the dense young pine
