@@ -7,6 +7,10 @@ pass, and ``merge`` stitches the per-sub-tile result LAS files and tree
 GeoPackages back into one km tile with globally unique tree ids.
 ``masks`` is the optional last step: it rasterises a (merged) result LAS into
 instance/semantic GeoTIFFs plus a crown-polygon GeoPackage for GIS work.
+``buildings`` is the Berlin post-processing step (``ff3d_geo.buildings``): the ALS
+2021 tiles carry no building class, so the model predicts trees on roofs; this masks
+the ALKIS footprints out of the result LAS and regenerates the trees/crowns/masks/
+report set next to the masked LAS.
 ``ams3d`` is the CPU-only benchmark method (``ff3d_geo.ams3d``): the same
 split/merge/masks/report chain around an adaptive mean shift segmentation instead
 of the model, producing the same files under ``--out``.
@@ -561,6 +565,25 @@ def build_parser() -> argparse.ArgumentParser:
     msk.add_argument("--prefix", default=None,
                      help="output file-name prefix (default: the LAS stem)")
 
+    bld = sub.add_parser("buildings",
+                         help="mask ALKIS building footprints out of a result LAS")
+    bld.add_argument("--las", required=True, type=Path, help="a georeferenced result LAS")
+    bld.add_argument("--buildings", required=True, type=Path,
+                     help="footprint GeoPackage from benchmark/fetch_berlin_buildings.py")
+    bld.add_argument("--out", required=True, type=Path,
+                     help="directory for the masked LAS and its regenerated products")
+    bld.add_argument("--buffer", type=float, default=1.0, metavar="M",
+                     help="footprint buffer in metres, for roof overhang "
+                          "(default: %(default)s)")
+    bld.add_argument("--min-roof-fraction", type=float, default=0.5, metavar="F",
+                     help="drop an instance whose points lie inside footprints by at "
+                          "least this fraction (default: %(default)s)")
+    bld.add_argument("--cell", type=float, default=0.5, metavar="M",
+                     help="mask raster cell size in metres (default: %(default)s)")
+    bld.add_argument("--no-masks", action="store_true",
+                     help="skip the mask GeoTIFFs / crown GeoPackage (LAS + trees + "
+                          "report only)")
+
     return parser
 
 
@@ -686,6 +709,38 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {info['instance']} ({rows} x {cols} cells of {args.cell} m)")
         print(f"wrote {info['semantic']} ({rows} x {cols} cells of {args.cell} m)")
         print(f"wrote {info['crowns']} ({info['n_trees']} trees)")
+        return 0
+
+    if args.command == "buildings":
+        # Lazy: geopandas/shapely/rasterio are only needed here.
+        from ff3d_geo.buildings import mask_buildings
+        from ff3d_geo.report import build_report, report_markdown, write_report
+        from ff3d_geo.trees import trees_to_gpkg
+
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(args.las).stem
+        out_las = out_dir / f"{stem}.las"
+        info = mask_buildings(args.las, args.buildings, out_las, buffer_m=args.buffer,
+                              min_roof_fraction=args.min_roof_fraction)
+        print(f"wrote {out_las} ({info['n_footprints']} footprints, "
+              f"{info['points_masked']} points masked, "
+              f"{info['instances_removed']}/{info['instances_before']} instances removed, "
+              f"{info['instances_partially_masked']} partially masked)")
+
+        gpkg = out_dir / f"{stem}_trees.gpkg"
+        print(f"wrote {gpkg} ({trees_to_gpkg(out_las, gpkg)} trees)")
+        if not args.no_masks:
+            from ff3d_geo.raster import las_to_masks
+
+            masks = las_to_masks(out_las, out_dir, cell_m=args.cell, prefix=stem)
+            print(f"wrote {masks['instance']}")
+            print(f"wrote {masks['semantic']}")
+            print(f"wrote {masks['crowns']} ({masks['n_trees']} trees)")
+        report_json = out_dir / f"{stem}_report.json"
+        rep = build_report(out_las, gpkg, buildings=info)
+        write_report(rep, report_json, report_json.with_suffix(".md"))
+        print(f"wrote {report_json}")
         return 0
 
     raise AssertionError(args.command)  # pragma: no cover - argparse enforces the choices

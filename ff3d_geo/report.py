@@ -26,8 +26,16 @@ def _stats(values: np.ndarray) -> dict | None:
     }
 
 
-def build_report(las_path, gpkg_path, runtime_s: float | None = None) -> dict:
-    """Build the ``<stem>_report.json`` content from a result LAS and its GeoPackage."""
+def build_report(las_path, gpkg_path, runtime_s: float | None = None,
+                 buildings: dict | None = None) -> dict:
+    """Build the ``<stem>_report.json`` content from a result LAS and its GeoPackage.
+
+    ``buildings`` is the dict returned by :func:`ff3d_geo.buildings.mask_buildings`
+    when the LAS has been through the ALKIS building mask; it is carried into the
+    report's ``buildings`` block and the markdown's "Buildings" row.
+    """
+    from ff3d_geo.buildings import SEMANTIC_BUILDING
+
     las = laspy.read(str(las_path))
     tree_id = np.asarray(las.treeID, dtype=np.int64)
     semantic = np.asarray(las.semantic, dtype=np.int64)
@@ -42,7 +50,11 @@ def build_report(las_path, gpkg_path, runtime_s: float | None = None) -> dict:
     # semantic == 255 means "no model vote" (nodata): exclude those points from
     # both the agreement figure and the confusion counts so a tile with lots of
     # unvoted points doesn't get counted as "model says vegetation".
-    voted = semantic != 255
+    # semantic == 3 (building, from ff3d_geo.buildings) is excluded for the same
+    # reason: it is not a model vote at all but an ALKIS footprint overriding one.
+    is_building = semantic == SEMANTIC_BUILDING
+    n_building_points = int(np.sum(is_building))
+    voted = (semantic != 255) & ~is_building
     n_voted = int(np.sum(voted))
     nodata_fraction = float(np.mean(semantic == 255)) if semantic.size else 0.0
     agreement = float(np.mean(model_ground[voted] == als_ground[voted])) if n_voted > 0 else None
@@ -74,6 +86,11 @@ def build_report(las_path, gpkg_path, runtime_s: float | None = None) -> dict:
         "per_class_counts": per_class,
         "runtime_s": runtime_s,
     }
+    if buildings is not None or n_building_points:
+        block = dict(buildings or {})
+        block["points_masked"] = block.get("points_masked", n_building_points)
+        block["building_points_in_las"] = n_building_points
+        report["buildings"] = block
     report["recommendation"] = recommend(report)
     return report
 
@@ -128,13 +145,35 @@ def report_markdown(report: dict) -> str:
         f"| Trees (CHM local maxima baseline) | {report['chm_baseline_count']} |",
         f"| Height min / median / max (model, m) | {hs['min']:.1f} / {hs['median']:.1f} / {hs['max']:.1f} |",
         f"| Height min / median / max (CHM, m) | {cs['min']:.1f} / {cs['median']:.1f} / {cs['max']:.1f} |",
-        f"| Ground vs vegetation agreement | {agreement_str} |",
+        f"| Ground vs non-ground agreement | {agreement_str} |",
         f"| Nodata fraction (semantic 255, excluded above) | {100 * report['nodata_fraction']:.1f} % |",
+    ]
+    buildings = report.get("buildings")
+    if buildings:
+        removed = buildings.get("instances_removed")
+        removed_str = "n/a" if removed is None else str(removed)
+        partial = buildings.get("instances_partially_masked")
+        partial_str = "" if partial is None else f", {partial} partially masked"
+        lines.append(
+            f"| Buildings (ALKIS footprints) | {removed_str} instances removed, "
+            f"{buildings.get('points_masked', 0)} points masked (semantic 3){partial_str} |"
+        )
+    lines += [
         "",
         "| Model \\ ALS | class 2 (ground) | other |",
         "|---|---|---|",
         f"| semantic 0 (ground) | {c['model_ground_als_ground']} | {c['model_ground_als_other']} |",
         f"| semantic 1/2 (wood/leaf) | {c['model_other_als_ground']} | {c['model_other_als_other']} |",
+        "",
+        "Semantic legend: 0 ground, 1 wood, 2 leaf, 3 building (ALKIS footprint, "
+        "`ff3d_geo.buildings`), 255 no model vote.",
+        "",
+        "The ALS column is the Berlin ALS 2021 classification, which has **no vegetation "
+        "and no building classes**: only class 2 (ground) is a real semantic class, the "
+        "rest (3, 4, 5, 7, 32) are height/echo bins, and class 6 (building) is absent -- "
+        "roof points sit in 3/4/5. The agreement row therefore only compares ground "
+        "against non-ground, and buildings come from the ALKIS footprints, not from the "
+        "point cloud.",
         "",
         f"First pass usable: **{'yes' if report['recommendation']['first_pass_usable'] else 'no'}** "
         f"({'; '.join(report['recommendation']['reasons'])})",

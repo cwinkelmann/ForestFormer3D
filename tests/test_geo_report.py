@@ -64,7 +64,7 @@ def test_build_report_on_two_cone_tile(two_cone_result_las, tmp_path):
     assert md == report_markdown(report)
     assert "| Trees (model) | 2 |" in md
     assert "| Trees (CHM local maxima baseline) | 2 |" in md
-    assert "| Ground vs vegetation agreement | 100.0 % |" in md
+    assert "| Ground vs non-ground agreement | 100.0 % |" in md
     assert "| Nodata fraction (semantic 255, excluded above) | 0.0 % |" in md
     assert "| Inference runtime | 12 s |" in md
 

@@ -435,7 +435,12 @@ def test_module_entry_point_shows_help():
     proc = subprocess.run([sys.executable, "-m", "ff3d_geo", "--help"],
                           capture_output=True, text=True, cwd=str(REPO_ROOT))
     assert proc.returncode == 0
-    assert "{run,convert,georef,report,split,merge,masks}" in proc.stdout
+    # Matched name by name rather than as one literal choice list, so adding a
+    # subcommand does not break this test.
+    choices = re.search(r"\{([a-z0-9,]+)\}", proc.stdout)
+    assert choices is not None, proc.stdout
+    assert {"run", "convert", "georef", "report", "split", "merge", "masks",
+            "buildings"} <= set(choices.group(1).split(","))
 
 
 # --- batched run: several --las sub-tiles in one preprocess + one inference ---------
