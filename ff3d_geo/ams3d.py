@@ -389,7 +389,7 @@ def run_ams3d_pipeline(las_path, out_dir, params: Ams3dParams = Ams3dParams(),
                        buffer_m: float = 10.0, workers: int | None = None,
                        size_m: int = 100, epsg: int = DEFAULT_EPSG,
                        keep_subtiles: bool = False, config_name: str | None = None,
-                       log=print) -> dict:
+                       log=None) -> dict:
     """``split -> segment sub-tiles in a process pool -> merge -> trees -> masks -> report``.
 
     A projected km tile is cut into ``size_m`` sub-tiles with ``buffer_m`` of context
@@ -409,6 +409,13 @@ def run_ams3d_pipeline(las_path, out_dir, params: Ams3dParams = Ams3dParams(),
     from ff3d_geo.raster import las_to_masks
     from ff3d_geo.report import build_report, report_markdown, write_report
     from ff3d_geo.split import split_las
+
+    if log is None:
+        # Under `nohup ... > log` stdout is block-buffered, so an unflushed print
+        # shows no progress until the process exits; the per-sub-tile lines are the
+        # only way to watch a km tile run, so flush each one.
+        def log(msg: str) -> None:
+            print(msg, flush=True)
 
     t_start = time.perf_counter()
     las_path = Path(las_path)
