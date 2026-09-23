@@ -64,6 +64,7 @@ model = dict(
         output_dir=None,           # tools/test.py overwrites this with cfg.work_dir; None -> work_dirs/default_output
         score_th=0.4,              # instance score threshold per tile
         overlap_threshold=0.3,     # drop a mask when this fraction of its points is already assigned
+        region_step_factor=0.25,   # cylinder lattice pitch = radius * this; larger is faster, less overlap
         topk_insts=300,
         inst_score_thr=0.0,
         pan_score_thr=0.0,

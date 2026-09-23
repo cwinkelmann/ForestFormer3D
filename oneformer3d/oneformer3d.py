@@ -2149,7 +2149,10 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         score_th = float(cfg.get('score_th', 0.4))
         overlap_threshold = float(cfg.get('overlap_threshold', 0.3))
         num_cls = cfg.num_sem_cls
-        step_size = self.radius / 4
+        # Cylinder lattice pitch as a fraction of the radius. 0.25 is the
+        # paper's setting (625 cylinders over a 100 m tile, ~44 passes per
+        # point); a larger factor trades overlap for speed roughly as 1/f^2.
+        step_size = self.radius * float(cfg.get('region_step_factor', 0.25))
         grid_size = 0.2          # voxel size of the tile downsampling
         max_points = 640_000     # cap per tile; lower it on small GPUs
 

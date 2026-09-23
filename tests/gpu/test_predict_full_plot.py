@@ -106,3 +106,35 @@ def test_crop_mode_still_works(tmp_path):
     seg = result[0].pred_pts_seg
     assert len(seg['pts_semantic_mask'][1]) == n
     assert not (tmp_path / 'plot_a.ply').exists()
+
+def test_region_step_factor_reaches_the_lattice_and_still_segments(tmp_path, monkeypatch):
+    """`model.test_cfg.region_step_factor` sets the cylinder pitch to radius * factor.
+
+    0.25 (the default) must keep today's `radius / 4`; 0.5 must halve the pitch
+    in each axis, i.e. lay down roughly a quarter of the cylinders, and still
+    produce a non-empty instance map.
+    """
+    import oneformer3d.oneformer3d as ofm
+
+    steps = []
+    real = ofm.generate_cylindrical_regions
+
+    def spy(points_xy, radius, step):
+        steps.append(step)
+        return real(points_xy, radius, step)
+
+    monkeypatch.setattr(ofm, 'generate_cylindrical_regions', spy)
+
+    model = build_model(tmp_path / 'out', region_step_factor=0.5)
+    inputs, samples, n = make_sample(tmp_path, with_gt=False)
+    with torch.no_grad():
+        result = model.predict(inputs, samples)
+
+    assert steps == [model.radius * 0.5]
+    n_coarse = len(real(inputs['points'][0][:, :2], model.radius, model.radius * 0.5))
+    n_default = len(real(inputs['points'][0][:, :2], model.radius, model.radius * 0.25))
+    assert n_coarse < n_default
+
+    inst = np.asarray(result[0].pred_pts_seg['pts_instance_mask'][1])
+    assert len(inst) == n
+    assert (inst >= 0).any()
