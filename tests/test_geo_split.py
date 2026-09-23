@@ -178,3 +178,56 @@ def test_split_min_points_counts_core_points_only(tmp_path):
     written = split_las(src, tmp_path / "sub", size_m=100, min_points=20, buffer_m=20)
     assert [p.name for p in written] == ["tile_E0_N0_100m.las"]
     assert not (tmp_path / "sub" / "tile_E100_N0_100m_ident.npy").exists()
+
+
+def test_split_removes_a_stale_manifest_before_rewriting(tmp_path, monkeypatch):
+    """The manifest is written last so its presence means "complete". A rerun that fails
+    partway must therefore not leave the PREVIOUS run's manifest describing the new,
+    half-written sub-tiles -- stitch would key points by an ident sidecar that no longer
+    matches the LAS beside it."""
+    import ff3d_geo.split as split_mod
+
+    src, _ = _tile(tmp_path, "3dm_33_381_5829_1_be.las", 381000, 8000, 3)
+    out = tmp_path / "sub"
+    split_las(src, out, size_m=100, min_points=10)
+    assert (out / "split_manifest.json").exists()
+
+    real_save = split_mod.np.save
+    calls = []
+
+    def flaky_save(path, arr):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("no space left on device")
+        return real_save(path, arr)
+
+    monkeypatch.setattr(split_mod.np, "save", flaky_save)
+    with pytest.raises(OSError, match="no space left"):
+        split_las(src, out, size_m=100, min_points=10, buffer_m=20)
+    assert not (out / "split_manifest.json").exists()
+    assert not list(out.glob(".*.tmp"))
+
+
+def test_split_rejects_a_source_repeated_among_the_neighbours(tmp_path):
+    src, _ = _tile(tmp_path, "3dm_33_381_5829_1_be.las", 381000, 2000, 4)
+    east, _ = _tile(tmp_path, "3dm_33_382_5829_1_be.las", 381200, 2000, 5)
+    with pytest.raises(ValueError, match="distinct"):
+        split_las(src, tmp_path / "a", size_m=100, min_points=10, buffer_m=20, neighbours=[src])
+    with pytest.raises(ValueError, match="distinct"):
+        split_las(src, tmp_path / "b", size_m=100, min_points=10, buffer_m=20,
+                  neighbours=[east, east])
+    assert not list(tmp_path.glob("*/*.las"))
+
+
+def test_split_without_halo_never_opens_the_neighbours(tmp_path):
+    """buffer_m == 0 leaves no halo for a neighbour to fill, so none is read -- a
+    neighbour path that does not even exist must not make the split fail."""
+    src, xyz = _tile(tmp_path, "3dm_33_381_5829_1_be.las", 381000, 4000, 6)
+    out = tmp_path / "sub"
+    written = split_las(src, out, size_m=100, min_points=10,
+                        neighbours=[tmp_path / "no_such_tile_1_be.las"])
+    assert [p.name for p in written] == [
+        "3dm_33_381_5829_E381000_N5829000_100m.las", "3dm_33_381_5829_E381100_N5829000_100m.las"]
+    assert laspy.read(written[0]).x.max() <= 100
+    manifest = json.loads((out / "split_manifest.json").read_text())
+    assert [s["key"] for s in manifest["sources"]] == ["3dm_33_381_5829"]

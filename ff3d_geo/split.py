@@ -96,7 +96,7 @@ def split_las(
     min_points: int = 1000,
     prefix: str | None = None,
     buffer_m: float = 0.0,
-    neighbours: Sequence = (),
+    neighbours: Sequence[Path | str] = (),
 ) -> list[Path]:
     """Split ``las_path`` into ``size_m``-metre local-coordinate sub-tiles under ``out_dir``.
 
@@ -118,8 +118,9 @@ def split_las(
     ``neighbours`` are further km tiles (the 8 neighbours of ``las_path``) whose points
     fill the halo of the sub-tiles on the km-tile border, so those borders behave like
     internal ones. A neighbour is read in the same bounded chunks and selected by the
-    same expanded-box test, so a neighbour that does not overlap the primary's grid
-    contributes nothing when ``buffer_m == 0``.
+    same expanded-box test. They must be distinct from each other and from ``las_path``
+    (a repeat would write the same points twice), and they are ignored, unread and
+    unlisted in the manifest, when ``buffer_m == 0`` leaves no halo to fill.
 
     Every source point of the PRIMARY tile must land in exactly one sub-tile core: the
     grid is derived from the header's ``mins``/``maxs``, which laspy does NOT re-derive
@@ -131,7 +132,8 @@ def split_las(
 
     Writes per kept sub-tile ``<out_dir>/<stem>_ident.npy`` (``IDENT_DTYPE``, aligned
     with the sub-tile's point order) and, last of all, ``<out_dir>/split_manifest.json``;
-    the manifest's presence means the split ran to completion.
+    the manifest's presence means the split ran to completion, so a previous run's
+    manifest is removed before anything in ``out_dir`` is touched.
     """
     las_path = Path(las_path)
     out_dir = Path(out_dir)
@@ -141,6 +143,30 @@ def split_las(
     buffer_m = float(buffer_m)
     if buffer_m < 0:
         raise ValueError(f"split_las: buffer_m must be >= 0, got {buffer_m}")
+
+    # A repeated source would write every one of its points twice under two different
+    # ``tile`` values; the conservation check below cannot see it (it counts tile 0
+    # only) and ``stitch`` keys on ``(tile, index)``, so the copies would become two
+    # distinct points with possibly different instance ids.
+    resolved = [p.resolve() for p in (las_path, *neighbour_paths)]
+    if len(set(resolved)) != len(resolved):
+        raise ValueError(
+            f"split_las: neighbours must be distinct from each other and from {las_path}; "
+            "a repeated source would write every one of its points twice"
+        )
+
+    # Without a halo there is nothing for a neighbour to fill, and reading one is not
+    # free: ``subtile_origins`` can extend one column past the primary's extent when a
+    # bound lands exactly on a grid line, and a neighbour point would be selected into
+    # that cell. Drop them before they are opened; they are left out of the manifest.
+    if buffer_m == 0:
+        neighbour_paths = []
+
+    # An earlier run's manifest describes an earlier run's sub-tiles. It is written
+    # last precisely so its presence means "complete", so it has to go before anything
+    # in this directory is overwritten -- otherwise a rerun that fails partway leaves a
+    # stale manifest next to new sub-tiles and sidecars that no longer match it.
+    (out_dir / "split_manifest.json").unlink(missing_ok=True)
 
     if prefix is None:
         prefix = _default_prefix(las_path.stem)
@@ -273,10 +299,12 @@ def split_las(
             ident_tmp = ident_tmp_paths[origin]
             stem = _subtile_stem(prefix, origin, size_m)
             if counts_core[origin] >= min_points:
-                tmp_path.rename(out_dir / f"{stem}.las")
+                # Sidecar first, LAS second: the final-named .las appearing in the
+                # directory then implies its _ident.npy is already there.
                 ident = np.fromfile(ident_tmp, dtype=IDENT_DTYPE)
                 np.save(out_dir / f"{stem}_ident.npy", ident)
                 ident_tmp.unlink(missing_ok=True)
+                tmp_path.rename(out_dir / f"{stem}.las")
                 written.append(out_dir / f"{stem}.las")
                 subtiles.append({
                     "stem": stem,
