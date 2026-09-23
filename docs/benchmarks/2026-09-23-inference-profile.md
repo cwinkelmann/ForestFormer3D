@@ -249,3 +249,87 @@ ff3d_docker python work_dirs/logs/profile/phase_driver.py --repeat 1 --step-div 
 `one.pkl` is the production info pkl with `data_list` cut to the one scan
 (`mmengine.load` / `mmengine.dump`). Note that `docker run` without `-i` does not
 forward stdin, so heredoc scripts must go through a file or `python -c`.
+
+## Applied (2026-09-23)
+
+Options 1 and 3 landed on `fix/review-findings`: the per-mask z-filter loop in
+`ForAINetV2OneFormer3D_XAwarequery.pred_inst_sem_test` is now a batched
+`torch.where(...).min(1)` over the mask block (chunked so the `(K, N)` temporary
+stays bounded), and `save_ply_withscore` builds its vertex array column-wise in
+the new `oneformer3d/ply_io.py` and writes binary little-endian instead of ASCII.
+The older `ForAINetV2OneFormer3D.pred_inst_sem_test` was left as it was.
+
+### Measured: 316.7 s -> 47.2 s per scan (6.7x)
+
+Ten 100 m Berlin ALS sub-tiles (`3dm_33_381_5829_E381000_N5829{000..900}_100m`,
+107 k-200 k points each, 1.63 M points in total), one `tools/test.py` process per
+run, GPU 7 of `carrot` with the same production co-tenant as the profile above.
+Per-scan seconds are the last `Epoch(test) [10/10] ... time:` of each run, i.e.
+the mean over the ten scans.
+
+| run | code | seed | s per scan |
+|---|---|---|---:|
+| `old` | worktree at `96558eb` | unseeded | **316.66** |
+| `new` | `efb3fcf` | unseeded | **47.15** |
+| `olds` | worktree at `96558eb` | `randomness.seed=0` | 310.96 |
+| `olds2` | worktree at `96558eb` | `randomness.seed=0` | 315.84 |
+| `news` | `efb3fcf` | `randomness.seed=0` | 46.10 |
+| `news2` | `efb3fcf` | `randomness.seed=0` | 47.18 |
+
+**6.7x**, or 269 s saved per tile. At 100 tiles per plot that is 8.8 h -> 1.3 h.
+The profile's estimate (53 s -> 10-15 s at production speed, 3.5-5x) was
+conservative: the binary PLY writer contributes on top of the loop fix, and a
+sync-bound loop suffers extra under GPU contention, so the measured ratio here is
+an upper bound on what an uncontended GPU will show. `mIoU` is 0.4436 in all six
+runs (the tiles are unlabeled, so this is the metric's "everything is class 0"
+degenerate value, not a quality signal).
+
+### Equality: proven at the function, not at the PLY
+
+The vectorisation is bit-exact, and that is proven by
+`tests/gpu/test_pred_inst_sem_test_equivalence.py`, which keeps the original loop
+(copied verbatim from `96558eb`) beside the new code and asserts `torch.equal` on
+all four returned tensors for 246 masks x 40 k points over five seeds, plus empty
+masks, masks entirely above `ground_z_max + 5`, score and z ties, `ground_z_max =
+inf`, a single mask, nothing kept, and a tile large enough to force several
+chunks. `tests/test_result_ply.py` pins the PLY field names, dtypes and values
+against the old row-wise construction and round-trips the binary file.
+
+**A whole-plot PLY diff cannot prove anything here, because the pipeline is not
+reproducible run to run.** `torch_cluster.fps` is called with its default
+`random_start=True` (`oneformer3d/oneformer3d.py:2181`), so every run draws
+different query points; `randomness.seed=0` fixes that, but CUDA atomics and the
+`index_copy_` ties of `grid_sample` (`docs/known-issues.md` item 3) remain.
+`randomness.deterministic=True` is not an option: it sets
+`torch.use_deterministic_algorithms(True)`, which makes spconv's `torch.mm` raise.
+Running the *same* code twice with the *same* seed therefore differs as much as
+old vs new does:
+
+| comparison | semantic_pred | instance_pred | score (beyond float32 ASCII round-trip) |
+|---|---:|---:|---:|
+| `olds` vs `olds2` (old vs old) | 828 pts (0.051 %) | 31.70 % | 16.85 % |
+| `news` vs `news2` (new vs new) | 787 pts (0.048 %) | 31.34 % | 16.71 % |
+| `olds` vs `news` (old vs new) | 821 pts (0.050 %) | 31.10 % | 16.69 % |
+
+Old vs new is *within* the run-to-run spread of each version against itself, on
+all three fields, so the diff carries no signal about the change. `x y z` are
+identical everywhere (0 differing points out of 1,628,942). Most of the
+`instance_pred` difference is renumbering: the tiles hold 165-195 instances and a
+single flipped merge order shifts every later id. Part of the `score` difference
+is not a difference at all but the old ASCII writer's precision loss (0.7091614
+written, 0.70916146 in memory); the binary writer round-trips float32 exactly.
+
+### Reproduction
+
+On carrot, scratch in `work_dirs/logs/speed/` (10-scan info pkl `ten.pkl`,
+`run.sh old|new [name]`, `compare2.py <dirA> <dirB>`). The baseline ran from a
+throwaway `git worktree` at `96558eb` under `/raid/cwinkelmann/ff3d-speed-base`,
+with the main checkout's `data/` and `work_dirs/` bind-mounted over it.
+
+```bash
+work_dirs/logs/speed/run.sh old olds     # worktree at 96558eb, seed 0
+work_dirs/logs/speed/run.sh new news     # efb3fcf, seed 0
+source benchmark/common.sh; FF3D_GPU=7 ff3d_docker python \
+  /workspace/work_dirs/logs/speed/compare2.py \
+  /workspace/work_dirs/logs/speed/olds /workspace/work_dirs/logs/speed/news
+```

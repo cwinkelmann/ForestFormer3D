@@ -14,9 +14,10 @@ Each is inherited from OneFormer3D or only matters once the benchmark shows it d
    when several points share a voxel the representative index is whichever `index_copy_` writes
    last, which is not deterministic on CUDA. Affects only which original index a voxel carries,
    not the averaged coordinates.
-4. **Python-loop `save_ply_withscore`** (`oneformer3d/oneformer3d.py`): builds the vertex array
-   with a per-point tuple comprehension. Rewrite with structured numpy only if it shows up in the
-   Phase 2 benchmark timings.
+4. ~~**Python-loop `save_ply_withscore`**~~ **Fixed 2026-09-23.** It built the vertex array with a
+   per-point tuple comprehension and wrote ASCII. The 2026-09-23 inference profile measured
+   5.6-10.3 s per 100 m tile, so it was rewritten as a structured array in `oneformer3d/ply_io.py`
+   and is now written binary little-endian.
 5. **Semantic mIoU semantics in `UnifiedSegMetric`**: `mIoU` averages the 1-based classes that
    have GT points and counts `-1` (no vote) predictions as class 0 "unclassified"; it is not the
    same number `tools/final_eval.py` prints. Both are reported; neither was changed.
