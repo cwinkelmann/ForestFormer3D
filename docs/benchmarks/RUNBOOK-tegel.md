@@ -206,6 +206,12 @@ Notes:
 - Both `merge` globs expand in the same sorted order, which is what makes them line up;
   the command still checks pairwise that `<stem>.las` goes with `<stem>_trees.gpkg` and
   refuses the merge otherwise, because the tree-id offsets are applied positionally.
+- `merge` also takes `--runtime-s <seconds>`: without it the merged report's "Inference
+  runtime" is `n/a`. The value is that km tile's inference wall time, from the run log
+  (`work_dirs/logs/berlin-$T-*.log`, the time between the `inference` step's command
+  line and the `results_to_las` one); equivalently, a sub-tile's
+  `<stem>_report.json` `runtime_s` times the number of sub-tiles, since a batch charges
+  each tile its share of the one shared inference step.
 - GPU 5 only (`--gpu 5`): GPUs 2-4 may be running Phase 2 benchmark jobs.
 - Expect about 55-60 s per sub-tile, so roughly 1 h 35 min per km tile including the
   shared preprocess and the host-side georeferencing/reporting (measured 2026-09-22 on
@@ -220,6 +226,21 @@ Notes:
   rewrites `<out>/scan_list.txt` and `<out>/empty_list.txt` for its own stems only, and
   `results_to_las` / `trees_to_gpkg` / `report` only ever touch the stems of that call.
   The stems must differ between chunks (they do - one per sub-tile).
+- A km-tile run leaves residue that nothing cleans up: the ~100 input PLYs it wrote into
+  `data/ForAINetV2/test_data/` and their `_vert.npy` / `_offsets.npy` exports in
+  `data/ForAINetV2/forainetv2_instance_data/`, on the order of 1-2 GB per km tile. Once
+  `merge` has run and the merged files are copied back, clear them per tile with
+
+  ```bash
+  rm data/ForAINetV2/test_data/<T>_E*_100m.ply data/ForAINetV2/forainetv2_instance_data/<T>_E*_100m_*.npy
+  ```
+
+  (`<T>` without the `_1_be` suffix, i.e. the sub-tile prefix `split` used - check one
+  file name from `split-$T.txt` first). The tracked benchmark plots do not match that
+  glob. The split *inputs* live in `inputs/berlin/sub/<T>/` and are separate - keep them
+  if the tile might be re-run, delete that directory otherwise; `work_dirs/berlin-$T/`
+  additionally holds the per-sub-tile result PLY/LAS/GeoPackages, which the rsync above
+  deliberately does not copy back.
 
 Copy the results back to the Mac (no PLYs, and no per-sub-tile LAS/GeoPackage - the
 merged km files are what matters):

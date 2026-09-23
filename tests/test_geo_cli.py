@@ -560,17 +560,30 @@ def test_batch_host_steps_finish_the_healthy_tiles_and_then_name_the_failed_one(
     tmp_path, monkeypatch, capsys
 ):
     """One tile without a result PLY must not cost the others their outputs: a batch
-    shares one preprocess and one GPU inference, so there is nothing to resume from."""
+    shares one preprocess and one GPU inference, so there is nothing to resume from.
+
+    Driven through ``execute`` (not the steps' ``func``s one by one) because that is
+    the real path: a host step that raises must be recorded and the NEXT host steps
+    must still run, so the healthy tile gets its GeoPackage and report as well as its
+    LAS, and only the final error names the failed steps.
+    """
     good, bad = BATCH_STEMS
     out, steps, timings = _two_tile_batch(tmp_path, monkeypatch, drop_result_for=bad)
 
-    for step in steps[5:]:
-        with pytest.raises(RuntimeError, match=re.escape(bad)) as excinfo:
-            step.func()
-        assert good not in str(excinfo.value)
+    with pytest.raises(RuntimeError) as excinfo:
+        execute(steps[5:], dry_run=False, timings=timings)
+    message = str(excinfo.value)
+    # every host step that failed is named, with the tile that caused it
+    for step_name in ("results_to_las", "trees_to_gpkg", "report"):
+        assert re.search(rf"step '{step_name}'", message), message
+    assert bad in message
+    # the first failure is chained, not swallowed
+    assert isinstance(excinfo.value.__cause__, Exception)
+    assert good not in message
 
     assert (out / f"{good}.las").is_file()
     assert (out / f"{good}_trees.gpkg").is_file()
+    assert (out / f"{good}_report.md").is_file()
     assert json.loads((out / f"{good}_report.json").read_text())["n_trees"] == 2
     assert not (out / f"{bad}.las").exists()
     assert not (out / f"{bad}_report.json").exists()

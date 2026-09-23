@@ -83,6 +83,13 @@ def split_las(
     Returns the sorted list of written sub-tile paths; sub-tiles with fewer than
     ``min_points`` points are not written. Reads the source LAS in bounded chunks
     so the whole tile is never loaded into memory at once.
+
+    Every source point must land in exactly one sub-tile: the grid is derived from
+    the header's ``mins``/``maxs``, which laspy does NOT re-derive from the points,
+    so a stale bound would leave points outside the grid failing every cell mask and
+    vanishing silently. The per-sub-tile counts (including the sparse ones dropped by
+    ``min_points``) are therefore summed and compared with ``header.point_count``, and
+    a mismatch raises ``ValueError`` rather than writing a quietly incomplete split.
     """
     las_path = Path(las_path)
     out_dir = Path(out_dir)
@@ -91,69 +98,89 @@ def split_las(
     if prefix is None:
         prefix = _default_prefix(las_path.stem)
 
-    with laspy.open(str(las_path)) as reader:
-        mins = reader.header.mins
-        maxs = reader.header.maxs
-        origins = subtile_origins(mins, maxs, size_m)
-        x0_grid = int(math.floor(mins[0] / size_m) * size_m)
-        y0_grid = int(math.floor(mins[1] / size_m) * size_m)
+    tmp_paths: dict[tuple[int, int], Path] = {}
+    written: list[Path] = []
+    finished = False
+    try:
+        with laspy.open(str(las_path)) as reader:
+            mins = reader.header.mins
+            maxs = reader.header.maxs
+            source_count = int(reader.header.point_count)
+            origins = subtile_origins(mins, maxs, size_m)
+            x0_grid = int(math.floor(mins[0] / size_m) * size_m)
+            y0_grid = int(math.floor(mins[1] / size_m) * size_m)
 
-        source_dims = {d.name for d in reader.header.point_format.dimensions}
-        copy_dims = [d for d in _COPY_DIMS if d in source_dims]
+            source_dims = {d.name for d in reader.header.point_format.dimensions}
+            copy_dims = [d for d in _COPY_DIMS if d in source_dims]
 
-        tmp_paths: dict[tuple[int, int], Path] = {}
-        writers: dict[tuple[int, int], "laspy.LasWriter"] = {}
-        counts: dict[tuple[int, int], int] = {origin: 0 for origin in origins}
+            writers: dict[tuple[int, int], "laspy.LasWriter"] = {}
+            counts: dict[tuple[int, int], int] = {origin: 0 for origin in origins}
 
-        try:
-            for origin in origins:
-                tmp_path, writer = _make_writer(out_dir, prefix, origin, size_m)
-                tmp_paths[origin] = tmp_path
-                writers[origin] = writer
-
-            for points in reader.chunk_iterator(_CHUNK_POINTS):
-                x = np.asarray(points.x)
-                y = np.asarray(points.y)
-                ix = np.floor((x - x0_grid) / size_m).astype(np.int64)
-                iy = np.floor((y - y0_grid) / size_m).astype(np.int64)
-                ex = x0_grid + ix * size_m
-                ny = y0_grid + iy * size_m
-
+            try:
                 for origin in origins:
-                    mask = (ex == origin[0]) & (ny == origin[1])
-                    n_sel = int(mask.sum())
-                    if n_sel == 0:
-                        continue
-                    sub = points[mask]
-                    writer = writers[origin]
+                    tmp_path, writer = _make_writer(out_dir, prefix, origin, size_m)
+                    tmp_paths[origin] = tmp_path
+                    writers[origin] = writer
 
-                    new_rec = laspy.ScaleAwarePointRecord.zeros(
-                        n_sel,
-                        point_format=writer.header.point_format,
-                        scales=writer.header.scales,
-                        offsets=writer.header.offsets,
-                    )
-                    new_rec.x = np.asarray(sub.x) - origin[0]
-                    new_rec.y = np.asarray(sub.y) - origin[1]
-                    new_rec.z = np.asarray(sub.z)
-                    new_rec.classification = np.asarray(sub.classification)
-                    for dim in copy_dims:
-                        setattr(new_rec, dim, np.asarray(getattr(sub, dim)))
+                for points in reader.chunk_iterator(_CHUNK_POINTS):
+                    x = np.asarray(points.x)
+                    y = np.asarray(points.y)
+                    ix = np.floor((x - x0_grid) / size_m).astype(np.int64)
+                    iy = np.floor((y - y0_grid) / size_m).astype(np.int64)
+                    ex = x0_grid + ix * size_m
+                    ny = y0_grid + iy * size_m
 
-                    writer.write_points(new_rec)
-                    counts[origin] += n_sel
-        finally:
-            for writer in writers.values():
-                writer.close()
+                    for origin in origins:
+                        mask = (ex == origin[0]) & (ny == origin[1])
+                        n_sel = int(mask.sum())
+                        if n_sel == 0:
+                            continue
+                        sub = points[mask]
+                        writer = writers[origin]
 
-    written = []
-    for origin in origins:
-        tmp_path = tmp_paths[origin]
-        final_path = out_dir / f"{prefix}_E{origin[0]}_N{origin[1]}_{size_m}m.las"
-        if counts[origin] >= min_points:
-            tmp_path.rename(final_path)
-            written.append(final_path)
-        else:
-            tmp_path.unlink(missing_ok=True)
+                        new_rec = laspy.ScaleAwarePointRecord.zeros(
+                            n_sel,
+                            point_format=writer.header.point_format,
+                            scales=writer.header.scales,
+                            offsets=writer.header.offsets,
+                        )
+                        new_rec.x = np.asarray(sub.x) - origin[0]
+                        new_rec.y = np.asarray(sub.y) - origin[1]
+                        new_rec.z = np.asarray(sub.z)
+                        new_rec.classification = np.asarray(sub.classification)
+                        for dim in copy_dims:
+                            setattr(new_rec, dim, np.asarray(getattr(sub, dim)))
+
+                        writer.write_points(new_rec)
+                        counts[origin] += n_sel
+            finally:
+                for writer in writers.values():
+                    writer.close()
+
+            # Before min_points drops anything: the grid comes from the header's
+            # mins/maxs, so a stale bound would silently lose the points outside it.
+            written_points = sum(counts.values())
+            if written_points != source_count:
+                raise ValueError(
+                    f"split_las: {written_points} of {las_path}'s {source_count} points "
+                    f"landed in a sub-tile; the missing points lie outside the grid "
+                    f"derived from the header bounds {tuple(mins)}..{tuple(maxs)} "
+                    "(a stale LAS header does not get re-derived on read)"
+                )
+
+        for origin in origins:
+            tmp_path = tmp_paths[origin]
+            final_path = out_dir / f"{prefix}_E{origin[0]}_N{origin[1]}_{size_m}m.las"
+            if counts[origin] >= min_points:
+                tmp_path.rename(final_path)
+                written.append(final_path)
+            else:
+                tmp_path.unlink(missing_ok=True)
+        finished = True
+    finally:
+        if not finished:
+            # Leave no .<stem>.las.tmp behind on any failure path.
+            for tmp_path in tmp_paths.values():
+                tmp_path.unlink(missing_ok=True)
 
     return sorted(written)

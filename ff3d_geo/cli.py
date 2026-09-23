@@ -133,13 +133,17 @@ def _container_path(path: Path, repo: Path, what: str) -> str:
 
 
 def _run_per_tile(what: str, jobs: list[tuple[str, Callable[[], object]]]) -> None:
-    """Run every tile's ``fn``, then report ALL the failures in one error.
+    """Run every tile's ``fn`` within this step, then report ALL the failures in one error.
 
     A batch has no resume: it shares one preprocess and one multi-hour GPU inference,
     so letting tile *k* abort the loop would cost tiles *k+1...N* their ``.las`` /
     ``_trees.gpkg`` / report even though their result PLYs are already on disk, and
     re-running would redo everything. Each tile is therefore attempted independently
     and only the ones that really failed are named.
+
+    This covers one step only; :func:`execute` is what carries a healthy tile PAST a
+    failed step, by recording the ``RuntimeError`` raised here and running the
+    remaining host steps anyway.
     """
     failed: list[tuple[str, Exception]] = []
     for stem, fn in jobs:
@@ -392,7 +396,25 @@ def plan_run(
 
 
 def execute(steps: list[Step], dry_run: bool, timings: dict[str, float] | None = None) -> None:
-    """Print each step; unless ``dry_run``, run it. Failures stop the run immediately."""
+    """Print each step; unless ``dry_run``, run it.
+
+    Failure handling differs by step kind, because a batch has no resume:
+
+    * a DOCKER step (``argv``) is fail-fast -- preprocess and inference feed
+      everything after them, so the run stops immediately with a ``RuntimeError``
+      naming the step and its exit code;
+    * a HOST step (``func``: ``las_to_ply``, ``prepare_inputs``, ``check_preprocess``,
+      ``results_to_las``, ``trees_to_gpkg``, ``report``) that raises is RECORDED and
+      execution continues with the next step, so one bad tile in ``results_to_las``
+      (``_run_per_tile`` already writes the healthy tiles and then raises) does not
+      also cost the healthy tiles their GeoPackage and report. After the last step,
+      a single ``RuntimeError`` names every failed host step, chained from the first
+      one's exception.
+
+    ``timings`` (when given) gets an entry per step that ran to completion; a failed
+    host step is left out of it.
+    """
+    failures: list[tuple[str, Exception]] = []
     for step in steps:
         print(step.render(), flush=True)
         if dry_run:
@@ -409,9 +431,23 @@ def execute(steps: list[Step], dry_run: bool, timings: dict[str, float] | None =
                     f"{step.render()}"
                 ) from exc
         elif step.func is not None:
-            step.func()
+            try:
+                step.func()
+            except Exception as exc:  # noqa: BLE001 - re-raised below, step named
+                failures.append((step.name, exc))
+                print(f"step {step.name!r} failed, continuing with the next step: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+                continue
         if timings is not None:
             timings[step.name] = time.monotonic() - started
+    if failures:
+        detail = "".join(
+            f"\n  step {name!r}: {type(exc).__name__}: {exc}" for name, exc in failures
+        )
+        raise RuntimeError(
+            f"{len(failures)} host step(s) failed; the remaining steps ran "
+            f"anyway:{detail}"
+        ) from failures[0][1]
 
 
 def _add_origin_args(parser: argparse.ArgumentParser) -> None:
@@ -487,6 +523,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="also build a report over the merged files and write it here")
     mrg.add_argument("--report-md", type=Path, default=None,
                      help="default: --report-json with a .md suffix")
+    mrg.add_argument("--runtime-s", type=float, default=None,
+                     help="inference wall time for the whole km tile, for the merged "
+                          "report's 'Inference runtime' (default: n/a)")
     return parser
 
 
@@ -583,7 +622,7 @@ def main(argv: list[str] | None = None) -> int:
 
             md = (args.report_md if args.report_md is not None
                   else Path(args.report_json).with_suffix(".md"))
-            rep = build_report(args.out_las, args.out_gpkg)
+            rep = build_report(args.out_las, args.out_gpkg, runtime_s=args.runtime_s)
             write_report(rep, args.report_json, md)
             print(report_markdown(rep))
         return 0

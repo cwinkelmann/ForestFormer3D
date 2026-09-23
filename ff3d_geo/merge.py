@@ -146,16 +146,25 @@ def merge_las(las_paths, out_las) -> dict:
     out_las = Path(out_las)
     out_las.parent.mkdir(parents=True, exist_ok=True)
 
+    # Written to a temporary file and renamed only once the last sub-tile is in and
+    # the header is finalised (like split_las), so a kill mid-merge cannot leave a
+    # truncated <out_las> that looks like a complete km tile.
+    tmp_las = out_las.with_name(out_las.name + ".tmp")
     all_ids: list[np.ndarray] = []
-    with laspy.open(str(out_las), mode="w", header=header) as writer:
-        for p in las_paths:
-            las = laspy.read(str(p))
-            offset = id_offsets[str(p)]
-            ids = np.asarray(las.treeID, dtype=np.int32).copy()
-            ids[ids >= 0] += offset
-            las.treeID = ids
-            writer.write_points(las.points)
-            all_ids.append(ids)
+    try:
+        with laspy.open(str(tmp_las), mode="w", header=header) as writer:
+            for p in las_paths:
+                las = laspy.read(str(p))
+                offset = id_offsets[str(p)]
+                ids = np.asarray(las.treeID, dtype=np.int32).copy()
+                ids[ids >= 0] += offset
+                las.treeID = ids
+                writer.write_points(las.points)
+                all_ids.append(ids)
+        tmp_las.replace(out_las)
+    except BaseException:
+        tmp_las.unlink(missing_ok=True)
+        raise
 
     merged_ids = np.concatenate(all_ids) if all_ids else np.empty(0, dtype=np.int32)
     n_trees = int(np.unique(merged_ids[merged_ids >= 0]).size)
