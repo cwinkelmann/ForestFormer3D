@@ -38,11 +38,17 @@ the input PLY (`x y z semantic_seg treeID`), so the thinned plots go through the
   not a square cell, and the hit probability depends on the leaf area above a point rather
   than on rank in z. What the approximation reproduces is the first-return-like bias toward
   the top of the canopy, which is the property under test.
+  It also has a floor: once the budget drops below the number of occupied 0.5 m cells
+  (about 4 pts/m2 on a forest plot) the mode flips to "one randomly chosen point per cell"
+  and stops being canopy-biased at all. The script warns on stderr when that happens; it
+  does not happen at 25 pts/m2.
 
 Density 25 pts/m2, seed 0, both modes. Result: 29 556 113 -> 475 893 points over the 28
 plots (**1.61 % kept**) in both modes; per-plot input density ranged from 125 pts/m2
 (`Yuchen_2023_dls_merged_230209_panoptic_test`) to 4387 pts/m2
-(`NIBIO_NIBIO_plot_17_annotated_test`), output density is 25.0 pts/m2 for every plot.
+(`NIBIO_NIBIO_plot_17_annotated_test`). Output density is 25.0 pts/m2 for every plot by
+construction (`kept == target == round(25 * area)`), so that is a statement of what was
+asked for, not an independent check.
 Outputs: `data/ForAINetV2/test_data_thin25{u,c}/<stem>_thin25{u,c}.ply` (9.2 MB each set).
 Thinning both sets took about 10 min of CPU time for the whole test split.
 
@@ -81,6 +87,28 @@ mmengine evaluator summary lines (same runs):
 | thin, canopy | 0.6524 | 0.9912 | 0.2351 | 0.2327 | 0.6801 | 0.2173 | 0.3293 | 0.2571 |
 | thin, canopy, step 0.5 | 0.6521 | 0.9915 | 0.1574 | 0.1777 | 0.7095 | 0.1696 | 0.2738 | 0.2166 |
 
+**Why the two evaluators disagree on the canopy rows — and only there.** Precision agrees
+to 4 dp in all four conditions, and both tools derive it from the same counts: TP / P is
+1066/1153 (full), 562/666 (uniform), 219/322 (canopy), 171/241 (step 0.5) — the same TP and
+prediction counts the diagnostics table below reports. Recall also agrees for full density
+and uniform. It diverges on the two canopy runs because the two tools use different
+denominators. `tools/final_eval.py` accumulates `total_gt_ins` *inside* a loop it
+`continue`s out of when a plot has no predicted instance of the thing class
+(`tools/final_eval.py:241` guarding `:248`), so the GT trees of a plot that produced nothing
+at all never enter the recall denominator, while `UnifiedSegMetric` counts them. Canopy:
+219/988 = 0.2217 (final_eval) vs 219/1008 = 0.2173 (mmengine); step 0.5: 171/961 = 0.1779 vs
+171/1008 = 0.1696. Full density and uniform have no empty plot, which is why they agree
+exactly. The mmengine denominator is the honest one — final_eval's quirk flatters a run
+precisely when it fails hardest — and it is the one the diagnostics table uses. Magnitude
+0.005 / 0.011 F1; no conclusion changes.
+
+**`meanPQ` (final_eval) vs `mPQ` (mmengine) are not the same quantity** and should not be
+read as a contradiction (0.6225 vs 0.2571 for canopy). `tools/final_eval.py:403` averages PQ
+over all classes present, **including the ground/stuff class**, whose PQ is ~0.98 here;
+`oneformer3d/unified_metric.py:228` averages over the *thing* classes only. The stuff class
+stays easy while the tree class collapses, so the two diverge exactly as the instance
+metrics fall.
+
 Per-class semantic IoU `[unused, ground, wood, leaf]`:
 
 | condition | ground | wood | leaf | oAcc |
@@ -90,39 +118,87 @@ Per-class semantic IoU `[unused, ground, wood, leaf]`:
 | thin, canopy | 0.984 | 0.045 | 0.928 | 0.932 |
 | thin, canopy, step 0.5 | 0.984 | 0.045 | 0.927 | 0.932 |
 
-### Wall time per plot (inference only, one H100)
+### Wall time (inference only, one H100)
 
-| condition | mmengine `time` per sample | 28 plots total |
-|---|---|---|
-| full density | 113.1 s | ~53 min |
-| thin, uniform | 2.33 s | 83 s |
-| thin, canopy | 1.68 s | 63 s |
-| thin, canopy, step 0.5 | 0.50 s | 30 s |
+Two definitions, kept apart. "per sample" is mmengine's own mean `time` over the 28 test
+samples (model forward + tiling + PLY write, no startup). "step wall clock" is the wall
+clock of the whole `tools/test.py` container, which adds a fixed ~16-20 s of container
+start, entrypoint patch, import and checkpoint load.
 
-Inference cost tracks point count almost linearly: 1.6 % of the points, ~2 % of the time.
+| condition | per sample | 28 samples at that rate | step wall clock |
+|---|---|---|---|
+| full density | 113.1 s | 3167 s | 3290 s (54 min 50 s) |
+| thin, uniform | 2.33 s | 65 s | 83 s |
+| thin, canopy | 1.68 s | 47 s | 63 s |
+| thin, canopy, step 0.5 | 0.50 s | 14 s | 30 s |
 
-## Over-segmentation diagnostics
+Inference cost tracks point count almost linearly: 1.6 % of the points, 2.1 % of the
+per-sample time. `region_step_factor=0.5` is a **3.4x** per-sample speed-up (1.68 -> 0.50 s)
+which, because the fixed startup then dominates, is only **2.1x** on the step wall clock.
+
+## Instance-level diagnostics
 
 `benchmark/instance_diagnostics.py` matches predicted instances to GT trees per plot
 (Hungarian assignment on the IoU matrix, `scipy.optimize.linear_sum_assignment`) and pools
-over the 28 plots. `frag/tree` counts, for each GT tree, the predictions that put >= 20 %
-of *their own* points inside it; `split%` is the fraction of GT trees with >= 2 such
-fragments; `merged%` is the fraction of predictions that cover >= 20 % of two or more GT
-trees; `h_pred` / `h_gt` are median instance heights (top z minus the plot's min z).
+over the 28 plots. Definitions:
 
-| condition | GT trees | pred inst. | matched @IoU>=0.5 | match % | frag/tree | split % | merged % | h_pred (m) | h_gt (m) |
-|---|---|---|---|---|---|---|---|---|---|
-| full density | 1207 | 1153 | 1066 | 88.3 % | 1.02 | 6.9 % | 11.2 % | 15.2 | 15.0 |
-| thin, uniform | 1205 | 666 | 562 | 46.6 % | 0.70 | 1.9 % | 48.5 % | 19.0 | 14.6 |
-| thin, canopy | 1008 | 322 | 219 | 21.7 % | 0.46 | 3.2 % | 49.1 % | 15.3 | 17.0 |
-| thin, canopy, step 0.5 | 1008 | 241 | 171 | 17.0 % | 0.34 | 2.1 % | 52.3 % | 14.1 | 17.0 |
+* **frag/gt**, **split%gt** — for each GT tree, the number of predictions that put >= 20 %
+  of *their own* points inside it; averaged over **all** GT trees, and the fraction of all
+  GT trees with >= 2 such fragments.
+* **det**, **frag/det**, **split%det** — the same two numbers restricted to the GT trees
+  that got at least one fragment. The all-GT columns fall automatically when recall falls
+  (a tree nothing came near contributes 0 fragments), so only the conditioned columns can be
+  compared across conditions with different recall.
+* **merged%** — fraction of predictions that cover >= 20 % of two or more GT trees.
+* **dz_med**, **dz_mean** — (predicted top z − GT top z) over the *matched* pairs only.
+* **h_pred**, **h_gt** — median instance height over the surviving predictions and over all
+  GT trees. These are two different populations, so their difference moves with recall alone
+  and is reported only to show that it does.
 
-Two bookkeeping notes. (1) The GT tree count drops from 1207 to 1008 in canopy mode: about
-200 small, fully suppressed trees lose *all* their points to the canopy filter, so they are
-no longer in the thinned ground truth at all — the canopy rows are scored against an easier,
-overstorey-only reference and are still the worst rows in the table. (2) `h_gt` differs
-slightly between full (15.0 m) and thin-uniform (14.6 m) because thinning removes the single
-topmost point of some trees.
+| condition | GT | pred | matched @IoU>=0.5 | match % | frag/gt | split%gt | det | frag/det | split%det | merged % | dz_med | dz_mean | h_pred | h_gt |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| full density | 1207 | 1153 | 1066 | 88.3 % | 1.02 | 6.9 % | 1142 | 1.08 | 7.3 % | 11.2 % | 0.00 m | −0.00 m | 15.2 m | 15.0 m |
+| thin, uniform | 1205 | 666 | 562 | 46.6 % | 0.70 | 1.9 % | 811 | 1.04 | 2.8 % | 48.5 % | 0.00 m | +0.04 m | 19.0 m | 14.6 m |
+| thin, canopy | 1008 | 322 | 219 | 21.7 % | 0.46 | 3.2 % | 423 | 1.10 | 7.6 % | 49.1 % | 0.00 m | +0.52 m | 15.3 m | 17.0 m |
+| thin, canopy, step 0.5 | 1008 | 241 | 171 | 17.0 % | 0.34 | 2.1 % | 318 | 1.09 | 6.6 % | 52.3 % | 0.00 m | +0.65 m | 14.1 m | 17.0 m |
+
+Reading the table:
+
+* **Merging is the density failure mode.** `merged%` goes from 11.2 % at full density to
+  48.5-52.3 % on every thinned run: about half of all surviving predictions swallow two or
+  more GT trees. Prediction counts fall far below the GT counts (1153 -> 666 -> 322 against
+  1207 / 1205 / 1008 trees).
+* **Splitting does not get worse — except that it does not get better either.** Conditioned
+  on trees the model actually found, `split%det` is 7.3 % at full density, **2.8 %** on
+  uniform thinning and **7.6 %** on canopy thinning: the canopy run splits detected trees at
+  the same rate as full density while finding only a fifth of them. `frag/det` is flat
+  (1.04-1.10) across all four conditions. The unconditioned `split%gt` column falls from
+  6.9 % to 1.9-3.2 %, but that is the recall collapse, not an improvement, which is why the
+  conditioned columns exist.
+* **Matched instances have the right height.** `dz_med` is 0.00 m in every condition and
+  `dz_mean` never exceeds +0.65 m: when the model finds a tree, it gets its top within
+  centimetres. The eye-catching `h_pred` vs `h_gt` gaps (19.0 vs 14.6 m on uniform, 15.3 vs
+  17.0 m on canopy) are selection effects — the surviving predictions are biased toward
+  large trees on uniform and the canopy reference contains taller trees — not evidence that
+  instances are too tall or too short.
+
+Bookkeeping notes.
+
+1. `n_gt` counts GT trees that still have at least one point in the result cloud, so
+   thinning removes trees outright: 1207 -> **1205** under uniform thinning (2 tiny trees
+   lost every point to a 1.61 % random subsample) and -> **1008** under canopy thinning
+   (about 200 small, fully suppressed trees lost every point to the top-of-cell filter).
+   The canopy rows are therefore scored against an easier, overstorey-only reference of
+   1008 trees and are still the worst rows in the table.
+2. `h_gt` differs slightly between full (15.0 m) and thin-uniform (14.6 m) because thinning
+   removes the single topmost point of some trees.
+3. One canopy plot and two `step 0.5` plots produced **no instance at all** (20 and 47 GT
+   trees respectively) — this is what `tools/final_eval.py` drops from its recall
+   denominator, see the note under Results.
+4. `mMUCov > mMWCov` only in the `step 0.5` row (0.1777 vs 0.1574). Both evaluators report
+   the same pair independently, so it is not a transcription slip: at that level of
+   degradation the few surviving detections sit on smaller trees, and MWCov weights each GT
+   tree by its point count.
 
 ## Conclusion (5 lines)
 
@@ -130,64 +206,77 @@ topmost point of some trees.
    from **0.903 to 0.601** — a 0.30 absolute drop — driven almost entirely by recall
    (0.883 -> 0.466) while precision holds (0.925 -> 0.844).
 2. Adding the airborne viewing bias on top costs as much again: the canopy approximation
-   gives F1 **0.334**, with wood IoU collapsing from 0.626 to 0.045 because the stems the
-   model relies on are simply not in the cloud any more.
-3. The failure mode on thinned labelled data is **under-segmentation, not
-   over-segmentation**: predicted instances drop from 1153 to 666 (uniform) and 322
-   (canopy) against ~1200 GT trees, `split%` *falls* (6.9 % -> 1.9 %) and `merged%`
-   quadruples (11.2 % -> 48.5 %) — roughly half of all predictions swallow two or more
-   trees, and the median uniform-thinned instance is 4 m *taller* than a GT tree because it
-   spans several crowns.
-4. So density explains the *severity* of the Berlin result but **not its shape**: Berlin
-   shows crowns split in two, 382 instances below 2 m and a median height of 17.6 m against
-   a 26.2 m CHM baseline (`docs/benchmarks/2026-09-23-berlin-visual-report.md` sections 5-7,
-   `docs/benchmarks/2026-09-22-tegel-als.md`) — short, fragmented, crown-only instances —
-   whereas density loss alone produces few, tall, merged ones. Whatever produces the Berlin fragmentation is
-   therefore a domain effect beyond density — species and stand structure, leaf-off
-   foliage, ALS return characteristics and geometry, or the tiling/merge behaviour on
-   100 m tiles rather than 14-22 m plots.
-5. `region_step_factor=0.5` is a 2.3x speed-up that costs another 0.05 F1 on thinned data
-   (0.334 -> 0.284, merged% 49 -> 52), so the denser 0.25 lattice should stay the default
-   for low-density clouds; use 0.5 only when throughput matters more than instance recall.
+   gives F1 **0.334** (mmengine 0.329), with wood IoU collapsing from 0.626 to 0.045 because
+   the stems the model relies on are simply not in the cloud any more.
+3. On **uniform** thinning the failure is unambiguously **merging / under-segmentation**:
+   666 predictions for 1205 trees, 48.5 % of predictions covering two or more GT trees
+   (11.2 % at full density), and splitting of detected trees *below* the full-density rate
+   (2.8 % vs 7.3 %).
+4. On **canopy** thinning the picture is mixed and is the one that matters for ALS: merging
+   is just as bad (49.1 %), but detected trees are split about as often as at full density
+   (7.6 % vs 7.3 %) while only 21.7 % of trees are found at all — so the model both misses
+   most trees and keeps fragmenting the ones it finds. Matched-pair height deltas are
+   ~0 m in every condition (median 0.00 m, mean <= +0.65 m), so density loss does **not**
+   make instances systematically short.
+5. Therefore density explains the *severity* of the Berlin ALS result and reproduces its
+   merging, but it does **not** reproduce the short instances reported there (382 crowns
+   below 2 m, median 17.6 m against a 26.2 m CHM baseline,
+   `docs/benchmarks/2026-09-23-berlin-visual-report.md`). The open question is precise:
+   **what makes Berlin instances short when 25 pts/m2 on labelled plots does not?** Candidates
+   that this experiment does not separate are leaf-off foliage, species and stand structure,
+   ALS return characteristics, and the 100 m tiling/merge path (14-22 m plots never exercise
+   it). `region_step_factor=0.5` is a 3.4x per-sample speed-up costing another 0.05 F1 on
+   thinned data, so keep 0.25 for low-density clouds.
 
 ## Reproduction
 
+Every step is a tracked script; nothing depends on a file written ad hoc during the session.
+
 ```bash
 # on carrot, /raid/cwinkelmann/ForestFormer3D
-for pair in "uniform u" "canopy c"; do set -- $pair
-  docker run --rm --entrypoint python -e PYTHONPATH=/workspace -w /workspace \
-    -v $PWD:/workspace forestformer3d:cu118 benchmark/thin_plots.py \
-      --src data/ForAINetV2/test_data --dst data/ForAINetV2/test_data_thin25$2 \
-      --density 25 --mode $1 --seed 0 \
-      --list data/ForAINetV2/meta_data/test_list.txt \
-      --out-list work_dirs/logs/thin/$1/scan_list.txt
-done
-bash work_dirs/logs/thin/run_mode.sh uniform u 3          # preprocess + test.py + final_eval
-bash work_dirs/logs/thin/run_mode.sh canopy  c 2
-bash work_dirs/logs/thin/run_mode.sh canopy c 2 -step model.test_cfg.region_step_factor=0.5
+bash benchmark/thin_make_sets.sh                       # both thinned sets + scan lists
+FF3D_GPU=3 bash benchmark/thin_eval.sh uniform u       # preprocess + test.py + final_eval
+FF3D_GPU=2 bash benchmark/thin_eval.sh canopy  c
+FF3D_GPU=2 bash benchmark/thin_eval.sh canopy c -step model.test_cfg.region_step_factor=0.5
 docker run --rm --entrypoint python -e PYTHONPATH=/workspace -w /workspace \
   -v $PWD:/workspace forestformer3d:cu118 benchmark/instance_diagnostics.py \
     --run full=work_dirs/bench-release-fixed \
     --run thin-uniform=work_dirs/logs/thin/uniform/out \
-    --run thin-canopy=work_dirs/logs/thin/canopy/out --per-plot
+    --run thin-canopy=work_dirs/logs/thin/canopy/out \
+    --run canopy-step0.5=work_dirs/logs/thin/canopy-step/out \
+    --per-plot --json work_dirs/logs/thin/diag_all.json
 ```
+
+`FF3D_DRY_RUN=1` prints the docker commands of either shell script without running them.
+`FF3D_THIN_DENSITY` / `FF3D_THIN_SEED` change the density and seed (both scripts must be
+given the same value).
 
 Raw outputs kept on carrot (not committed): `data/ForAINetV2/test_data_thin25u`,
 `data/ForAINetV2/test_data_thin25c` (9.2 MB each) and `work_dirs/logs/thin/` (45 MB:
-per-mode logs, scan lists, info pkls, result PLYs, `diag_*.json`, and the two driver
-scripts `run_thin.sh` / `run_mode.sh` written for this session).
+per-mode logs, scan lists, info pkls, result PLYs, `diag_all.json`).
 
 ## Caveats
 
 * Single run per condition, single seed. Full-plot inference is not reproducible run to run
   (`docs/benchmarks/2026-09-23-inference-profile.md`): two unseeded runs of the same code
   disagree on ~5.7 % of point assignments. The differences reported here (0.30 and 0.57 F1)
-  are far outside that noise floor; the 0.05 F1 cost of `region_step_factor=0.5` is closer
-  to it and should be repeated before being treated as settled.
+  are far outside that noise floor; the 0.05 F1 cost of `region_step_factor=0.5` and the
+  2.8 % vs 7.3 % `split%det` gap on uniform thinning are closer to it and should be
+  repeated before being treated as settled.
 * One density (25 pts/m2) only. The shape of the degradation curve between 25 and
   ~700 pts/m2 is unmeasured, so this says nothing about where the model stops working.
 * The canopy mode is an approximation of an airborne view, not a sensor simulation (see
   Method); real ALS retains more under-canopy returns than it does, so the canopy row is
-  probably a pessimistic bound rather than a prediction of ALS performance.
-* GT trees that lose all their points in canopy mode are dropped from the reference, which
-  flatters the canopy rows.
+  probably a pessimistic bound rather than a prediction of ALS performance. Below about
+  4 pts/m2 it degenerates into a random one-point-per-cell sample and stops being canopy
+  biased at all (the script warns).
+* GT trees that lose all their points in thinning are dropped from the reference (2 under
+  uniform, ~200 under canopy), which flatters the thinned rows — especially canopy.
+* The Berlin comparison is against a CHM local-maxima baseline, not ground truth; "Berlin
+  instances are short" is a statement about the model vs that baseline
+  (`docs/benchmarks/2026-09-22-tegel-als.md`,
+  `docs/benchmarks/2026-09-23-berlin-visual-report.md`), and the two experiments differ in
+  tile size (1 km tiles split to 100 m vs 14-22 m plots) as well as in domain.
+* The fragment / merge thresholds (20 % of a prediction's own points; 20 % of a GT tree)
+  and the 0.5 IoU match threshold are conventions, not standards; the *relative* movement
+  between conditions is the result, not the absolute levels.
