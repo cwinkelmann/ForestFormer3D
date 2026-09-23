@@ -8,7 +8,8 @@ pytestmark = pytest.mark.skipif(torch_missing, reason='torch not installed')
 
 if not torch_missing:
     import torch
-    from oneformer3d.tiling import (SemanticVotes, generate_cylindrical_regions,
+    from oneformer3d.tiling import (SemanticVotes, degenerate_region_reason,
+                                    generate_cylindrical_regions,
                                     merge_instances_by_score, relabel_contiguous,
                                     sample_region)
 
@@ -126,3 +127,78 @@ def test_semantic_votes_rejects_out_of_range_labels():
 def test_relabel_contiguous():
     out = relabel_contiguous(torch.tensor([-1, 7, 3, 7, -1, 3]))
     assert out.tolist() == [-1, 1, 0, 1, -1, 0]
+
+
+# --- degenerate_region_reason ------------------------------------------------
+# The guard that decides which cylinder regions of a production tile reach the
+# sparse backbone at all. See docs/known-issues.md ("Degenerate cylinder regions").
+
+VOXEL = 0.2
+
+
+def _blob(n, seed=0, scale=(4.0, 4.0, 10.0)):
+    """A normal, three-dimensional region: n points filling a box."""
+    g = torch.Generator().manual_seed(seed)
+    return torch.rand((n, 3), generator=g) * torch.tensor(scale)
+
+
+def test_too_few_points_is_degenerate():
+    reason = degenerate_region_reason(_blob(10), VOXEL, min_points=64)
+    assert reason is not None
+    assert 'only 10 points' in reason and 'min_region_points=64' in reason
+
+
+def test_min_points_threshold_is_inclusive():
+    """`min_points` points are enough; one fewer is not."""
+    assert degenerate_region_reason(_blob(64), VOXEL, min_points=64) is None
+    assert degenerate_region_reason(_blob(63), VOXEL, min_points=64) is not None
+
+
+def test_a_single_repeated_point_is_degenerate():
+    points = torch.zeros((100, 3)) + torch.tensor([3.0, -7.0, 1.0])
+    reason = degenerate_region_reason(points, VOXEL, min_points=64)
+    assert reason is not None
+    assert 'voxel span [1, 1, 1]' in reason
+
+
+def test_a_vertical_line_is_degenerate():
+    z = torch.linspace(0.0, 30.0, 100)
+    points = torch.stack([torch.full_like(z, 2.0), torch.full_like(z, 5.0), z], dim=1)
+    reason = degenerate_region_reason(points, VOXEL, min_points=64)
+    assert reason is not None
+    assert 'a point or a line' in reason
+
+
+def test_a_horizontal_line_is_degenerate():
+    x = torch.linspace(0.0, 30.0, 100)
+    points = torch.stack([x, torch.full_like(x, 5.0), torch.full_like(x, 5.0)], dim=1)
+    assert degenerate_region_reason(points, VOXEL, min_points=64) is not None
+
+
+def test_a_flat_plane_is_usable():
+    """`min_spatial_shape` pads the thin axis, so a ground-only region is fine."""
+    g = torch.Generator().manual_seed(1)
+    points = torch.rand((500, 3), generator=g) * torch.tensor([20.0, 20.0, 0.0])
+    assert degenerate_region_reason(points, VOXEL, min_points=64) is None
+
+
+def test_a_normal_blob_is_usable():
+    assert degenerate_region_reason(_blob(5000), VOXEL, min_points=64) is None
+
+
+def test_span_follows_the_backbone_quantization():
+    """Two points 0.02 m apart across a voxel boundary occupy two voxels.
+
+    The span must be `floor(max/v) - floor(min/v) + 1`, not `floor(extent/v) + 1`,
+    which would call this column one voxel thick and flag the region as a line.
+    """
+    x = torch.tensor([0.19, 0.21]).repeat(50)
+    y = torch.tensor([0.19, 0.21]).repeat(50)
+    z = torch.linspace(0.0, 10.0, 100)
+    points = torch.stack([x, y, z], dim=1)
+    assert degenerate_region_reason(points, VOXEL, min_points=64) is None
+
+
+def test_extra_feature_columns_are_ignored():
+    points = torch.cat([_blob(200), torch.rand((200, 2))], dim=1)
+    assert degenerate_region_reason(points, VOXEL, min_points=64) is None

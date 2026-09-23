@@ -2168,24 +2168,30 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         votes = SemanticVotes(n_total, num_cls)
         mask_indices = []        # global point indices of every kept tile mask (CPU)
         mask_scores = []         # its score
-        n_used = 0               # regions that actually reached the backbone
-        n_skipped = 0            # regions dropped as degenerate (pre-filter or spconv)
+        # Every region ends up in exactly one of these three, so that the summary
+        # below reconciles: n_empty + n_prefiltered + n_rejected + n_used == len(regions).
+        n_empty = 0              # no point inside the cylinder at all
+        n_prefiltered = 0        # degenerate_region_reason said no
+        n_rejected = 0           # spconv raised ValueError on it
+        n_used = 0               # regions that were actually segmented
+        log_cap = 3              # spell out at most this many of each kind
 
         for region_idx, (cx, cy) in enumerate(regions.tolist()):
             region_mask = ((points[:, 0] - cx) ** 2 + (points[:, 1] - cy) ** 2) <= self.radius ** 2
             pc1_indices = torch.where(region_mask)[0]
             if pc1_indices.numel() == 0:
+                n_empty += 1
                 continue
             pc1 = points[pc1_indices]
             pc2, pc2_indices = self.grid_sample(pc1, pc1_indices, grid_size)
             pc3, pc3_indices = sample_region(pc2, pc2_indices, max_points)
 
-            reason = degenerate_region_reason(pc3, grid_size, min_region_points)
+            reason = degenerate_region_reason(pc3, self.voxel_size, min_region_points)
             if reason is not None:
-                n_skipped += 1
+                n_prefiltered += 1
                 # An empty tile can hold hundreds of these; the summary below
                 # reports the total, so only the first few are spelled out.
-                if n_skipped <= 3:
+                if n_prefiltered <= log_cap:
                     print_log(
                         f'{scan_name}: skipping degenerate region {region_idx} '
                         f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
@@ -2194,6 +2200,7 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 del pc1, pc2, pc3
                 continue
 
+            x = None
             try:
                 coordinates, features, inverse_mapping, spatial_shape = self.collate([pc3])
                 x = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
@@ -2204,14 +2211,19 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 # convolutions. Only this region is lost -- its points simply get
                 # no vote here and fall back to whatever the overlapping regions
                 # say, or to nodata (-1) if there are none.
-                n_skipped += 1
-                print_log(
-                    f'{scan_name}: spconv rejected region {region_idx} '
-                    f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
-                    f'({pc3.shape[0]} after voxel downsampling); skipping it: '
-                    f'{str(err).strip().splitlines()[0]}',
-                    logger='current', level=logging.WARNING)
-                del pc1, pc2, pc3
+                n_rejected += 1
+                # Capped like the pre-filter: a pathological tile must not put a
+                # WARNING per region into a km-tile log.
+                if n_rejected <= log_cap:
+                    print_log(
+                        f'{scan_name}: spconv rejected region {region_idx} '
+                        f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
+                        f'({pc3.shape[0]} after voxel downsampling); skipping it: '
+                        f'{str(err).strip().splitlines()[0]}',
+                        logger='current', level=logging.WARNING)
+                # `x` may hold the region's sparse tensor: drop it before the cache
+                # call, or `empty_cache()` frees less than it looks like it does.
+                del pc1, pc2, pc3, x
                 torch.cuda.empty_cache()
                 continue
 
@@ -2252,10 +2264,12 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             del pc1, pc2, pc3, x, embed_logits, bi_semantic_logits, nn_idx
             torch.cuda.empty_cache()
 
+        n_skipped = n_prefiltered + n_rejected
         if n_skipped:
             print_log(
-                f'{scan_name}: {n_skipped} of {len(regions)} cylinder regions were '
-                f'degenerate and skipped, {n_used} were segmented',
+                f'{scan_name}: of {len(regions)} cylinder regions {n_used} were segmented, '
+                f'{n_prefiltered} were degenerate, {n_rejected} were rejected by spconv, '
+                f'{n_empty} were empty',
                 logger='current', level=logging.WARNING)
         if n_used == 0:
             # Every region was empty or degenerate (a water / bare-ground tile).

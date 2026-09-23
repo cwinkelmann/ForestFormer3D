@@ -116,5 +116,16 @@ Each is inherited from OneFormer3D or only matters once the benchmark shows it d
   (semantic `-1`, instance `-1`). A scan where *no* region survives still gets its result PLY,
   all points unlabelled, so the per-tile files stay complete for the merge.
   To spot this in a log, grep for `degenerate region`, `spconv rejected region` and the
-  per-scan summary `N of M cylinder regions were degenerate and skipped`; only the first three
-  pre-filter skips are spelled out, the summary carries the total.
+  per-scan summary `of M cylinder regions U were segmented, D were degenerate, R were rejected
+  by spconv, E were empty` (the four counts reconcile to `M`). At most three lines of each kind
+  are spelled out; the summary carries the totals. Measured margin on a healthy tile: the
+  *smallest* of the 625 regions of the r12 100 m tile holds 3760 voxels, 59x the threshold, and
+  a rerun of that tile skipped zero regions and matched the old output to within the known
+  run-to-run noise.
+  One behaviour change to know about: a skipped region casts **no semantic vote either**, so a
+  genuinely isolated cluster of fewer than 64 voxels that used to get a semantic label — and,
+  with `npoint_thr=10`, possibly a tiny instance — now comes out `semantic -1, instance -1`
+  (nodata in the LAS/GeoTIFF path). On real tiles that is confined to stray returns over water
+  and bare ground, which is the intent; if those points ever need a label, cast a ground vote
+  (`votes.add_binary(pc1_indices, torch.zeros_like(pc1_indices, dtype=torch.bool))`) in the
+  pre-filter branch instead of skipping outright.

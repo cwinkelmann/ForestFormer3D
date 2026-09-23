@@ -72,9 +72,13 @@ def degenerate_region_reason(points: torch.Tensor, voxel_size: float,
     depends on the coordinates after four roundings, so ``_predict_full_plot``
     also catches the ``ValueError`` itself.
 
+    A plane is *not* degenerate: ``min_spatial_shape`` pads the thin dimensions,
+    so only a single voxel column or row can lose all of its cells.
+
     Args:
         points: (N, >=3) region points in metres.
-        voxel_size: backbone voxel size in metres (0.2 m here).
+        voxel_size: the backbone's voxel size in metres (``model.voxel_size``,
+            0.2 m here) -- the same scale ``collate`` quantizes with.
         min_points: regions with fewer points are skipped.
 
     Returns:
@@ -83,8 +87,10 @@ def degenerate_region_reason(points: torch.Tensor, voxel_size: float,
     n = int(points.shape[0])
     if n < min_points:
         return f'only {n} points (< min_region_points={min_points})'
-    xyz = points[:, :3]
-    span = ((xyz.max(0).values - xyz.min(0).values) / voxel_size).floor() + 1
+    # Count occupied voxels the way `collate` does: floor(p / voxel_size), so two
+    # points 0.02 m apart across a voxel boundary really do span two voxels.
+    vox = (points[:, :3] / voxel_size).floor()
+    span = vox.max(0).values - vox.min(0).values + 1
     thick = [int(s) for s in span.tolist()]
     if sum(s > 1 for s in thick) < 2:
         return f'degenerate extent: voxel span {thick} (a point or a line)'
