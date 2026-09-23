@@ -64,13 +64,15 @@ def _cell_tag(cell_m: float) -> str:
     return f"{cell_m:g}m"
 
 
-def _raster_extent(header, cell_m: float) -> tuple[float, float, float, float, int, int]:
+def _raster_extent(header, cell_m: float) -> tuple[float, float, int, int]:
     """LAS header mins/maxs snapped OUTWARD to multiples of ``cell_m``.
 
-    Returns ``(x0, y1, x1, y0, rows, cols)`` where ``(x0, y1)`` is the north-west
-    corner, i.e. the origin of a north-up transform. Snapping outward (floor on the
-    minimum, ceil on the maximum) keeps the grid aligned to a global ``cell_m``
-    lattice, so masks of neighbouring tiles line up cell for cell.
+    Returns ``(x0, y1, rows, cols)`` where ``(x0, y1)`` is the north-west corner,
+    i.e. the origin of a north-up transform. Snapping outward (floor on the minimum,
+    ceil on the maximum) keeps the grid aligned to a global ``cell_m`` lattice, so
+    masks of neighbouring tiles line up cell for cell. A tile whose extent is an
+    exact multiple of ``cell_m`` in one axis snaps to itself, and a degenerate
+    (zero-extent) axis still gets one cell.
     """
     x0 = float(np.floor(header.mins[0] / cell_m) * cell_m)
     y0 = float(np.floor(header.mins[1] / cell_m) * cell_m)
@@ -78,9 +80,7 @@ def _raster_extent(header, cell_m: float) -> tuple[float, float, float, float, i
     y1 = float(np.ceil(header.maxs[1] / cell_m) * cell_m)
     cols = max(int(round((x1 - x0) / cell_m)), 1)
     rows = max(int(round((y1 - y0) / cell_m)), 1)
-    # A tile whose extent is an exact multiple of cell_m in one axis snaps to itself;
-    # keep x1/y1 consistent with the (possibly bumped to 1) cell counts.
-    return x0, y1, x0 + cols * cell_m, y1 - rows * cell_m, rows, cols
+    return x0, y1, rows, cols
 
 
 def _cell_index(x, y, x0: float, y1: float, cell_m: float, rows: int, cols: int):
@@ -163,8 +163,13 @@ def _crowns(x, y, z, tree_id, cell_m: float, crs) -> gpd.GeoDataFrame:
     tid, tx, ty, tz = tree_id[keep], x[keep], y[keep], z[keep]
     order = np.argsort(tid, kind="stable")
     tid, tx, ty, tz = tid[order], tx[order], ty[order], tz[order]
-    starts = np.flatnonzero(np.append(True, np.diff(tid) != 0))
-    ends = np.append(starts[1:], tid.size) if starts.size else starts
+    # np.append(True, ...) on an EMPTY tid would yield [0] -- one bogus run over an
+    # empty slice, whose centroid is NaN and whose box() then raises in GEOS. A LAS
+    # with no tree at all is legitimate (open field, water, a --score-th that kept
+    # nothing), so the no-run case is spelled out rather than inferred.
+    starts = (np.flatnonzero(np.append(True, np.diff(tid) != 0))
+              if tid.size else np.empty(0, dtype=np.int64))
+    ends = np.append(starts[1:], tid.size)
 
     rows: list[dict] = []
     geoms = []
@@ -220,18 +225,33 @@ def las_to_masks(las_path, out_dir, cell_m: float = 0.5, prefix: str | None = No
     tag = _cell_tag(cell_m)
 
     las = laspy.read(str(las_path))
+    # Raster and vector outputs must carry the SAME CRS, and a GeoTIFF is labelled by
+    # EPSG code here, so a LAS whose CRS has no EPSG (compound or WKT-only) is refused
+    # rather than written out as EPSG:25833 next to a GeoPackage in the real CRS.
     las_crs = las.header.parse_crs()
-    epsg = las_crs.to_epsg() if las_crs is not None else None
-    raster_crs = CRS.from_epsg(epsg or DEFAULT_EPSG)
+    if las_crs is None:
+        epsg = DEFAULT_EPSG
+    else:
+        epsg = las_crs.to_epsg()
+        if epsg is None:
+            raise ValueError(
+                f"{las_path}: its CRS ({las_crs.name}) has no EPSG code, so the mask "
+                "GeoTIFFs and the crown GeoPackage could not be given the same CRS; "
+                "reproject the LAS to a plain projected CRS first"
+            )
+    raster_crs = CRS.from_epsg(epsg)
     vector_crs = las_crs if las_crs is not None else f"EPSG:{DEFAULT_EPSG}"
 
-    x0, y1, _, _, rows, cols = _raster_extent(las.header, cell_m)
+    x0, y1, rows, cols = _raster_extent(las.header, cell_m)
+    # np.asarray on x/y/z copies (the scaled views compute float64 values), but on an
+    # extra dim that already has the requested dtype it returns a VIEW into the point
+    # record, which would keep that ~1 GB buffer alive past the `del`. np.array copies.
     x = np.asarray(las.x, dtype=np.float64)
     y = np.asarray(las.y, dtype=np.float64)
     z = np.asarray(las.z, dtype=np.float64)
-    tree_id = np.asarray(las.treeID, dtype=np.int32)
-    semantic = np.asarray(las.semantic, dtype=np.uint8)
-    del las  # the point record is the biggest object in the room; the arrays are copies
+    tree_id = np.array(las.treeID, dtype=np.int32)
+    semantic = np.array(las.semantic, dtype=np.uint8)
+    del las  # the point record is the biggest object in the room and is done with
 
     flat = _cell_index(x, y, x0, y1, cell_m, rows, cols)
     n_cells = rows * cols

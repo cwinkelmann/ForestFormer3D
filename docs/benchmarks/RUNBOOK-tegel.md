@@ -284,8 +284,8 @@ Notes:
 - Writes `<T>_instance_50cm.tif`, `<T>_semantic_50cm.tif` and `<T>_crowns.gpkg`
   next to the LAS. `--cell` changes the cell size (`0.5` -> `50cm` in the name,
   `1.0` -> `1m`), `--prefix` the file-name stem.
-- Measured 2026-09-23 on the Mac (M-series, `.venv-cpu`): 12-15 s and ~2.6 GB peak
-  RSS per 23-25 M point km tile, giving 2000 x 2000 cells at 0.5 m; the two
+- Measured 2026-09-23 on the Mac (M-series, `.venv-cpu`): 11-13 s and 1.9-2.0 GB
+  peak RSS per 23-25 M point km tile, giving 2000 x 2000 cells at 0.5 m; the two
   GeoTIFFs are ~3 MB together (LZW, tiled 256 x 256) and the GeoPackage 12-14 MB.
 - The crown count equals the `<T>_trees.gpkg` row count and the ids are the same
   ids (37386 / 37058 / 31385 for the three tiles), so crowns join to the tree

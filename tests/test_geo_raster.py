@@ -192,6 +192,84 @@ def test_prefix_and_cell_override(result_las, tmp_path):
         assert src.read(1)[3, 2] == 0  # tree 0's 0.5 m cell (7, 4) -> 1 m cell (3, 2)
 
 
+def test_tree_free_las(tmp_path):
+    """A LAS with no treeID >= 0 (open field, water, a --score-th that kept nothing)."""
+    las = write_result_las(
+        tmp_path / "bare.las",
+        np.array([X0 + 0.1, X0 + 3.1]),
+        np.array([Y0 + 0.1, Y0 + 3.1]),
+        np.array([0.0, 1.0]),
+        np.array([-1, -1], np.int32),
+        np.array([GROUND, WOOD], np.uint8),
+    )
+    info = las_to_masks(las, tmp_path / "out", cell_m=CELL)
+    assert info["n_trees"] == 0
+
+    with rasterio.open(info["instance"]) as src:
+        instance = src.read(1)
+    assert (instance == -1).all()
+
+    with rasterio.open(info["semantic"]) as src:
+        semantic = src.read(1)
+    assert set(np.unique(semantic).tolist()) == {GROUND, WOOD, NODATA}
+
+    crowns = gpd.read_file(info["crowns"], layer="crowns", engine="pyogrio")
+    assert len(crowns) == 0
+    assert list(crowns.columns) == [
+        "tree_id", "n_points", "top_z", "crown_area_m2", "hull_is_point", "geometry"
+    ]
+
+
+def test_collinear_tree_falls_back_to_a_square(tmp_path):
+    """3+ distinct but collinear points: the convex hull is a LineString, not a Polygon."""
+    n = 4
+    las = write_result_las(
+        tmp_path / "line.las",
+        np.full(n, X0 + 2.0) + np.arange(n) * 0.0,  # one x ...
+        Y0 + 2.0 + np.arange(n) * 0.5,              # ... walking north: a vertical line
+        np.arange(n, dtype=float),
+        np.zeros(n, np.int32),
+        np.full(n, LEAF, np.uint8),
+    )
+    crowns = gpd.read_file(
+        las_to_masks(las, tmp_path / "out", cell_m=CELL)["crowns"],
+        layer="crowns", engine="pyogrio",
+    )
+    assert len(crowns) == 1
+    row = crowns.iloc[0]
+    assert bool(row["hull_is_point"])
+    assert row["geometry"].geom_type == "Polygon"
+    assert row["crown_area_m2"] == pytest.approx(CELL * CELL)
+    assert row["n_points"] == n
+
+
+def test_points_on_the_max_edge_land_in_the_last_cell(result_las, tmp_path):
+    """The clamp in _cell_index: a point at exactly max x / max y is still in range.
+
+    Without it, ``(x - x0) / cell`` at the snapped maximum indexes one past the last
+    column. Every Berlin tile's southern and eastern edges hit this.
+    """
+    corners = [(X0, Y0), (X1, Y0), (X0, Y1), (X1, Y1)]
+    n = len(corners)
+    las = write_result_las(
+        tmp_path / "corners.las",
+        np.array([c[0] for c in corners]),
+        np.array([c[1] for c in corners]),
+        np.arange(n, dtype=float),
+        np.arange(n, dtype=np.int32),
+        np.full(n, LEAF, np.uint8),
+    )
+    info = las_to_masks(las, tmp_path / "out", cell_m=CELL)
+    assert info["shape"] == (ROWS, COLS)
+    with rasterio.open(info["instance"]) as src:
+        data = src.read(1)
+    assert data[ROWS - 1, 0] == 0  # (min x, min y) -> SW corner cell
+    assert data[ROWS - 1, COLS - 1] == 1  # (max x, min y), both clamped
+    assert data[0, 0] == 2  # (min x, max y)
+    assert data[0, COLS - 1] == 3  # (max x, max y), both clamped
+    assert (data >= 0).sum() == 4
+
+
 def test_cli_masks(result_las, tmp_path, capsys):
     out = tmp_path / "cli"
     assert main(["masks", "--las", str(result_las), "--out", str(out), "--cell", "0.5"]) == 0
