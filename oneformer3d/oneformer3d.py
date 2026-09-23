@@ -11,6 +11,7 @@ from mmengine.logging import MessageHub
 from .tiling import (SemanticVotes, generate_cylindrical_regions,
                      merge_instances_by_score, relabel_contiguous, sample_region)
 from .mask_matrix_nms import mask_matrix_nms
+from .ply_io import result_ply_element
 import open3d as o3d
 import os
 import numpy as np
@@ -1587,23 +1588,19 @@ class ForAINetV2OneFormer3D(Base3DDetector):
 
     @staticmethod
     def save_ply_withscore(points, semantic_pred, instance_pred, scores, filename, semantic_gt=None, instance_gt=None):
-        from plyfile import PlyData, PlyElement
+        """Write the per-point result cloud as a binary little-endian PLY.
+
+        Same field names and dtypes as before (see `oneformer3d/ply_io.py`); only
+        the encoding changed from ASCII to binary, which removes a `numpy.savetxt`
+        over every point plus a per-row Python tuple comprehension (5-10 s per
+        100 m tile, see docs/benchmarks/2026-09-23-inference-profile.md).
+        """
         output_dir = os.path.dirname(filename)
         os.makedirs(output_dir, exist_ok=True)
-        
-        dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
-                ('semantic_pred', 'i4'), ('instance_pred', 'i4'), ('score', 'f4')]
-        
-        if semantic_gt is not None and instance_gt is not None:
-            dtype += [('semantic_gt', 'i4'), ('instance_gt', 'i4')]
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
-        else:
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
 
-        el = PlyElement.describe(vertex, 'vertex')
-        PlyData([el], text=True).write(filename)
+        el = result_ply_element(points, semantic_pred, instance_pred, scores,
+                                semantic_gt, instance_gt)
+        PlyData([el], text=False, byte_order='<').write(filename)
 
     @staticmethod
     def finalize_semantic_labels(all_pre_sem):
@@ -2911,23 +2908,19 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
     
     @staticmethod
     def save_ply_withscore(points, semantic_pred, instance_pred, scores, filename, semantic_gt=None, instance_gt=None):
-        from plyfile import PlyData, PlyElement
+        """Write the per-point result cloud as a binary little-endian PLY.
+
+        Same field names and dtypes as before (see `oneformer3d/ply_io.py`); only
+        the encoding changed from ASCII to binary, which removes a `numpy.savetxt`
+        over every point plus a per-row Python tuple comprehension (5-10 s per
+        100 m tile, see docs/benchmarks/2026-09-23-inference-profile.md).
+        """
         output_dir = os.path.dirname(filename)
         os.makedirs(output_dir, exist_ok=True)
-        
-        dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
-                ('semantic_pred', 'i4'), ('instance_pred', 'i4'), ('score', 'f4')]
-        
-        if semantic_gt is not None and instance_gt is not None:
-            dtype += [('semantic_gt', 'i4'), ('instance_gt', 'i4')]
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
-        else:
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
 
-        el = PlyElement.describe(vertex, 'vertex')
-        PlyData([el], text=True).write(filename)
+        el = result_ply_element(points, semantic_pred, instance_pred, scores,
+                                semantic_gt, instance_gt)
+        PlyData([el], text=False, byte_order='<').write(filename)
 
     @staticmethod
     def save_bluepoints(points, semantic_pred, instance_pred, scores, filename, semantic_gt=None, instance_gt=None):

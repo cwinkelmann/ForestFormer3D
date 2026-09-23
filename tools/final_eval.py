@@ -104,7 +104,7 @@ if __name__ == '__main__':
         all_mean_cov = [[] for _ in range(NUM_CLASSES)]
         all_mean_weighted_cov = [[] for _ in range(NUM_CLASSES)]
 
-        data = PlyData(text=True).read(ply_file)
+        data = PlyData.read(ply_file)
 
         ##################wythan wood#################################
         #ins_gt_i_ori = data.elements[0].data["instance_gt"]
