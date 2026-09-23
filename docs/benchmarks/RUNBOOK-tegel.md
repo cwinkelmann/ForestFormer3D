@@ -262,3 +262,37 @@ files that matter and they are uniquely named either way.
 
 Then fill in `docs/benchmarks/2026-09-22-tegel-berlin-2021.md` from the three
 `<T>_report.md` blocks.
+
+## 9. Raster masks and crown polygons (optional, no GPU)
+
+`ff3d_geo masks` turns a result LAS into GIS-ready rasters: an int32 instance mask
+(the `treeID` of the highest point per cell, `-1` = no tree), a uint8 semantic mask
+(majority class per cell, `255` = no voted point) and a crown-polygon GeoPackage
+(one convex hull per tree). Run it on the merged `<T>.las` — on the Mac after
+section 5's rsync, or on carrot right after `merge`:
+
+```bash
+for T in 3dm_33_380_5828_1_be 3dm_33_381_5828_1_be 3dm_33_381_5829_1_be; do
+  .venv-cpu/bin/python -m ff3d_geo masks \
+      --las ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021/$T/$T.las \
+      --out ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021/$T
+done
+```
+
+Notes:
+
+- Writes `<T>_instance_50cm.tif`, `<T>_semantic_50cm.tif` and `<T>_crowns.gpkg`
+  next to the LAS. `--cell` changes the cell size (`0.5` -> `50cm` in the name,
+  `1.0` -> `1m`), `--prefix` the file-name stem.
+- Measured 2026-09-23 on the Mac (M-series, `.venv-cpu`): 12-15 s and ~2.6 GB peak
+  RSS per 23-25 M point km tile, giving 2000 x 2000 cells at 0.5 m; the two
+  GeoTIFFs are ~3 MB together (LZW, tiled 256 x 256) and the GeoPackage 12-14 MB.
+- The crown count equals the `<T>_trees.gpkg` row count and the ids are the same
+  ids (37386 / 37058 / 31385 for the three tiles), so crowns join to the tree
+  table on `tree_id`.
+- Not every tree reaches the instance raster: about 4 % (1200-1600 per tile) are
+  understorey trees whose every cell is topped by a taller neighbour. The raster's
+  id set is therefore a strict subset of the crowns' — use the crowns (or the tree
+  table) when completeness matters.
+- Load all three into QGIS as in section 6: the masks are EPSG:25833, north-up and
+  snapped to a global 0.5 m lattice, so neighbouring tiles line up cell for cell.

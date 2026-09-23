@@ -99,3 +99,44 @@ def write_grid_las(path, xyz, classification):
     las.classification = classification
     las.write(str(path))
     return path
+
+
+def write_result_las(path, x, y, z, tree_id, semantic, score=None, offsets=None):
+    """Write a *result* LAS exactly as ``ff3d_geo.convert.results_to_las`` does.
+
+    LAS 1.4 / point format 6 in EPSG:25833 with the three extra dims ``treeID``
+    (int32, -1 = no tree), ``semantic`` (uint8, 0 ground / 1 wood / 2 leaf / 255
+    nodata) and ``score`` (float32) -- descriptions included verbatim, because
+    laspy compares point formats dimension by dimension (description included)
+    when appending points, so a fixture without them would not catch code that
+    rebuilds the extra dims from names only.
+
+    ``score`` defaults to 0.9 where ``tree_id >= 0`` and 0.0 elsewhere; ``offsets``
+    defaults to the floor of the per-axis minimum (LAS X/Y/Z are int32, so a zero
+    offset overflows at UTM scale).
+    """
+    import laspy
+    import pyproj
+
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    z = np.asarray(z, dtype=np.float64)
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001])
+    header.offsets = (np.floor([x.min(), y.min(), z.min()]) if offsets is None
+                      else np.asarray(offsets, dtype=np.float64))
+    header.add_extra_dim(laspy.ExtraBytesParams(
+        name="treeID", type=np.int32, description="ForestFormer3D instance, -1 none"))
+    header.add_extra_dim(laspy.ExtraBytesParams(
+        name="semantic", type=np.uint8, description="0 ground 1 wood 2 leaf 255 n/a"))
+    header.add_extra_dim(laspy.ExtraBytesParams(
+        name="score", type=np.float32, description="instance score"))
+    header.add_crs(pyproj.CRS.from_epsg(25833))
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = x, y, z
+    las.treeID = np.asarray(tree_id, dtype=np.int32)
+    las.semantic = np.asarray(semantic, dtype=np.uint8)
+    las.score = (np.where(np.asarray(tree_id) >= 0, 0.9, 0.0).astype(np.float32)
+                 if score is None else np.asarray(score, dtype=np.float32))
+    las.write(str(path))
+    return path

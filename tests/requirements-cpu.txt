@@ -7,3 +7,4 @@ shapely>=2.0
 pyproj>=3.6
 geopandas>=1.0
 pyogrio>=0.7
+rasterio>=1.3

@@ -10,31 +10,21 @@ pytest.importorskip("pyogrio")
 from ff3d_geo.merge import merge_las, merge_trees
 from ff3d_geo.trees import trees_to_gpkg
 
+from geo_fixtures import write_result_las
+
 
 def _result_las(path, origin, tree_ids, semantic, n=200):
     rng = np.random.default_rng(int(origin[0]) % 997)
-    header = laspy.LasHeader(point_format=6, version="1.4")
-    header.scales = np.array([0.001] * 3)
-    header.offsets = np.array([origin[0], origin[1], 0.0])
-    # Descriptions verbatim from ff3d_geo.convert.results_to_las: laspy compares point
-    # formats dimension by dimension (description included) when writing, so a fixture
-    # without them would not catch a merge that rebuilds the extra dims from names only.
-    header.add_extra_dim(laspy.ExtraBytesParams(
-        name="treeID", type=np.int32, description="ForestFormer3D instance, -1 none"))
-    header.add_extra_dim(laspy.ExtraBytesParams(
-        name="semantic", type=np.uint8, description="0 ground 1 wood 2 leaf 255 n/a"))
-    header.add_extra_dim(laspy.ExtraBytesParams(
-        name="score", type=np.float32, description="instance score"))
-    header.add_crs(__import__("pyproj").CRS.from_epsg(25833))
-    las = laspy.LasData(header)
-    las.x = origin[0] + rng.uniform(0, 100, n)
-    las.y = origin[1] + rng.uniform(0, 100, n)
-    las.z = rng.uniform(0, 30, n)
-    las.treeID = np.resize(np.asarray(tree_ids, np.int32), n)
-    las.semantic = np.resize(np.asarray(semantic, np.uint8), n)
-    las.score = np.full(n, 0.5, np.float32)
-    las.write(path)
-    return path
+    return write_result_las(
+        path,
+        origin[0] + rng.uniform(0, 100, n),
+        origin[1] + rng.uniform(0, 100, n),
+        rng.uniform(0, 30, n),
+        np.resize(np.asarray(tree_ids, np.int32), n),
+        np.resize(np.asarray(semantic, np.uint8), n),
+        score=np.full(n, 0.5, np.float32),
+        offsets=np.array([origin[0], origin[1], 0.0]),
+    )
 
 
 def test_merge_las_renumbers_tree_ids_across_subtiles(tmp_path):

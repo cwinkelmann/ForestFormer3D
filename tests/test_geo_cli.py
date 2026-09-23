@@ -435,7 +435,7 @@ def test_module_entry_point_shows_help():
     proc = subprocess.run([sys.executable, "-m", "ff3d_geo", "--help"],
                           capture_output=True, text=True, cwd=str(REPO_ROOT))
     assert proc.returncode == 0
-    assert "{run,convert,georef,report,split,merge}" in proc.stdout
+    assert "{run,convert,georef,report,split,merge,masks}" in proc.stdout
 
 
 # --- batched run: several --las sub-tiles in one preprocess + one inference ---------

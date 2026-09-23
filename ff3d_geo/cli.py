@@ -1,10 +1,12 @@
-"""``python -m ff3d_geo``: run / convert / georef / report / split / merge.
+"""``python -m ff3d_geo``: run / convert / georef / report / split / merge / masks.
 
 ``split`` and ``merge`` bracket a batched ``run`` for tiles larger than the ~100 m
 the model is trained on: ``split`` cuts a 1 km ALS tile into local-coordinate
 sub-tiles, ``run --las <sub-tiles>`` infers them in one preprocess + one inference
 pass, and ``merge`` stitches the per-sub-tile result LAS files and tree
 GeoPackages back into one km tile with globally unique tree ids.
+``masks`` is the optional last step: it rasterises a (merged) result LAS into
+instance/semantic GeoTIFFs plus a crown-polygon GeoPackage for GIS work.
 
 Execution model (see the Phase 3 plan, ruling G7): this CLI runs on the HOST, in a
 plain CPU venv with laspy/plyfile/geopandas but no torch. The two GPU/pipeline steps
@@ -526,6 +528,16 @@ def build_parser() -> argparse.ArgumentParser:
     mrg.add_argument("--runtime-s", type=float, default=None,
                      help="inference wall time for the whole km tile, for the merged "
                           "report's 'Inference runtime' (default: n/a)")
+
+    msk = sub.add_parser("masks", help="result LAS -> instance/semantic GeoTIFFs + crown polygons")
+    msk.add_argument("--las", required=True, type=Path, help="a georeferenced result LAS")
+    msk.add_argument("--out", required=True, type=Path,
+                     help="directory for the two GeoTIFFs and the crown GeoPackage")
+    msk.add_argument("--cell", type=float, default=0.5, metavar="M",
+                     help="raster cell size in metres (default: %(default)s)")
+    msk.add_argument("--prefix", default=None,
+                     help="output file-name prefix (default: the LAS stem)")
+
     return parser
 
 
@@ -625,6 +637,18 @@ def main(argv: list[str] | None = None) -> int:
             rep = build_report(args.out_las, args.out_gpkg, runtime_s=args.runtime_s)
             write_report(rep, args.report_json, md)
             print(report_markdown(rep))
+        return 0
+
+    if args.command == "masks":
+        # Lazy like the other subcommands: rasterio is only needed here, so `--help`
+        # on any other subcommand does not pay for importing it.
+        from ff3d_geo.raster import las_to_masks
+
+        info = las_to_masks(args.las, args.out, cell_m=args.cell, prefix=args.prefix)
+        rows, cols = info["shape"]
+        print(f"wrote {info['instance']} ({rows} x {cols} cells of {args.cell} m)")
+        print(f"wrote {info['semantic']} ({rows} x {cols} cells of {args.cell} m)")
+        print(f"wrote {info['crowns']} ({info['n_trees']} trees)")
         return 0
 
     raise AssertionError(args.command)  # pragma: no cover - argparse enforces the choices

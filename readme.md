@@ -110,6 +110,12 @@ the ~100 m the model is trained on are handled by bracketing that batched run wi
 `python -m ff3d_geo split` (km tile -> local-coordinate 100 m sub-tiles) and
 `python -m ff3d_geo merge` (sub-tile results -> one km tile with globally unique tree ids).
 
+`python -m ff3d_geo masks --las <result.las> --out <dir> [--cell 0.5]` is an optional
+last step for GIS work: it writes an int32 instance-mask GeoTIFF (the `treeID` of the
+highest point in each cell, nodata -1), a uint8 semantic-mask GeoTIFF (majority class
+per cell, 255 where no point voted) and a crown-polygon GeoPackage (one convex hull per
+tree, ids matching the tree GeoPackage). A 25 M point km tile takes about 15 seconds.
+
 See `docs/benchmarks/RUNBOOK-tegel.md` for a full worked example (copying tiles to a GPU
 host over SSH, running single tiles, and the split/batch/merge loop for km tiles).
 
