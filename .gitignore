@@ -19,3 +19,4 @@ data/ForAINetV2/forainetv2_instance_data/
 data/ForAINetV2/*.pkl
 downloads/
 inputs/
+data/ForAINetV2/test_data_thin*/
