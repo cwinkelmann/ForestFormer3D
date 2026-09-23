@@ -2529,15 +2529,34 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         # Set scores to 0 where the majority of points are stuff_cls
         scores[mask_scores > (num_points_in_mask / 2)] = 0
 
-        # Filter instances based on z values
-        for i in range(mask_pred.size(0)):
-            mask = mask_pred[i]
-            if mask.sum().item() == 0:
-                scores[i] = 0
-                continue
-            z_values = coordinates[mask, 2]  # Get z values where mask is True
-            if z_values.numel() > 0 and z_values.min().item() > ground_z_max + 5:
-                scores[i] = 0
+        # Filter instances based on z values.
+        # Vectorised form of the former per-mask Python loop: a mask with no
+        # points, or whose lowest point sits more than 5 m above the highest
+        # ground point, scores 0. The loop issued three blocking `.item()` GPU
+        # syncs per mask (~590 per tile, 81 % of prediction time; see
+        # docs/benchmarks/2026-09-23-inference-profile.md); this does the same
+        # work in a handful of kernels with bit-identical results.
+        if mask_pred.shape[0] > 0:
+            if mask_pred.shape[1] == 0:
+                # no points at all -> every mask is empty
+                scores[:] = 0
+            else:
+                z = coordinates[:, 2]
+                inf = torch.tensor(float('inf'), dtype=z.dtype, device=z.device)
+                # `torch.where` materialises a (K, N) float block; chunk over the
+                # masks so the peak allocation stays bounded on large tiles. The
+                # result does not depend on the chunk size.
+                chunk = max(1, 8_000_000 // mask_pred.shape[1])
+                z_min = torch.empty(
+                    mask_pred.shape[0], dtype=z.dtype, device=z.device)
+                for start in range(0, mask_pred.shape[0], chunk):
+                    block = mask_pred[start:start + chunk]
+                    z_min[start:start + chunk] = torch.where(
+                        block, z.unsqueeze(0), inf).min(dim=1).values
+                # An empty mask has z_min == inf, which the height test alone
+                # would not catch when ground_z_max is inf (no ground points).
+                empty = ~mask_pred.any(dim=1)
+                scores[empty | (z_min > ground_z_max + 5)] = 0
 
         # score_thr
         score_mask = scores > score_threshold
