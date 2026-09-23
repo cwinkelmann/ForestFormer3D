@@ -1,3 +1,4 @@
+import json
 import struct
 
 import numpy as np
@@ -6,7 +7,7 @@ import pytest
 laspy = pytest.importorskip("laspy")
 
 from ff3d_geo.origin import parse_origin
-from ff3d_geo.split import split_las, subtile_origins
+from ff3d_geo.split import IDENT_DTYPE, split_las, subtile_origins
 from geo_fixtures import write_grid_las as _write_las
 
 
@@ -98,3 +99,82 @@ def test_split_prefix_never_ends_in_digits(tmp_path):
     written = split_las(src, tmp_path / "sub", size_m=100, min_points=1)
     assert written[0].name == "plot_7_E0_N0_100m.las"
     assert not written[0].stem.endswith(tuple("0123456789")) or written[0].stem.endswith("_100m")
+
+
+def _tile(tmp_path, name, x0, n, seed):
+    rng = np.random.default_rng(seed)
+    xyz = np.column_stack([
+        x0 + rng.uniform(0, 200, n), 5829000 + rng.uniform(0, 100, n), rng.uniform(30, 60, n)])
+    cls = rng.choice([2, 3, 4, 5], n).astype(np.uint8)
+    return _write_las(tmp_path / name, xyz, cls), xyz
+
+
+def test_split_with_halo_adds_neighbour_strip_and_writes_ident(tmp_path):
+    src, xyz = _tile(tmp_path, "3dm_33_381_5829_1_be.las", 381000, 8000, 1)
+    out = tmp_path / "sub"
+    written = split_las(src, out, size_m=100, min_points=10, buffer_m=20)
+    assert [p.name for p in written] == [
+        "3dm_33_381_5829_E381000_N5829000_100m.las", "3dm_33_381_5829_E381100_N5829000_100m.las"]
+    left = laspy.read(written[0])
+    expect_left = int((xyz[:, 0] < 381120).sum())          # core 0..100 plus 20 m of the east neighbour
+    assert len(left.points) == expect_left
+    assert left.x.min() >= 0 and 100 < left.x.max() <= 120  # nothing west of the km tile exists
+    ident = np.load(out / "3dm_33_381_5829_E381000_N5829000_100m_ident.npy")
+    assert ident.dtype == IDENT_DTYPE and len(ident) == expect_left
+    assert set(ident["tile"].tolist()) == {0}
+    np.testing.assert_allclose(np.asarray(left.x) + 381000, xyz[ident["index"], 0], atol=2e-3)
+    np.testing.assert_allclose(np.asarray(left.y) + 5829000, xyz[ident["index"], 1], atol=2e-3)
+    right = laspy.read(written[1])
+    assert -20 <= right.x.min() < 0 and right.x.max() <= 100
+    manifest = json.loads((out / "split_manifest.json").read_text())
+    assert manifest["size_m"] == 100 and manifest["buffer_m"] == 20 and manifest["prefix"] == "3dm_33_381_5829"
+    assert manifest["sources"] == [{"key": "3dm_33_381_5829", "path": str(src.resolve()), "n_points": 8000}]
+    subs = {s["stem"]: s for s in manifest["subtiles"]}
+    assert subs["3dm_33_381_5829_E381000_N5829000_100m"] == {
+        "stem": "3dm_33_381_5829_E381000_N5829000_100m", "origin": [381000, 5829000], "source": 0,
+        "n_points": expect_left, "n_core": int((xyz[:, 0] < 381100).sum())}
+
+
+def test_split_halo_takes_points_from_neighbour_km_tiles(tmp_path):
+    rng = np.random.default_rng(2)
+    n = 4000
+    main_xyz = np.column_stack([381000 + rng.uniform(0, 100, n), 5829000 + rng.uniform(0, 100, n), rng.uniform(30, 60, n)])
+    east_xyz = np.column_stack([381100 + rng.uniform(0, 100, n), 5829000 + rng.uniform(0, 100, n), rng.uniform(30, 60, n)])
+    cls = np.full(n, 5, np.uint8)
+    src = _write_las(tmp_path / "3dm_33_381_5829_1_be.las", main_xyz, cls)
+    east = _write_las(tmp_path / "3dm_33_382_5829_1_be.las", east_xyz, cls)
+    out = tmp_path / "sub"
+    written = split_las(src, out, size_m=100, min_points=10, buffer_m=20, neighbours=[east])
+    assert [p.name for p in written] == ["3dm_33_381_5829_E381000_N5829000_100m.las"]
+    las = laspy.read(written[0])
+    ident = np.load(out / "3dm_33_381_5829_E381000_N5829000_100m_ident.npy")
+    from_east = ident["tile"] == 1
+    assert 0 < from_east.sum() == int((east_xyz[:, 0] < 381120).sum())
+    assert (~from_east).sum() == n
+    np.testing.assert_allclose(np.asarray(las.x)[from_east] + 381000, east_xyz[ident["index"][from_east], 0], atol=2e-3)
+    manifest = json.loads((out / "split_manifest.json").read_text())
+    assert [s["key"] for s in manifest["sources"]] == ["3dm_33_381_5829", "3dm_33_382_5829"]
+    assert manifest["subtiles"][0]["n_core"] == n and manifest["subtiles"][0]["n_points"] == n + int(from_east.sum())
+
+
+def test_split_without_halo_is_unchanged_and_still_writes_ident(tmp_path):
+    src, xyz = _tile(tmp_path, "3dm_33_381_5829_1_be.las", 381000, 6000, 0)
+    out = tmp_path / "sub"
+    written = split_las(src, out, size_m=100, min_points=10)
+    left = laspy.read(written[0])
+    assert left.x.min() >= 0 and left.x.max() <= 100
+    ident = np.load(out / "3dm_33_381_5829_E381000_N5829000_100m_ident.npy")
+    assert len(ident) == len(left.points) and (ident["tile"] == 0).all()
+    manifest = json.loads((out / "split_manifest.json").read_text())
+    assert manifest["buffer_m"] == 0
+    assert all(s["n_core"] == s["n_points"] for s in manifest["subtiles"])
+
+
+def test_split_min_points_counts_core_points_only(tmp_path):
+    # 5 core points in the east cell, 50 in the west; the west cell's halo would push the
+    # east cell over min_points if halo points counted, but they must not.
+    xyz = np.array([[95.0, 10.0, 1.0]] * 50 + [[150.0, 10.0, 1.0]] * 5)
+    src = _write_las(tmp_path / "tile_1_be.las", xyz, np.full(len(xyz), 2, np.uint8))
+    written = split_las(src, tmp_path / "sub", size_m=100, min_points=20, buffer_m=20)
+    assert [p.name for p in written] == ["tile_E0_N0_100m.las"]
+    assert not (tmp_path / "sub" / "tile_E100_N0_100m_ident.npy").exists()

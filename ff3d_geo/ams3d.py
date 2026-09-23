@@ -511,6 +511,11 @@ def run_ams3d_pipeline(las_path, out_dir, params: Ams3dParams = Ams3dParams(),
         for p in subtiles:
             if p.parent == sub_in_dir:
                 p.unlink(missing_ok=True)
+                # split_las writes a point identity sidecar next to each sub-tile;
+                # ams3d does not use it (it crops to the core instead), so it goes
+                # with the sub-tile or sub_in_dir would never be empty enough to drop.
+                p.with_name(f"{p.stem}_ident.npy").unlink(missing_ok=True)
+        (sub_in_dir / "split_manifest.json").unlink(missing_ok=True)
         for d in (sub_in_dir, sub_out_dir):
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
