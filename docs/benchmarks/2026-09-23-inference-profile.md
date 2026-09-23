@@ -284,16 +284,29 @@ an upper bound on what an uncontended GPU will show. `mIoU` is 0.4436 in all six
 runs (the tiles are unlabeled, so this is the metric's "everything is class 0"
 degenerate value, not a quality signal).
 
-### Equality: proven at the function, not at the PLY
+### Equality: established at the function, not at the PLY
 
-The vectorisation is bit-exact, and that is proven by
-`tests/gpu/test_pred_inst_sem_test_equivalence.py`, which keeps the original loop
+`tests/gpu/test_pred_inst_sem_test_equivalence.py` keeps the original loop
 (copied verbatim from `96558eb`) beside the new code and asserts `torch.equal` on
 all four returned tensors for 246 masks x 40 k points over five seeds, plus empty
 masks, masks entirely above `ground_z_max + 5`, score and z ties, `ground_z_max =
 inf`, a single mask, nothing kept, and a tile large enough to force several
-chunks. `tests/test_result_ply.py` pins the PLY field names, dtypes and values
-against the old row-wise construction and round-trips the binary file.
+chunks. Every tested input returns identical tensors.
+
+That is equality on the tested inputs, not a proof for all of them: the two forms
+share no code, so only the structure of the computation argues for the rest.
+`min` is value-defined (no tie ambiguity), the `inf` filler only ever lands on
+empty masks, and `scores` is mutated in place before the score threshold, so the
+kept set, its order, the labels, `queries_select`, the dtypes and the device
+cannot drift. The one place where the arithmetic could differ was the height
+comparison: a review found that `z_min > ground_z_max + 5` evaluates in float32
+while the loop's `z_values.min().item() > ground_z_max + 5` evaluated in float64,
+which disagree when `ground_z_max + 5` is not float32-representable, rounds *up*,
+and a mask's lowest point sits exactly on the rounded value. `z_min.double()`
+restores the loop's semantics and that input is now a test case.
+
+`tests/test_result_ply.py` pins the PLY field names, dtypes and values against the
+old row-wise construction and round-trips the binary file.
 
 **A whole-plot PLY diff cannot prove anything here, because the pipeline is not
 reproducible run to run.** `torch_cluster.fps` is called with its default
@@ -313,11 +326,28 @@ old vs new does:
 
 Old vs new is *within* the run-to-run spread of each version against itself, on
 all three fields, so the diff carries no signal about the change. `x y z` are
-identical everywhere (0 differing points out of 1,628,942). Most of the
-`instance_pred` difference is renumbering: the tiles hold 165-195 instances and a
-single flipped merge order shifts every later id. Part of the `score` difference
-is not a difference at all but the old ASCII writer's precision loss (0.7091614
-written, 0.70916146 in memory); the binary writer round-trips float32 exactly.
+identical everywhere (0 differing points out of 1,628,942). Part of the `score`
+difference is not a difference at all but the old ASCII writer's precision loss
+(0.7091614 written, 0.70916146 in memory); the binary writer round-trips float32
+exactly.
+
+Most of the raw `instance_pred` difference is renumbering, not disagreement. A
+review re-matched the ids with the Hungarian algorithm on the instance-overlap
+matrix (`-1` matched only to `-1`), pooled over the ten tiles:
+
+| pair | raw inst diff | after relabelling | unassigned flips | pairwise inst-F1@0.5 |
+|---|---:|---:|---:|---:|
+| old vs old, seed 0 | 31.70 % | **1.585 %** | 1.240 % | 0.9904 |
+| new vs new, seed 0 | 31.34 % | **1.396 %** | 1.018 % | 0.9898 |
+| old vs new, seed 0 | 31.10 % | **1.389 %** | 1.022 % | 0.9873 |
+| old vs new, unseeded | 43.50 % | **5.732 %** | 4.518 % | 0.9590 |
+
+About 95 % of the raw figure is id renumbering. Seeded old-vs-new (1.39 %) sits
+inside the same-code spread (1.40-1.59 %), and identical code with an identical
+seed still disagrees on ~1 % of points, pairwise instance F1 0.99. Unseeded runs
+differ four times as much because `fps` draws different query points; **5.7 % of
+points / 0.959 pairwise F1 is the floor any future F1 gate on unseeded full-plot
+inference must be read against.**
 
 ### Reproduction
 

@@ -48,6 +48,13 @@ def query_stage_active(prepare_epoch, epoch: int) -> bool:
     return prepare_epoch is None or epoch > prepare_epoch
 
 
+#: Element budget for the (K, N) float block `pred_inst_sem_test` builds when it
+#: takes the per-mask minimum z. 8M float32 = 32 MB per chunk; like the
+#: `max_points` cap in `_predict_full_plot`, lower it on a small GPU. The result
+#: does not depend on it -- only the peak allocation does.
+Z_FILTER_BLOCK_ELEMENTS = 8_000_000
+
+
 class UnionFind:
     def __init__(self, n):
         self.parent = list(range(n))
@@ -2532,7 +2539,7 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         # ground point, scores 0. The loop issued three blocking `.item()` GPU
         # syncs per mask (~590 per tile, 81 % of prediction time; see
         # docs/benchmarks/2026-09-23-inference-profile.md); this does the same
-        # work in a handful of kernels with bit-identical results.
+        # work in a handful of kernels, with the same result for every input.
         if mask_pred.shape[0] > 0:
             if mask_pred.shape[1] == 0:
                 # no points at all -> every mask is empty
@@ -2543,17 +2550,23 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 # `torch.where` materialises a (K, N) float block; chunk over the
                 # masks so the peak allocation stays bounded on large tiles. The
                 # result does not depend on the chunk size.
-                chunk = max(1, 8_000_000 // mask_pred.shape[1])
+                chunk = max(1, Z_FILTER_BLOCK_ELEMENTS // mask_pred.shape[1])
                 z_min = torch.empty(
                     mask_pred.shape[0], dtype=z.dtype, device=z.device)
                 for start in range(0, mask_pred.shape[0], chunk):
                     block = mask_pred[start:start + chunk]
                     z_min[start:start + chunk] = torch.where(
                         block, z.unsqueeze(0), inf).min(dim=1).values
+                # `.double()` reproduces the loop's `z_values.min().item() >
+                # ground_z_max + 5`, which compared a float64 widening of the
+                # float32 minimum against a float64 threshold. Comparing in
+                # float32 instead would round `ground_z_max + 5` to float32 and
+                # flip masks whose lowest point sits exactly on that rounded
+                # value.
                 # An empty mask has z_min == inf, which the height test alone
                 # would not catch when ground_z_max is inf (no ground points).
-                empty = ~mask_pred.any(dim=1)
-                scores[empty | (z_min > ground_z_max + 5)] = 0
+                empty = num_points_in_mask == 0
+                scores[empty | (z_min.double() > ground_z_max + 5)] = 0
 
         # score_thr
         score_mask = scores > score_threshold

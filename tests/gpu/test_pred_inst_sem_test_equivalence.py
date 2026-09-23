@@ -270,3 +270,46 @@ def test_identical_for_a_tile_that_forces_several_chunks():
     kw = _make_inputs(23, torch.device('cuda'), n_masks=64, n_points=300_000)
     old, new = _run_both(stub, kw)
     _assert_identical(old, new)
+
+
+def test_identical_at_a_float32_rounding_boundary():
+    """The height threshold is compared in float64, exactly as the loop was.
+
+    The loop evaluated `z_values.min().item() > ground_z_max + 5` in float64:
+    `.item()` widens the float32 minimum, and `ground_z_max` is itself a float64
+    widening of a float32 (`predict_by_feat_test` gets it from `.max().item()`).
+    Comparing in float32 instead would round the threshold to the nearest
+    float32; here it rounds *up*, so a mask whose lowest point sits exactly on
+    the rounded value is dropped by the loop but kept by a float32 comparison.
+    Measure-zero on real data, but it is the one input where the two forms can
+    disagree, so it is pinned.
+    """
+    device = torch.device('cuda')
+    stub = _Stub(_test_cfg())
+
+    # ground_z_max as predict_by_feat_test produces it: .item() of a float32
+    ground_z_max = torch.tensor(12.3456789, dtype=torch.float32).item()
+    threshold_f32 = torch.tensor(ground_z_max + 5, dtype=torch.float32).item()
+    assert threshold_f32 > ground_z_max + 5, \
+        'this probe needs a threshold that float32 rounds up'
+
+    n_masks, n_points, per_mask = 4, 200, 50
+    coordinates = torch.zeros(n_points, 3, device=device)
+    coordinates[:, 2] = threshold_f32 + 10.0
+    # mask 0's lowest point sits exactly on the float32-rounded threshold
+    coordinates[:per_mask, 2] = threshold_f32
+
+    pred_masks = torch.full((n_masks, n_points), -50.0, device=device)
+    for i in range(n_masks):
+        pred_masks[i, i * per_mask:(i + 1) * per_mask] = 50.0
+    pred_scores = torch.full((n_masks, 1), 0.9, device=device)
+    queries = torch.randn(n_masks, 32, device=device)
+
+    kw = dict(pred_masks=pred_masks, pred_scores=pred_scores,
+              superpoints=torch.arange(n_points, device=device),
+              sem_res=torch.ones(n_points, dtype=torch.long, device=device),
+              coordinates=coordinates, ground_z_max=ground_z_max,
+              queries=queries)
+    old, new = _run_both(stub, kw)
+    _assert_identical(old, new)
+    assert old[0].shape[0] == 0, 'the loop drops every mask on this input'
