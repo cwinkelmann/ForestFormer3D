@@ -1,6 +1,6 @@
 ---
 name: ff3d-inference-km-tiles
-description: Use when running ForestFormer3D inference on new ALS tiles on carrot - copying tiles in, the per-GPU split/run/merge/masks queue, watching logs, recovery, residue cleanup, copying results back, timings and the per-tile decision rule.
+description: Use when running ForestFormer3D inference on new ALS tiles on carrot - copying tiles in, the per-GPU split/run queue with a halo, the mosaic-wide stitch/border-check/masks/buildings step, watching logs, recovery, residue cleanup, copying results back, timings and the per-tile decision rule.
 ---
 
 # Running inference on new km tiles
@@ -38,7 +38,13 @@ scp /Volumes/2TB/winmol/ALS_Data/berlin_als_2021/3dm_33_381_5830_1_be.las \
 
 `benchmark/berlin_run_gpu.sh` is the tracked production script (the live copy on carrot is
 `work_dirs/logs/berlin-run-gpu.sh`, identical). One invocation owns **one GPU** and walks
-its tiles sequentially: `split` → `run` → `merge` → `masks`.
+its tiles sequentially: `split` → `run`. Splitting cuts each sub-tile with a **20 m halo**
+(`--buffer 20`) and fills that halo from whichever of the eight surrounding km tiles already
+exist under `inputs/berlin/` (`--neighbours`), so a sub-tile on the source tile's border is
+not starved of context at the km-tile line. Merging the sub-tile results into one seamless
+km tile is now a **separate, mosaic-wide** step (`benchmark/berlin_stitch.sh`, below), run
+once every GPU's queue has finished — `merge`/`masks` are no longer part of this per-GPU
+script.
 
 ```bash
 cd /raid/cwinkelmann/ForestFormer3D
@@ -58,21 +64,49 @@ so different km tiles are safe); skip GPU 1 always and any card already busy.
 What the script does per tile `$T`:
 
 ```bash
-python -m ff3d_geo split --las inputs/berlin/$T.las --out inputs/berlin/sub/$T \
-       > work_dirs/logs/split-$T.txt
+IFS=_ read -r P1 P2 E N P5 P6 <<< "$T"     # 3dm 33 <easting_km> <northing_km> 1 be
+NB=()                                       # existing neighbours among the eight offsets
+for dE in -1 0 1; do for dN in -1 0 1; do
+  [ "$dE" -eq 0 ] && [ "$dN" -eq 0 ] && continue
+  CAND="inputs/berlin/${P1}_${P2}_$((E + dE))_$((N + dN))_${P5}_${P6}.las"
+  [ -f "$CAND" ] && NB+=("$CAND")           # a missing neighbour is skipped
+done; done
+python -m ff3d_geo split --las inputs/berlin/$T.las --out inputs/berlin/sub/$T --buffer 20 \
+       ${NB[@]+--neighbours "${NB[@]}"} > work_dirs/logs/split-$T.txt
 python -m ff3d_geo run --las inputs/berlin/sub/$T/*.las \
        --checkpoint work_dirs/clean_forestformer/epoch_3000_fix.pth \
        --out work_dirs/berlin-$T --gpu $GPU
-python -m ff3d_geo merge --las work_dirs/berlin-$T/*_100m.las \
-       --gpkg work_dirs/berlin-$T/*_100m_trees.gpkg \
-       --out-las work_dirs/berlin-$T/$T.las --out-gpkg work_dirs/berlin-$T/${T}_trees.gpkg \
-       --report-json work_dirs/berlin-$T/${T}_report.json \
-       --report-md work_dirs/berlin-$T/${T}_report.md --runtime-s $R
-python -m ff3d_geo masks --las work_dirs/berlin-$T/$T.las --out work_dirs/berlin-$T
 ```
 
-It activates `/raid/cwinkelmann/ff3d-geo-venv` itself. `set -uo pipefail` (no `-e`): a
-failing stage prints `!!! $T <stage> failed` and the loop moves to the next tile.
+The `run` step's wall time (seconds) is appended to `work_dirs/logs/runtime-$T.txt`, one
+integer, which `benchmark/berlin_stitch.sh` sums across the whole mosaic for
+`stitch --runtime-s`. It activates `/raid/cwinkelmann/ff3d-geo-venv` itself. `set -uo
+pipefail` (no `-e`): a failing stage prints `!!! $T <stage> failed` and the loop moves to
+the next tile.
+
+### Then stitch the whole mosaic
+
+Once **every** GPU's queue has finished `split` + `run` for **every** tile of the mosaic
+(however many GPUs and however many nights that took), stitch them all together in ONE call
+so tree ids stay unique and dense across the whole mosaic, sub-tile borders and km-tile
+borders alike — this replaces the old per-tile `merge`, which offset each sub-tile's ids
+into a disjoint range and left trees on a border permanently split:
+
+```bash
+cd /raid/cwinkelmann/ForestFormer3D
+bash benchmark/berlin_stitch.sh 3dm_33_381_5829_1_be 3dm_33_381_5830_1_be 3dm_33_382_5828_1_be \
+  > work_dirs/logs/berlin-stitch-$(date +%Y%m%d-%H%M%S).log 2>&1
+# also mask the Berlin ALKIS building footprints (see `ff3d-outputs-and-viewers` section 4):
+FF3D_BUILDINGS=/path/to/alkis_buildings.gpkg bash benchmark/berlin_stitch.sh ...
+```
+
+Give it **every** tile that was split/run for this mosaic (not a subset — the manifest and
+results dir of each one feeds the same `stitch` call, so a tile left out simply never gets
+matched against its neighbours). It runs `python -m ff3d_geo stitch --manifest <every split's
+split_manifest.json> --results <every split's run --out dir> --out work_dirs/berlin-mosaic
+--runtime-s <sum of the tiles' runtime-$T.txt>` once, then per tile: `border-check` (writes
+`work_dirs/berlin-mosaic/<T>_border.json`), `masks`, and — only when `FF3D_BUILDINGS` is
+set — `buildings`.
 
 ## 3. Watch it
 
@@ -92,13 +126,25 @@ Milestones in a log, in order:
 $ cd /raid/... && docker run ... batch_load_ForAINetV2_data.py --unlabeled ...
 $ ... tools/test.py ...            # one process, N scans; "The length of the dataset: 98"
 # python: results_to_las / trees_to_gpkg / report
-=== ... merge ===
 === ... tile done (run 5932s) ===
 === ... block finished ===
 ```
 
-`tile done (run <N>s)` is the whole `run` step's wall time for that km tile — that number
-is what `merge --runtime-s` records in the report.
+`tile done (run <N>s)` is the whole `run` step's wall time for that km tile, also appended
+to `work_dirs/logs/runtime-$T.txt` for `berlin_stitch.sh --runtime-s`. Once all the GPU
+queues are done, `berlin_stitch.sh`'s own log has the same `=== <timestamp> <tile>: <stage>
+===` / `!!!` milestones, one `mosaic: stitch` pair around the single `stitch` call and then
+`border-check` / `masks` / `buildings` / `tile done` per tile:
+
+```
+=== 2026-09-24T09:12:03 mosaic: stitch (3 tiles) ===
+=== 2026-09-24T09:41:57 mosaic: stitch done ===
+=== 2026-09-24T09:41:57 3dm_33_374_5827_1_be: border-check ===
+=== 2026-09-24T09:42:05 3dm_33_374_5827_1_be: masks ===
+=== 2026-09-24T09:42:19 3dm_33_374_5827_1_be: tile done ===
+...
+=== ... block finished ===
+```
 
 ## 4. Timings
 
@@ -122,37 +168,32 @@ A batch `run` has **no resume**. If it dies:
 - Sub-tiles whose `<out>/<stem>.ply` exists are already inferred — finish them from the
   host venv instead of re-inferring (see `ff3d_geo georef` / `report` in
   `ff3d-outputs-and-viewers`), or just re-run the whole `run`, which re-exports everything.
-- If `run` finished but `merge`/`masks` failed, rerun just those by hand:
-
-```bash
-cd /raid/cwinkelmann/ForestFormer3D && source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
-T=3dm_33_381_5830_1_be
-ls work_dirs/berlin-$T/*_100m.las | wc -l     # must equal the sub-tile count
-python -m ff3d_geo merge --las work_dirs/berlin-$T/*_100m.las \
-  --gpkg work_dirs/berlin-$T/*_100m_trees.gpkg \
-  --out-las work_dirs/berlin-$T/$T.las --out-gpkg work_dirs/berlin-$T/${T}_trees.gpkg \
-  --report-json work_dirs/berlin-$T/${T}_report.json \
-  --report-md work_dirs/berlin-$T/${T}_report.md \
-  --runtime-s $(grep "$T: tile done" work_dirs/logs/berlin-gpu*.log | sed 's/.*run \([0-9]*\)s.*/\1/')
-python -m ff3d_geo masks --las work_dirs/berlin-$T/$T.las --out work_dirs/berlin-$T
-```
-
-Both `merge` globs must expand in the same sorted order; `merge` checks pairwise that
-`<stem>.las` goes with `<stem>_trees.gpkg` and refuses otherwise (tree-id offsets are
-applied positionally). Without `--runtime-s` the merged report says `Inference runtime:
-n/a` — an equivalent value is a sub-tile's `report.json` `runtime_s` times the sub-tile
-count.
+  `split`'s output (`split_manifest.json`, the sub-tile LAS/ident files) does not need to be
+  redone — only re-split a tile if `split` itself failed or its `--out` was removed.
 
 If a host is too small for a ~100-sub-tile batch, issue several `run` calls with ~25
 sub-tiles each into the **same** `--out`: each call rewrites only its own
 `scan_list.txt` / `empty_list.txt` and only touches its own stems.
 
-## 6. Buildings: mask the ALKIS footprints out (Berlin tiles, after `merge`)
+`benchmark/berlin_stitch.sh` has no resume either — it is one call over the WHOLE mosaic.
+**It needs every sub-tile result of every manifest passed to it**: a sub-tile whose `run`
+never finished (so its `<results dir>/<stem>.las` is missing) makes `ff3d_geo stitch` raise
+`FileNotFoundError`, **naming the missing stem**, before it writes anything for ANY tile of
+the mosaic. Finish or rerun that one tile's `run` (per the point above — the rest of the
+mosaic's sub-tile results are untouched) and re-run the whole `berlin_stitch.sh` call with
+the same tile list. Once the stitch itself has succeeded, `border-check`/`masks`/`buildings`
+for an individual tile can be rerun by hand (the same commands `berlin_stitch.sh` runs,
+against `work_dirs/berlin-mosaic/$T.las`) without repeating `stitch`.
+
+## 6. Buildings: mask the ALKIS footprints out (Berlin tiles, after `stitch`)
 
 The Berlin ALS 2021 tiles have **no building class** (classes present: 2, 3, 4, 5, 7, 32;
 class 6 absent, roof points in 3/4/5), so the model predicts tree instances on roofs.
-Run the mask on every Berlin km tile after `merge`/`masks` and before the results are
-published or compared — it is not part of `run`.
+Run the mask on every Berlin km tile after `stitch`/`masks` and before the results are
+published or compared — it is not part of `run`. `benchmark/berlin_stitch.sh` does this
+automatically, per tile, right after its own `masks` step, when `FF3D_BUILDINGS` is set to
+the footprint GeoPackage's path (see section 2); the manual command below is for a one-off
+or a tile stitched without it.
 
 Fetch the footprints once (official ALKIS WFS `https://gdi.berlin.de/services/wfs/
 alkis_gebaeude`, feature type `alkis_gebaeude:gebaeude`; `--tiles` takes km-tile keys or
@@ -199,6 +240,19 @@ That glob cannot match the tracked benchmark plots. The split **inputs**
 `rm -rf` that directory.
 
 ## 8. Copy the results home
+
+The stitched, seamless-id products live in `work_dirs/berlin-mosaic/` (one directory for the
+whole mosaic, not one per tile) — copy it back as a whole, or a subset with `--include`:
+
+```bash
+# on the Mac
+mkdir -p ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-mosaic
+rsync -av carrot:/raid/cwinkelmann/ForestFormer3D/work_dirs/berlin-mosaic/ \
+  ~/work/hnee/ForestFormer3D_runs/berlin_out/berlin-mosaic/
+```
+
+The per-sub-tile `run` output (`work_dirs/berlin-$T/`) is normally left on carrot — it feeds
+`stitch` and residue cleanup (section 7), not publishing:
 
 ```bash
 # on the Mac

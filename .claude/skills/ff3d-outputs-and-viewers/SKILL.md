@@ -22,8 +22,22 @@ Per 100 m sub-tile (or per single tile), in the run's `--out` directory:
 | `<stem>_report.json` / `.md` | the per-tile report |
 | `scan_list.txt`, `empty_list.txt`, a config copy, `2026…/` | run bookkeeping (mmengine log dir) |
 
-Per km tile, after `merge` and `masks`: `<T>.las`, `<T>_trees.gpkg`, `<T>_report.json/.md`,
-`<T>_instance_50cm.tif`, `<T>_semantic_50cm.tif`, `<T>_crowns.gpkg`.
+Per km tile, after `stitch`, `masks` and `border-check` (the production path;
+`benchmark/berlin_stitch.sh` runs all three over a whole mosaic — see
+`ff3d-inference-km-tiles`): `<T>.las`, `<T>_trees.gpkg`, `<T>_report.json/.md`,
+`<T>_instance_50cm.tif`, `<T>_semantic_50cm.tif`, `<T>_crowns.gpkg`, `<T>_border.json`.
+
+**Tree ids are mosaic-wide and dense**: `stitch` matches instances across every adjacent
+sub-tile pair (by IoU over the shared 20 m halo) and unions the matches, so ONE physical
+tree gets ONE id everywhere it appears — inside a sub-tile, across a sub-tile border, and
+across a km-tile border — rather than the disjoint per-sub-tile ranges the older `merge`
+path offset ids into. Ids are ordered pseudo-randomly (hashed) across the whole mosaic
+passed to one `stitch` call, not spatially, on purpose: the Potree viewer's colour-by-id
+maps ids onto a fixed palette by value, and a spatially ordered id scheme would paint each
+sub-tile a single colour. `python -m ff3d_geo border-check --las <T>.las --json <T>_border.json`
+measures what is left of the seams after stitching: the strip of unlabelled vegetation along
+the sub-tile grid lines and how many crowns still get cut by them (see
+`ff3d-inference-km-tiles` section 2).
 
 **Tree table columns** (`<stem>_trees.gpkg`, layer `trees`, EPSG:25833):
 `tree_id, x, y, top_z, height, crown_area_m2, n_points, mean_score` — one point geometry

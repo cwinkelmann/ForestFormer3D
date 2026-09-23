@@ -80,19 +80,43 @@ Host steps isolate failures per tile; a failed docker step stops the run.
 
 ### km tiles
 
-Berlin ALS 2021 tiles are 1 km squares with 23-25 M points, too big for one run:
+Berlin ALS 2021 tiles are 1 km squares with 23-25 M points, too big for one run. The
+production path gives every tree a SEAMLESS id across the whole mosaic, sub-tile borders
+and km-tile borders alike, by splitting with a 20 m halo and stitching over the overlap
+instead of offsetting each sub-tile's ids into a disjoint range:
 
-- `python -m ff3d_geo split --las <km tile> --out <dir>` cuts 100 m sub-tiles in local
-  coordinates named `<prefix>_E<x>_N<y>_100m.las` (about 5 s per tile, sparse sub-tiles
-  below 1000 points skipped, point count checked).
-- `run` takes all sub-tiles of a km tile as one batch.
-- `python -m ff3d_geo merge --las <sub-tile results> --gpkg <sub-tile tables> ...`
-  stitches them into one LAS and one tree table with unique ids and writes the report
-  over the merged files. Trees cut by a sub-tile border stay split (about 16 % of trees
-  touch a border, matching the geometric expectation; no crown crosses a line).
-- `python -m ff3d_geo masks --las <merged las> --out <dir>` writes the instance GeoTIFF
+- `python -m ff3d_geo split --las <km tile> --out <dir> --buffer 20 --neighbours <km tiles>`
+  cuts 100 m sub-tiles in local coordinates named `<prefix>_E<x>_N<y>_100m.las` (about 5 s
+  per tile, sparse sub-tiles below 1000 points skipped, point count checked), each carrying
+  a 20 m halo of extra points beyond its core. `--neighbours` names whichever of the eight
+  surrounding km tiles are on disk, so a sub-tile on the source tile's border can fill its
+  halo from the neighbour's own points instead of stopping at the km-tile line; a missing
+  neighbour is simply skipped (the halo goes unfilled there). Also written:
+  `<dir>/split_manifest.json` and, per sub-tile, `<stem>_ident.npy` (the point identity
+  `ff3d_geo.stitch` needs).
+- `run` takes all sub-tiles of a km tile as one batch, as before.
+- Once every tile of the mosaic has been split and run (however many GPUs that took),
+  `python -m ff3d_geo stitch --manifest <split_manifest.json of every split> --results
+  <per-tile run --out dirs> --out <dir> --runtime-s <s>` matches instances across every
+  adjacent sub-tile pair by their IoU over the shared halo points and unions the matches,
+  so the SAME physical tree gets the SAME id in every sub-tile (and every km tile) that saw
+  it. It rewrites each source km tile that owns at least one sub-tile core as one seamless
+  `<T>.las` / `<T>_trees.gpkg` / `<T>_report.json/.md` (a km tile that only supplied halo
+  points to a neighbour is not written). This is a single call over the WHOLE mosaic being
+  stitched, not per km tile, so ids stay unique and dense across all of it; benchmark's
+  production wrapper is `benchmark/berlin_stitch.sh`, run once all of `berlin_run_gpu.sh`'s
+  per-GPU queues have finished.
+- `python -m ff3d_geo border-check --las <stitched km tile> --json <out>.json` measures what
+  is left of the seams: the strip of unlabelled vegetation along the sub-tile grid lines and
+  how many crowns still get cut by them (should be near zero with the halo, unlike the old
+  offset-id `merge` path).
+- `python -m ff3d_geo masks --las <stitched km tile> --out <dir>` writes the instance GeoTIFF
   (int32 tree id of the highest point per 0.5 m cell, nodata -1), the semantic GeoTIFF
   (uint8 majority class, 255 empty) and the crown polygons (`<T>_crowns.gpkg`).
+
+`python -m ff3d_geo merge` (offset each sub-tile's ids into a disjoint range, no halo) still
+exists for a single split without `--buffer`, but is no longer part of the Berlin production
+path.
 
 Measured on carrot (H100): 55-60 s per 100 m sub-tile, about 1.6 h per km tile on one
 GPU; km tiles run in parallel one per GPU. The profile of where that time goes is in
@@ -101,8 +125,10 @@ GPU; km tiles run in parallel one per GPU. The profile of where that time goes i
 ## Where the results are
 
 - carrot: `work_dirs/tegel-r12`, `work_dirs/tegel-r13` (Phase 3 tiles),
-  `work_dirs/berlin-<km tile>/` (per sub-tile files, merged files, masks), inputs under
-  `inputs/` and `inputs/berlin/`.
+  `work_dirs/berlin-<km tile>/` (per-sub-tile run results, `<T>.las`/`_trees.gpkg` output by
+  `run --out`), `work_dirs/berlin-mosaic/` (the stitched, seamless-id km tiles and their
+  masks/border-check JSON, written by `benchmark/berlin_stitch.sh`), inputs under `inputs/`
+  and `inputs/berlin/`.
 - Mac: `~/work/hnee/ForestFormer3D_runs/berlin_out/` (copied merged files, reports,
   masks; per-tile subdirectories under `berlin-2021/`).
 - Reports in this repo: `docs/benchmarks/2026-09-22-tegel-als.md` (r12/r13),

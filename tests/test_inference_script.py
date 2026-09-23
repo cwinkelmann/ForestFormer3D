@@ -1,9 +1,14 @@
 import os
 import subprocess
+
+import pytest
+
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'tools' / 'inference_bluepoint.sh'
+BERLIN_RUN_GPU_SCRIPT = REPO / 'benchmark' / 'berlin_run_gpu.sh'
+BERLIN_STITCH_SCRIPT = REPO / 'benchmark' / 'berlin_stitch.sh'
 
 
 def test_bash_syntax_and_strict_mode():
@@ -12,6 +17,17 @@ def test_bash_syntax_and_strict_mode():
     assert head[0] == '#!/usr/bin/env bash'
     assert any('set -euo pipefail' in line for line in head)
     assert 'sed -i' not in SCRIPT.read_text()
+
+
+@pytest.mark.parametrize('script', [BERLIN_RUN_GPU_SCRIPT, BERLIN_STITCH_SCRIPT])
+def test_berlin_scripts_bash_syntax(script):
+    assert subprocess.run(['bash', '-n', str(script)]).returncode == 0
+
+
+def test_berlin_run_gpu_splits_with_a_halo_and_does_not_merge():
+    text = BERLIN_RUN_GPU_SCRIPT.read_text()
+    assert 'ff3d_geo merge' not in text
+    assert '--buffer 20' in text
 
 
 def test_dry_run_echoes_commands_without_touching_files(tmp_path):
