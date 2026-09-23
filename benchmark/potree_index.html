@@ -407,10 +407,22 @@
 				const i = viewer.scene.pointclouds.indexOf(L.pointcloud);
 				if (i >= 0) viewer.scene.pointclouds.splice(i, 1);
 				viewer.scene.scenePointCloud.remove(L.pointcloud);
+				if (typeof L.pointcloud.dispose === "function") L.pointcloud.dispose();
 			}
-			for (const key of Object.keys(L.meshes)) if (L.meshes[key]) viewer.scene.scene.remove(L.meshes[key]);
-			if (L.crowns) viewer.scene.scene.remove(L.crowns);
-			if (L.markers) viewer.scene.scene.remove(L.markers);
+			for (const key of Object.keys(L.meshes)) {
+				const m = L.meshes[key];
+				if (!m) continue;
+				viewer.scene.scene.remove(m);
+				m.geometry.dispose();
+				if (m.material.map) m.material.map.dispose();
+				m.material.dispose();
+			}
+			for (const obj of [L.crowns, L.markers]) {
+				if (!obj) continue;
+				viewer.scene.scene.remove(obj);
+				obj.geometry.dispose();
+				obj.material.dispose();
+			}
 			state.loaded.delete(tile);
 			renderTileList();
 		}

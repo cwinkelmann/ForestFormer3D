@@ -60,10 +60,9 @@ python3 benchmark/potree_convert_tile.py \
 
 ## Coverage
 
-Ten of the eleven km² tiles are in the site: 379_5828, 379_5829, 380_5828, 380_5829,
-381_5828, 381_5829, 381_5830, 382_5828, 382_5829, 383_5828. **383_5829** was still
-being inferred on carrot when the site was built; the README's "Adding a tile" section
-covers dropping it in.
+All eleven km² tiles are in the site: 379_5828, 379_5829, 380_5828, 380_5829,
+381_5828, 381_5829, 381_5830, 382_5828, 382_5829, 383_5828, 383_5829 — the last one
+finished inferring on carrot while the site was being built and was converted last.
 
 ## Not verified
 
