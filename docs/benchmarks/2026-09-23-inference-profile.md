@@ -363,3 +363,87 @@ source benchmark/common.sh; FF3D_GPU=7 ff3d_docker python \
   /workspace/work_dirs/logs/speed/compare2.py \
   /workspace/work_dirs/logs/speed/olds /workspace/work_dirs/logs/speed/news
 ```
+
+## Cylinder step experiment (2026-09-23)
+
+Section 4 showed the lattice is the dominant cost: with `step = radius / 4` every point
+falls inside ~44 cylinders, so the network sees each point 44 times. `region_step_factor`
+(commit `7bd7a6e`) makes that pitch configurable — `step = radius * factor` — and a factor
+of 0.5 lays down roughly a quarter of the cylinders. The question this experiment answers
+is whether the accuracy paid for that is distinguishable from run-to-run noise.
+
+### Setup
+
+Released checkpoint `work_dirs/clean_forestformer/epoch_3000_converted.pth` over the 28
+labelled test plots (`forainetv2_oneformer3d_infos_test.pkl`), the same setup as
+`benchmark/run_release_eval.sh`, on one idle A100 (carrot GPU 2), one run at a time.
+Because full-plot inference is nondeterministic (see "Equality" above), 0.25 was run at two
+seeds to measure the noise floor before comparing anything to it.
+
+```bash
+work_dirs/logs/step/run.sh <factor> <seed> <gpu>   # test.py + final_eval.py, 28 plots
+```
+
+### Results
+
+`s/plot` is the mmengine `Epoch(test)` time, `wall` the whole `tools/test.py` invocation.
+Metrics from `evaluation_total_test.txt` written by `tools/final_eval.py`.
+
+| factor | seed | s/plot | wall | F1 | mPrecision | mRecall | mMWCov | mMUCov |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.25 | 0 | 81.42 | 2396 s | 0.9042 | 0.9254 | 0.8840 | 0.9020 | 0.8356 |
+| 0.25 | 1 | 81.41 | 2398 s | 0.8986 | 0.9165 | 0.8815 | 0.9019 | 0.8363 |
+| 0.5 | 0 | 22.11 | 734 s | 0.9040 | 0.9276 | 0.8815 | 0.9014 | 0.8337 |
+| 0.5 | 1 | 22.16 | 737 s | 0.9026 | 0.9274 | 0.8790 | 0.9015 | 0.8333 |
+
+**Speed.** 0.5 is a **3.68x** per-plot speed-up (81.4 -> 22.1 s), close to the 4x the
+cylinder count predicts; the shortfall is the per-plot fixed cost (load, grid sample, merge,
+PLY write) that the lattice factor does not touch. Whole-plot wall time drops 3.3x.
+
+**Accuracy.** Changing the seed alone moves 0.25 by 0.0056 F1 (0.8986-0.9042). Both 0.5
+runs (0.9026, 0.9040) land inside that interval, and the 0.5 mean (0.9033) is nominally
+above the 0.25 mean (0.9014). On this test set, at this sample size, **F1 cannot separate
+the two settings from the seed noise.**
+
+**But the per-metric signs are consistent, not noisy.** On both seeds 0.5 has higher
+mPrecision (+0.0022 / +0.0110) and lower mRecall (-0.0025 / -0.0025), mMWCov (-0.0006 /
+-0.0004) and mMUCov (-0.0019 / -0.0030) than 0.25 at the same seed. That is the expected
+physics of the lattice rather than noise: fewer overlapping views per point means fewer
+duplicate and split candidates surviving the merge (precision up) and less evidence for
+sparsely sampled trees (recall and coverage down). F1 is flat because the two cancel.
+
+### Decision: keep 0.25 as the default
+
+The stated rule — adopt 0.5 only if its F1 is within the seed-to-seed spread of 0.25 — has
+its condition satisfied on the full-density test set. The default is nonetheless **left at
+0.25**, because the recall side of that trade-off is not flat everywhere:
+`docs/benchmarks/2026-09-23-als-density-eval.md` evaluated the same factor on the same
+plots thinned to 25 pts/m2 (canopy mode) and measured **F1 0.3344 -> 0.2845**, driven by
+mRecall 0.2217 -> 0.1779 and mMUCov 0.2327 -> 0.1777 — the same direction as the signs
+above, an order of magnitude larger. A shipped default has to hold across densities, and
+sparse or domain-shifted clouds (the Berlin ALS case) are exactly where the coarser lattice
+costs the most.
+
+So: 0.25 stays the default, and 0.5 is a documented, one-flag **3.7x** speed-up for
+full-density plots where a ~0.002 mMUCov / ~0.0025 mRecall trade is acceptable:
+
+```bash
+python tools/test.py <config> <ckpt> --work-dir <out> \
+  --cfg-options model.test_cfg.region_step_factor=0.5
+```
+
+Flipping the default later is a one-line change in
+`configs/oneformer3d_qs_radius16_qp300_2many.py` and in the `cfg.get('region_step_factor',
+0.25)` fallback in `_predict_full_plot`. What would justify it is a low-density run showing
+the 0.05 F1 gap above does not hold, not more full-density seeds.
+
+### Reproduction
+
+Scratch on carrot in `work_dirs/logs/step/` (`run.sh <factor> <seed> <gpu>`, one
+`f<factor>_s<seed>/` result directory and `.log` per run).
+
+```bash
+for spec in "0.25 0" "0.25 1" "0.5 0" "0.5 1"; do
+  work_dirs/logs/step/run.sh $spec 2
+done
+```

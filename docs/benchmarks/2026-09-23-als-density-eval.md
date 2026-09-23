@@ -226,7 +226,10 @@ Bookkeeping notes.
    that this experiment does not separate are leaf-off foliage, species and stand structure,
    ALS return characteristics, and the 100 m tiling/merge path (14-22 m plots never exercise
    it). `region_step_factor=0.5` is a 3.4x per-sample speed-up costing another 0.05 F1 on
-   thinned data, so keep 0.25 for low-density clouds.
+   thinned data, so keep 0.25 for low-density clouds. At full density the same factor
+   costs no measurable F1 (it is inside the seed-to-seed spread) at a 3.7x speed-up,
+   `docs/benchmarks/2026-09-23-inference-profile.md`; this row is the reason the shipped
+   default stays 0.25 anyway.
 
 ## Reproduction
 
