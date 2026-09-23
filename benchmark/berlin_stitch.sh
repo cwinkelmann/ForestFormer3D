@@ -16,8 +16,9 @@
 #
 # See .claude/skills/ff3d-inference-km-tiles/SKILL.md.
 set -uo pipefail
-cd /raid/cwinkelmann/ForestFormer3D
+cd /raid/cwinkelmann/ForestFormer3D || exit 1
 source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
+[ "$#" -gt 0 ] || { echo "usage: bash benchmark/berlin_stitch.sh <tile stem>..." >&2; exit 2; }
 OUT=work_dirs/berlin-mosaic
 
 MANIFESTS=()
@@ -29,6 +30,12 @@ for T in "$@"; do
   RFILE="work_dirs/logs/runtime-$T.txt"
   if [ -f "$RFILE" ]; then
     R=$(tail -n1 "$RFILE")
+    case $R in
+      ''|*[!0-9]*)
+        echo "!!! $T: unreadable $RFILE (last line '$R'), its run time is not counted in --runtime-s"
+        R=0
+        ;;
+    esac
     TOTAL_RUNTIME=$((TOTAL_RUNTIME + R))
   else
     echo "!!! $T: no $RFILE, its run time is not counted in --runtime-s"

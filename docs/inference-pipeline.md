@@ -118,9 +118,12 @@ instead of offsetting each sub-tile's ids into a disjoint range:
 exists for a single split without `--buffer`, but is no longer part of the Berlin production
 path.
 
-Measured on carrot (H100): 55-60 s per 100 m sub-tile, about 1.6 h per km tile on one
-GPU; km tiles run in parallel one per GPU. The profile of where that time goes is in
-`docs/benchmarks/2026-09-23-inference-profile.md` (when present).
+Measured on carrot (H100), pre-halo: 55-60 s per 100 m sub-tile, about 1.6 h per km tile on
+one GPU; km tiles run in parallel one per GPU. The profile of where that time goes is in
+`docs/benchmarks/2026-09-23-inference-profile.md` (when present). With `--buffer 20` each
+sub-tile carries ~2x its core point count (a 140x140 m halo box vs. a 100x100 m core), so
+expect roughly **double** the per-sub-tile run time and the `inputs/berlin/sub/` disk
+footprint of these pre-halo numbers until the haloed runs are actually measured.
 
 ## Where the results are
 

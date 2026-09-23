@@ -148,6 +148,12 @@ queues are done, `berlin_stitch.sh`'s own log has the same `=== <timestamp> <til
 
 ## 4. Timings
 
+**Not yet re-measured with the halo.** All the numbers below predate `--buffer 20`
+(commit `b1715a3`): a haloed sub-tile is its `-20..120` box on both axes, **≈1.96x the
+core's point count**, all of which `run` feeds to the model — expect roughly **double**
+the per-sub-tile run time (and the residue footprint, section 7) until the haloed runs are
+actually timed.
+
 - **2026-09-22, one GPU per tile, pre-vectorisation**: 55–60 s per 100 m sub-tile,
   **92–99 min per km tile** (4 h 47 min for three tiles).
 - Running 7 tiles on 7 GPUs at once is host-latency bound, not GPU bound: those blocks
@@ -222,10 +228,10 @@ GeoTIFFs, `_report.json/.md`); the unmasked originals stay in place, and instanc
 `ff3d-outputs-and-viewers` section 4 and
 `docs/benchmarks/2026-09-22-tegel-berlin-2021.md` section "Buildings".
 
-## 7. Residue cleanup (1–2 GB per km tile)
+## 7. Residue cleanup (1–2 GB per km tile pre-halo; expect roughly double until measured)
 
-A km-tile run leaves the ~100 input PLYs and their `.npy` exports behind. After `merge`
-and after the results are copied back:
+A km-tile run leaves the ~100 input PLYs and their `.npy` exports behind. After
+`benchmark/berlin_stitch.sh` has stitched the mosaic and the results are copied back:
 
 ```bash
 T=3dm_33_381_5830_1_be
@@ -236,8 +242,17 @@ rm data/ForAINetV2/test_data/${P}_E*_100m.ply \
 ```
 
 That glob cannot match the tracked benchmark plots. The split **inputs**
-`inputs/berlin/sub/$T/` are separate: keep them if the tile may be re-run, otherwise
-`rm -rf` that directory.
+`inputs/berlin/sub/$T/` are a different matter: they are not disposable until the
+mosaic-wide stitch has actually run. `split_manifest.json` and, per sub-tile,
+`<stem>_ident.npy` in that directory are what `ff3d_geo stitch` reads to recognise a halo
+point of one sub-tile as the same physical point as a core point of its neighbour
+(`ff3d_geo/stitch.py`) — **keep `inputs/berlin/sub/$T/` until `benchmark/berlin_stitch.sh`
+has successfully stitched this tile**, not just until the tile's own `run` finished.
+Deleting it early is not cheaply recoverable: re-running `split` regenerates the manifest
+and sidecars, but only reproduces the same halo if the exact same `--neighbours` set is
+given again — if a neighbour tile arrived on disk in the meantime, the halo point counts
+change and `stitch`'s sub-tile cache rejects the mismatched results, forcing a full re-`run`
+of that tile (1.5–3 h of GPU time) before it can be stitched at all.
 
 ## 8. Copy the results home
 

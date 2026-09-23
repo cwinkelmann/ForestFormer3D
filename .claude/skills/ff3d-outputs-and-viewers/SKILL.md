@@ -25,19 +25,36 @@ Per 100 m sub-tile (or per single tile), in the run's `--out` directory:
 Per km tile, after `stitch`, `masks` and `border-check` (the production path;
 `benchmark/berlin_stitch.sh` runs all three over a whole mosaic — see
 `ff3d-inference-km-tiles`): `<T>.las`, `<T>_trees.gpkg`, `<T>_report.json/.md`,
-`<T>_instance_50cm.tif`, `<T>_semantic_50cm.tif`, `<T>_crowns.gpkg`, `<T>_border.json`.
+`<T>_instance_50cm.tif`, `<T>_semantic_50cm.tif`, `<T>_crowns.gpkg`, `<T>_border.json`, plus
+two mosaic-wide (not per-tile) files in `--out`: `stitch.json` (the run summary —
+`n_trees`, `n_pairs_tested`, `n_unified`, `n_cross_km`, `neighbour_only_sources`,
+`runner_up_histogram`) and `stitch_ids.npy` (the `(gid, stem, local)` map from every global
+id back to the sub-tile and local instance id(s) it was unified from).
 
 **Tree ids are mosaic-wide and dense**: `stitch` matches instances across every adjacent
 sub-tile pair (by IoU over the shared 20 m halo) and unions the matches, so ONE physical
 tree gets ONE id everywhere it appears — inside a sub-tile, across a sub-tile border, and
 across a km-tile border — rather than the disjoint per-sub-tile ranges the older `merge`
-path offset ids into. Ids are ordered pseudo-randomly (hashed) across the whole mosaic
-passed to one `stitch` call, not spatially, on purpose: the Potree viewer's colour-by-id
-maps ids onto a fixed palette by value, and a spatially ordered id scheme would paint each
-sub-tile a single colour. `python -m ff3d_geo border-check --las <T>.las --json <T>_border.json`
-measures what is left of the seams after stitching: the strip of unlabelled vegetation along
-the sub-tile grid lines and how many crowns still get cut by them (see
-`ff3d-inference-km-tiles` section 2).
+path offset ids into. Ids are ordered by a Weyl (low-discrepancy) permutation of the
+component's rank across the whole mosaic passed to one `stitch` call, not spatially, on
+purpose: the Potree viewer's colour-by-id maps ids onto a fixed palette by value, and a
+spatially ordered id scheme would paint each sub-tile a single colour. `python -m ff3d_geo
+border-check --las <T>.las --json <T>_border.json` measures what is left of the seams after
+stitching: the strip of unlabelled vegetation along the sub-tile grid lines and how many
+crowns still get cut by them (see `ff3d-inference-km-tiles` section 2).
+
+**A tree on a km-tile border has a row in BOTH tiles' tables.** `stitch` writes
+`trees_to_gpkg` once per km tile it owns, so a unified tree appears in `<A>_trees.gpkg`
+*and* `<B>_trees.gpkg` under the SAME `tree_id`, each row built only from that file's own
+points (so `n_points`, `crown_area_m2` and possibly `top_z`/`height` are partial in each,
+and the two rows do not sum to the whole tree). Concatenating tree tables across a mosaic
+therefore double-counts every border tree; `stitch.json`'s mosaic-wide `n_trees` (not the
+sum of `tiles[*].n_trees_in_tile`) is the deduplicated count. Also: **re-stitching a larger
+mosaic renumbers every id** — ids are assigned per `stitch` call over exactly the tiles
+given to it, so a tree's id is not stable across two different mosaics (e.g. stitching one
+new tile in with its neighbours vs. stitching the whole region at once); treat ids as valid
+only within the `stitch` call (the `--out` directory) that produced them, and re-derive any
+cross-run tree correspondence from geometry, not from the id.
 
 **Tree table columns** (`<stem>_trees.gpkg`, layer `trees`, EPSG:25833):
 `tree_id, x, y, top_z, height, crown_area_m2, n_points, mean_score` — one point geometry
@@ -59,7 +76,11 @@ chm_height_stats, ground_vs_vegetation_agreement, nodata_fraction, n_voted, conf
 per_class_counts, runtime_s, recommendation`, plus `buildings` once the
 ALKIS mask has run (section 4). `recommendation.first_pass_usable` is true
 when the tree count is within ±50 % of the CHM local-maxima baseline **and** the median
-height within 3 m of the CHM median.
+height within 3 m of the CHM median. For a `stitch`-produced report, `runtime_s` is
+`--runtime-s` **as given to that `stitch` call — the summed GPU wall time of the WHOLE
+mosaic**, not this one tile's own run time; every tile stitched together reports the same
+mosaic-wide number (`benchmark/berlin_stitch.sh` passes the sum of the given tiles'
+`runtime-$T.txt`), so do not read a single tile's "Inference runtime" as its own cost.
 
 ## 2. Verify a result
 
