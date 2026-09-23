@@ -147,7 +147,41 @@ If a host is too small for a ~100-sub-tile batch, issue several `run` calls with
 sub-tiles each into the **same** `--out`: each call rewrites only its own
 `scan_list.txt` / `empty_list.txt` and only touches its own stems.
 
-## 6. Residue cleanup (1–2 GB per km tile)
+## 6. Buildings: mask the ALKIS footprints out (Berlin tiles, after `merge`)
+
+The Berlin ALS 2021 tiles have **no building class** (classes present: 2, 3, 4, 5, 7, 32;
+class 6 absent, roof points in 3/4/5), so the model predicts tree instances on roofs.
+Run the mask on every Berlin km tile after `merge`/`masks` and before the results are
+published or compared — it is not part of `run`.
+
+Fetch the footprints once (official ALKIS WFS `https://gdi.berlin.de/services/wfs/
+alkis_gebaeude`, feature type `alkis_gebaeude:gebaeude`; `--tiles` takes km-tile keys or
+the groups `tegel`/`r13`/`all`, a tile already in the GeoPackage is skipped):
+
+```bash
+# on the Mac, .venv-cpu
+python benchmark/fetch_berlin_buildings.py --tiles all \
+  --out /Volumes/2TB/winmol/ALS_Data/berlin_buildings/alkis_buildings.gpkg
+```
+
+Then, per finished km tile (CPU, host venv, ~4–6 min and < 3 GB RSS per 20–25 M point
+tile):
+
+```bash
+T=3dm_33_381_5829_1_be
+D=/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d/$T
+python -m ff3d_geo buildings --las $D/$T.las \
+  --buildings /Volumes/2TB/winmol/ALS_Data/berlin_buildings/alkis_buildings.gpkg \
+  --out $D/masked
+```
+
+`masked/` gets the full product set (`<T>.las`, `_trees.gpkg`, `_crowns.gpkg`, both
+GeoTIFFs, `_report.json/.md`); the unmasked originals stay in place, and instance ids are
+**not** renumbered, so the two are comparable id for id. Details and the per-tile numbers:
+`ff3d-outputs-and-viewers` section 4 and
+`docs/benchmarks/2026-09-22-tegel-berlin-2021.md` section "Buildings".
+
+## 7. Residue cleanup (1–2 GB per km tile)
 
 A km-tile run leaves the ~100 input PLYs and their `.npy` exports behind. After `merge`
 and after the results are copied back:
@@ -164,7 +198,7 @@ That glob cannot match the tracked benchmark plots. The split **inputs**
 `inputs/berlin/sub/$T/` are separate: keep them if the tile may be re-run, otherwise
 `rm -rf` that directory.
 
-## 7. Copy the results home
+## 8. Copy the results home
 
 ```bash
 # on the Mac
@@ -179,7 +213,7 @@ rsync -av --exclude '*.ply' --exclude '*_100m.las' --exclude '*_100m_trees.gpkg'
 `empty_list.txt`, config copy and mmengine log dir, which would collide. The 2TB volume
 mirror of these products is `/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d/<tile>/`.
 
-## 8. Single 100 m tiles (the r12/r13 path)
+## 9. Single 100 m tiles (the r12/r13 path)
 
 For a tile that is already ~100 m, skip `split`/`merge` entirely:
 
@@ -196,7 +230,7 @@ or given with `--origin E N`. Sanity numbers for r12: 192,814 points, 397 CHM lo
 66,337 ALS ground points — if `chm_baseline_count` differs, the ALS classification did not
 survive the round trip. Preview any run with `--dry-run` (prints the 8 steps, runs nothing).
 
-## 9. The batch `run` contract
+## 10. The batch `run` contract
 
 `python -m ff3d_geo run` is a **host-side orchestrator** (plain venv) that shells the two
 GPU steps into the container via `bash -c 'source benchmark/common.sh; ff3d_docker ...'`
@@ -218,7 +252,7 @@ with `FF3D_GPU` from `--gpu`. Its eight steps, each printed before it runs:
 
 Host steps isolate failures per tile; a failed docker step stops the run.
 
-## 10. Per-tile decision rule
+## 11. Per-tile decision rule
 
 Each report ends with `First pass usable: **yes|no**` from `ff3d_geo.report.recommend`:
 usable when the tree count is within **±50 %** of the CHM local-maxima baseline **and**

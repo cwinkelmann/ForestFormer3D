@@ -17,7 +17,7 @@ Per 100 m sub-tile (or per single tile), in the run's `--out` directory:
 | `<stem>.ply` | the **raw model output**: `x y z` (float32, centred by `<stem>_offsets.npy` = `[mean_x, mean_y, min_z]`), `semantic_pred` (0 ground, 1 wood, 2 leaf, −1 no vote), `instance_pred` (tree id, −1 none), `score`. Binary little-endian since commit `efb3fcf`. |
 | `<stem>.sidecar.json` | origin (tile lower-left in EPSG:25833), EPSG, point count, source format |
 | `<stem>_classification.npy` | the input ALS classification per point, kept for the CHM baseline |
-| `<stem>.las` | **LAS 1.4, point format 6, EPSG:25833 WKT**, extra dims `treeID` int32 (−1 none), `semantic` uint8 (**255** = no vote), `score` float32; the ALS classification restored |
+| `<stem>.las` | **LAS 1.4, point format 6, EPSG:25833 WKT**, extra dims `treeID` int32 (−1 none), `semantic` uint8 (**255** = no vote; **3** = building after `ff3d_geo buildings`), `score` float32; the ALS classification restored |
 | `<stem>_trees.gpkg` | layer `trees`, one point per tree |
 | `<stem>_report.json` / `.md` | the per-tile report |
 | `scan_list.txt`, `empty_list.txt`, a config copy, `2026…/` | run bookkeeping (mmengine log dir) |
@@ -42,7 +42,8 @@ when completeness matters.
 
 **Report JSON keys**: `tile, n_points, n_trees, chm_baseline_count, height_stats,
 chm_height_stats, ground_vs_vegetation_agreement, nodata_fraction, n_voted, confusion,
-per_class_counts, runtime_s, recommendation`. `recommendation.first_pass_usable` is true
+per_class_counts, runtime_s, recommendation`, plus `buildings` once the
+ALKIS mask has run (section 4). `recommendation.first_pass_usable` is true
 when the tree count is within ±50 % of the CHM local-maxima baseline **and** the median
 height within 3 m of the CHM median.
 
@@ -67,7 +68,7 @@ The row count and height quantiles must match `n_trees` / `height_stats` in the 
 
 ```bash
 source /raid/cwinkelmann/ff3d-geo-venv/bin/activate     # or use .venv-cpu on the Mac
-python -m ff3d_geo <cmd> --help                         # run|split|merge|masks|convert|georef|report
+python -m ff3d_geo <cmd> --help                         # run|split|merge|masks|buildings|convert|georef|report
 ```
 
 - **`convert`** — LAS → input PLY + sidecar, without running anything else:
@@ -90,9 +91,66 @@ python -m ff3d_geo <cmd> --help                         # run|split|merge|masks|
   file names, `1.0` → `1m`. Measured on the Mac: 11–13 s and 1.9–2.0 GB peak RSS per
   23–25 M point km tile; the two GeoTIFFs ~3 MB together (LZW, tiled 256×256) and the
   GeoPackage 12–14 MB.
+- **`buildings`** — the Berlin ALKIS building mask; see section 4.
 - `split` / `merge` / `run` belong to the inference flow — see `ff3d-inference-km-tiles`.
 
-## 4. Visual report figures
+## 4. Buildings (Berlin): masking ALKIS footprints out of the trees
+
+The Berlin ALS 2021 tiles have **no building class**. Measured on three km tiles the
+classes present are 2 (ground), 3, 4, 5, 7, 32 — class 6 (building) is absent and roof
+points sit in 3/4/5. The model was trained on forest plots, so it reads a roof as a
+crown and predicts tree instances on buildings (obvious in the allotment area of
+`3dm_33_381_5829_1_be`). The fix is external geometry: Berlin's official ALKIS
+footprints.
+
+**Fetch the footprints once** (official WFS, not OSM):
+
+```bash
+.venv-cpu/bin/python benchmark/fetch_berlin_buildings.py --tiles all \
+  --out /Volumes/2TB/winmol/ALS_Data/berlin_buildings/alkis_buildings.gpkg
+```
+
+`https://gdi.berlin.de/services/wfs/alkis_gebaeude`, feature type
+`alkis_gebaeude:gebaeude`, GeoJSON, EPSG:25833, `CountDefault` 1 000 000 (the script
+pages anyway). `--tiles` takes km-tile keys (`381_5829`) or the groups `tegel` (the
+eleven Tegel tiles), `r13` (the eight Revier 13 tiles) and `all`; `--bbox MINX MINY
+MAXX MAXY` takes a free bbox. One GeoPackage per run holds layer `buildings`
+(deduplicated by `uuid`, with `gfk`/`bezgfk`, `bat`/`bezbat`, `baw`/`bezbaw`, `nam`,
+`shape_area`) and layer `tiles` (coverage squares) — a tile already in `tiles` is
+skipped, so a re-run is cheap; `--force` refetches.
+
+**Mask a finished km tile** (run it *after* `merge`, before publishing anything):
+
+```bash
+.venv-cpu/bin/python -m ff3d_geo buildings \
+  --las      /Volumes/2TB/.../berlin_als_2021_ff3d/<T>/<T>.las \
+  --buildings /Volumes/2TB/winmol/ALS_Data/berlin_buildings/alkis_buildings.gpkg \
+  --out      /Volumes/2TB/.../berlin_als_2021_ff3d/<T>/masked
+```
+
+Writes `<T>.las`, `<T>_trees.gpkg`, `<T>_crowns.gpkg`, both GeoTIFFs and
+`<T>_report.json/.md` into `--out`; the originals are never touched, so masked and
+unmasked are directly comparable. Options: `--buffer 1.0` (footprints are buffered,
+because a roof edge overhangs its ground plan), `--min-roof-fraction 0.5`,
+`--cell 0.5`, `--no-masks`.
+
+What it does (`ff3d_geo.buildings.mask_buildings`): a point inside a buffered footprint
+gets `semantic = 3` (**building** — a new value in the result contract, next to 0
+ground / 1 wood / 2 leaf / 255 no vote) and `treeID = -1`, while its ALS
+`classification` is left untouched; an instance with ≥ `--min-roof-fraction` of its
+points inside footprints is dropped entirely. **Ids are not renumbered** — a surviving
+tree keeps the id it had in the unmasked result. The returned dict (and the report's
+`buildings` block, and the report markdown's "Buildings" row) carries
+`n_footprints, points_masked, instances_before, instances_removed,
+instances_partially_masked, instances_after`.
+
+Because `semantic == 3` is not a model vote, the report excludes those points from the
+ground-vs-non-ground agreement, the same way it excludes 255.
+
+Numbers for the Berlin tiles: `docs/benchmarks/2026-09-22-tegel-berlin-2021.md`,
+section "Buildings".
+
+## 5. Visual report figures
 
 ```bash
 cd ~/ForestFormer3D
@@ -115,7 +173,7 @@ cache. Write-up: `docs/benchmarks/2026-09-23-berlin-visual-report.md`.
 DOP overlays (`benchmark/plot_berlin_dop_overlays.py`) are covered in
 `ff3d-orthophoto-download`.
 
-## 5. QGIS (3.28+)
+## 6. QGIS (3.28+)
 
 1. New project, Project ▸ Properties ▸ CRS `EPSG:25833`.
 2. Drag `<T>.las` in — it opens as a point cloud layer, CRS read from the WKT VLR.
@@ -125,7 +183,7 @@ DOP overlays (`benchmark/plot_berlin_dop_overlays.py`) are covered in
 4. Optional: an XYZ OpenStreetMap basemap; View ▸ 3D Map Views for a 3D check.
 5. Export Map to Image, 1600 px wide, into `docs/benchmarks/assets/`.
 
-## 6. Potree web viewer
+## 7. Potree web viewer
 
 An offline Potree 3D site over the Berlin tiles lives on the 2TB volume:
 
@@ -162,7 +220,7 @@ and the manifest are built by `benchmark/build_potree_site.py`:
 "Adding a tile") were written alongside these skills — **see `benchmark/build_potree_site.py`
 once landed** if it is not yet tracked in the repo you have checked out.
 
-## 7. Source-of-truth documents
+## 8. Source-of-truth documents
 
 `docs/inference-pipeline.md` (the whole path, file by file),
 `docs/benchmarks/RUNBOOK-tegel.md` (commands, sections 4–9),

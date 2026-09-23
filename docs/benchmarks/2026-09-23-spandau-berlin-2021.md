@@ -185,7 +185,39 @@ ALS-density data**; the semantic head continues to transfer intact.
   27.4-81.2 MB per tile), both fetched with
   `benchmark/fetch_berlin_dop.py --rgbi`, 16 tiles, no failures.
 
-## 5. Reproducing
+## 5. Buildings: ALKIS footprints masked out of the tree instances
+
+The Berlin ALS 2021 point clouds have **no building class** (classes present: 2, 3, 4, 5,
+7, 32; class 6 absent, roof points in the vegetation bins 3/4/5), so ForestFormer3D reads
+a roof as a crown and predicts tree instances on buildings. The correction comes from
+Berlin's official ALKIS footprints, fetched with `benchmark/fetch_berlin_buildings.py`
+from the GDI WFS `https://gdi.berlin.de/services/wfs/alkis_gebaeude` (feature type
+`alkis_gebaeude:gebaeude`) and applied with `python -m ff3d_geo buildings`; the mechanics
+and the Tegel numbers are in
+`docs/benchmarks/2026-09-22-tegel-berlin-2021.md` section 7.
+
+Revier 13 is the opposite case to Tegel: the eight km tiles are almost pure forest, and
+the WFS returns **0 footprints** for `376_5827`, `376_5828`, `377_5827` and `377_5828`,
+1 each for `375_5827`/`375_5828` and 5 / 11 for `374_5827`/`374_5828`. Sixteen footprints
+over the whole block, against 5 244 over the eleven Tegel tiles.
+
+| Tile | Instances before | Removed | Partially masked | Points masked | Footprints in tile | Instances after |
+|---|---|---|---|---|---|---|
+| `3dm_33_374_5827_1_be` | 26 870 | 2 | 3 | 3 617 | 5 | 26 868 |
+| `3dm_33_374_5828_1_be` | 13 387 | 6 | 19 | 9 344 | 11 | 13 381 |
+| **total** | **40 257** | **8** | **22** | **12 961** | **16** | **40 249** |
+
+So the building mask is effectively a no-op here: 8 instances of 40 257 on the two tiles
+it could be run on, three orders of magnitude below Tegel's 3.6 %. It is still worth
+running - it costs ~100 s per tile and it is the same command - but nothing in section 2
+changes because of it.
+
+Not yet masked, for lack of free space on the 2TB volume (the run stops below 40 GB
+free): `375_5827`, `375_5828`, `376_5827`, `376_5828`, `377_5827`, `377_5828`. The four
+tiles with no footprints at all cannot change; the two `375_*` tiles have one footprint
+each.
+
+## 6. Reproducing
 
 ```bash
 # Mac: copy the tiles up
