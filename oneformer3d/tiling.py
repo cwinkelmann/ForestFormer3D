@@ -56,6 +56,41 @@ def sample_region(points: torch.Tensor, indices: torch.Tensor, num_points: int,
     return points[perm.to(points.device)], indices[perm.to(indices.device)]
 
 
+def degenerate_region_reason(points: torch.Tensor, voxel_size: float,
+                             min_points: int = 64) -> str | None:
+    """Why this region must not be fed to the sparse backbone, or ``None``.
+
+    The spconv UNet downsamples the tile four times with ``ksize=2, stride=2,
+    padding=0``. Every such level halves the grid as ``(S - 2) // 2 + 1``, which
+    for an odd ``S`` leaves the last input index without an output cell. A region
+    holding only a handful of far-apart voxels can end up with *all* of them on
+    that last index, and spconv then aborts the whole process with
+    ``ValueError: Your points vanished here``. Regions this thin carry no tree
+    anyway, so they are skipped before the backbone ever sees them.
+
+    This is a cheap pre-filter, not a proof: the exact vanishing condition
+    depends on the coordinates after four roundings, so ``_predict_full_plot``
+    also catches the ``ValueError`` itself.
+
+    Args:
+        points: (N, >=3) region points in metres.
+        voxel_size: backbone voxel size in metres (0.2 m here).
+        min_points: regions with fewer points are skipped.
+
+    Returns:
+        A short human-readable reason, or ``None`` when the region is usable.
+    """
+    n = int(points.shape[0])
+    if n < min_points:
+        return f'only {n} points (< min_region_points={min_points})'
+    xyz = points[:, :3]
+    span = ((xyz.max(0).values - xyz.min(0).values) / voxel_size).floor() + 1
+    thick = [int(s) for s in span.tolist()]
+    if sum(s > 1 for s in thick) < 2:
+        return f'degenerate extent: voxel span {thick} (a point or a line)'
+    return None
+
+
 def merge_instances_by_score(masks, scores: torch.Tensor, overlap_threshold: float,
                              num_points: int | None = None
                              ) -> tuple[torch.Tensor, torch.Tensor]:

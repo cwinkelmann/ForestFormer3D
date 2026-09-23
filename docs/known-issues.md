@@ -99,3 +99,22 @@ Each is inherited from OneFormer3D or only matters once the benchmark shows it d
   `data/ForAINetV2/forainetv2_instance_data/` before regenerating.
 - `tools/test.py` used `torch.load` without importing torch before Phase 1; the in-memory
   permutation block that contained it is gone.
+- **Degenerate cylinder regions no longer abort a batch.** On near-empty 100 m ALS sub-tiles
+  (water, open ground, a few stray returns) a cylinder region can hold so few, so far-apart
+  voxels that they all land on the last index of an odd spatial dimension inside the spconv
+  UNet. Each downsampling level is `(S - 2) // 2 + 1`, so for odd `S` that last index has no
+  output cell, every point is dropped and spconv raises
+  `ValueError: Your points vanished here` (seen with `spatial_shape=[17, 16, 16]` from a
+  35-voxel region and `[19, 16, 87]` from a 480-voxel region with a 140 m z outlier). Because
+  one `tools/test.py` process serves every sub-tile of a km tile, that exception used to kill
+  the whole batch. `_predict_full_plot` now pre-filters each region with
+  `tiling.degenerate_region_reason` (fewer than `model.test_cfg.min_region_points`, default 64,
+  points after the 0.2 m grid sample, or a voxel span that is a point or a line) and, as a
+  backstop, catches `ValueError` out of `collate`/`extract_feat` for a single region. Only
+  `ValueError` is caught — an OOM `RuntimeError` still propagates. A skipped region simply casts
+  no vote; its points fall back to whatever the ~44 overlapping regions say, or to nodata
+  (semantic `-1`, instance `-1`). A scan where *no* region survives still gets its result PLY,
+  all points unlabelled, so the per-tile files stay complete for the merge.
+  To spot this in a log, grep for `degenerate region`, `spconv rejected region` and the
+  per-scan summary `N of M cylinder regions were degenerate and skipped`; only the first three
+  pre-filter skips are spelled out, the summary carries the total.

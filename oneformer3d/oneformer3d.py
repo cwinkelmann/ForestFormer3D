@@ -7,9 +7,10 @@ import MinkowskiEngine as ME
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import PointData
 from mmdet3d.models import Base3DDetector
-from mmengine.logging import MessageHub
-from .tiling import (SemanticVotes, generate_cylindrical_regions,
-                     merge_instances_by_score, relabel_contiguous, sample_region)
+from mmengine.logging import MessageHub, print_log
+from .tiling import (SemanticVotes, degenerate_region_reason,
+                     generate_cylindrical_regions, merge_instances_by_score,
+                     relabel_contiguous, sample_region)
 from .mask_matrix_nms import mask_matrix_nms
 from .ply_io import result_ply_element
 import open3d as o3d
@@ -18,6 +19,7 @@ import numpy as np
 from tools.base_modules import Seq, MLP, FastBatchNorm1d
 from .panoptic_losses import offset_loss, discriminative_loss, FastFocalLoss
 from torch_cluster import fps
+import logging
 import re
 import math
 import collections 
@@ -2155,6 +2157,9 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         step_size = self.radius * float(cfg.get('region_step_factor', 0.25))
         grid_size = 0.2          # voxel size of the tile downsampling
         max_points = 640_000     # cap per tile; lower it on small GPUs
+        # Regions thinner than this cannot survive the backbone's stride-2
+        # downsampling; see `tiling.degenerate_region_reason`.
+        min_region_points = int(cfg.get('min_region_points', 64))
 
         points = batch_inputs_dict['points'][0]
         n_total = points.shape[0]
@@ -2163,8 +2168,10 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         votes = SemanticVotes(n_total, num_cls)
         mask_indices = []        # global point indices of every kept tile mask (CPU)
         mask_scores = []         # its score
+        n_used = 0               # regions that actually reached the backbone
+        n_skipped = 0            # regions dropped as degenerate (pre-filter or spconv)
 
-        for cx, cy in regions.tolist():
+        for region_idx, (cx, cy) in enumerate(regions.tolist()):
             region_mask = ((points[:, 0] - cx) ** 2 + (points[:, 1] - cy) ** 2) <= self.radius ** 2
             pc1_indices = torch.where(region_mask)[0]
             if pc1_indices.numel() == 0:
@@ -2173,9 +2180,42 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             pc2, pc2_indices = self.grid_sample(pc1, pc1_indices, grid_size)
             pc3, pc3_indices = sample_region(pc2, pc2_indices, max_points)
 
-            coordinates, features, inverse_mapping, spatial_shape = self.collate([pc3])
-            x = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
-            x = self.extract_feat(x)
+            reason = degenerate_region_reason(pc3, grid_size, min_region_points)
+            if reason is not None:
+                n_skipped += 1
+                # An empty tile can hold hundreds of these; the summary below
+                # reports the total, so only the first few are spelled out.
+                if n_skipped <= 3:
+                    print_log(
+                        f'{scan_name}: skipping degenerate region {region_idx} '
+                        f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
+                        f'({pc3.shape[0]} after voxel downsampling): {reason}',
+                        logger='current', level=logging.WARNING)
+                del pc1, pc2, pc3
+                continue
+
+            try:
+                coordinates, features, inverse_mapping, spatial_shape = self.collate([pc3])
+                x = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
+                x = self.extract_feat(x)
+            except ValueError as err:
+                # spconv's "Your points vanished here": the region's voxels all
+                # fall outside the output grid of one of the UNet's stride-2
+                # convolutions. Only this region is lost -- its points simply get
+                # no vote here and fall back to whatever the overlapping regions
+                # say, or to nodata (-1) if there are none.
+                n_skipped += 1
+                print_log(
+                    f'{scan_name}: spconv rejected region {region_idx} '
+                    f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
+                    f'({pc3.shape[0]} after voxel downsampling); skipping it: '
+                    f'{str(err).strip().splitlines()[0]}',
+                    logger='current', level=logging.WARNING)
+                del pc1, pc2, pc3
+                torch.cuda.empty_cache()
+                continue
+
+            n_used += 1
             embed_logits = self.Embed(x[0])
             bi_semantic_logits = self.BiSemantic(x[0])
             tree_indices = torch.where(torch.argmax(bi_semantic_logits, dim=1) == 1)[0]
@@ -2211,6 +2251,22 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
 
             del pc1, pc2, pc3, x, embed_logits, bi_semantic_logits, nn_idx
             torch.cuda.empty_cache()
+
+        if n_skipped:
+            print_log(
+                f'{scan_name}: {n_skipped} of {len(regions)} cylinder regions were '
+                f'degenerate and skipped, {n_used} were segmented',
+                logger='current', level=logging.WARNING)
+        if n_used == 0:
+            # Every region was empty or degenerate (a water / bare-ground tile).
+            # Fall through anyway: `votes.resolve()` returns -1 everywhere and
+            # `merge_instances_by_score` returns an all -1 labelling, so the scan
+            # still gets its result PLY -- all points unlabelled -- and the batch's
+            # per-tile files stay complete for the downstream merge.
+            print_log(
+                f'{scan_name}: no usable cylinder region; writing an all-unlabelled '
+                f'result for its {n_total} points',
+                logger='current', level=logging.WARNING)
 
         semantic_pred = votes.resolve()                                   # (N,) cpu
         instance_pred, kept = merge_instances_by_score(
