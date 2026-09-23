@@ -18,11 +18,12 @@ This module puts them back together:
    component root) so consecutive ids are spatially unrelated -- the Potree viewer maps
    ids onto 8192 colour slots by position, and a spatially ordered id scheme paints one
    sub-tile in one colour (see the design doc's section 1a);
-4. each source km tile is rewritten in ITS OWN point order with the labels of the
-   sub-tile whose CORE owns each point, so no point is written twice and the km tiles
-   remain a partition. A core point whose sub-tile was dropped by ``split``'s
-   ``min_points`` keeps the nodata values ``treeID = -1 / semantic = 255 / score = -1``
-   (the older ``ff3d_geo.merge`` path left such points out of the merged LAS entirely).
+4. each km tile that OWNS sub-tiles is rewritten in ITS OWN point order with the labels
+   of the sub-tile whose CORE owns each point, so no point is written twice and the km
+   tiles remain a partition. A point no sub-tile core claimed keeps the nodata values
+   ``treeID = -1 / semantic = 255 / score = -1`` (the older ``ff3d_geo.merge`` path left
+   such points out of the merged LAS entirely). A km tile that only supplied halo points
+   to a neighbour's split owns nothing and is not written at all.
 
 Everything that touches point arrays is vectorised: a km tile is 25 M points over 100
 sub-tiles with 20 m halos (~1.96x its core each), so a per-instance Python pass over
@@ -69,8 +70,13 @@ _CHUNK_POINTS = 2_000_000
 #: the ~8 reads per sub-tile into ~1.
 _CACHE_SIZE = 32
 
-#: Knuth's multiplicative hash constant, used to shuffle component ids (see step 3).
+#: Knuth's multiplicative constant, used to shuffle component ids (see step 3).
 _MIX64 = 0x9E3779B97F4A7C15
+
+#: IoU above which a losing candidate counts as a "runner up" in ``match_instances``'s
+#: optional statistics: the rate at which the greedy one-to-one rule leaves a one-sided
+#: over-segmentation as two ids. Purely diagnostic, it never changes a match.
+RUNNER_UP_IOU = 0.2
 
 _KEY_INDEX_MASK = np.int64(0xFFFFFFFF)
 
@@ -101,6 +107,7 @@ def match_instances(
     labels_b: np.ndarray,
     iou_threshold: float = 0.5,
     min_shared: int = 20,
+    stats: dict | None = None,
 ) -> list[tuple[int, int, float, int]]:
     """Match the instances of two sub-tiles over the points they have in common.
 
@@ -123,6 +130,14 @@ def match_instances(
     Fully vectorised: the pair counting packs ``(la, lb)`` into one int64 and uses a
     single ``np.unique``, rather than ``np.unique(..., axis=1)`` (which sorts rows via
     a void view) or a Python loop over instances.
+
+    ``stats``, when given, is a dict this function accumulates into: it counts, per
+    matched pair, how many OTHER candidates above :data:`RUNNER_UP_IOU` share one of the
+    pair's two labels (``"runner_up_histogram"``, ``{n_runner_ups: n_pairs}``) and how
+    many pairs were matched at all. ``stitch`` writes it to ``stitch.json``: the
+    histogram is the 1:N rate of the greedy one-to-one rule on real data, i.e. how often
+    a one-sided over-segmentation was left as two ids. It costs nothing -- the IoU of
+    every co-occurring label pair is computed anyway.
     """
     keys_a = np.asarray(keys_a)
     keys_b = np.asarray(keys_b)
@@ -157,13 +172,16 @@ def match_instances(
     la_all = (pairs >> np.int64(32)).astype(np.int64)
     lb_all = (pairs & _KEY_INDEX_MASK).astype(np.int64)
 
+    # Every co-occurring label pair, scored. Kept down to RUNNER_UP_IOU (not just
+    # iou_threshold) so the runner-up statistics below see the near misses too.
+    floor_iou = min(iou_threshold, RUNNER_UP_IOU) if stats is not None else iou_threshold
     candidates: list[tuple[int, int, float, int]] = []
     for la, lb, n in zip(la_all.tolist(), lb_all.tolist(), n_ab.tolist()):
         if n < min_shared:
             continue
         union = size_a[la] + size_b[lb] - n
         iou = n / union if union > 0 else 0.0
-        if iou >= iou_threshold:
+        if iou >= floor_iou:
             candidates.append((int(la), int(lb), float(iou), int(n)))
 
     candidates.sort(key=lambda p: (-p[2], p[0], p[1]))
@@ -171,12 +189,35 @@ def match_instances(
     used_b: set[int] = set()
     matched: list[tuple[int, int, float, int]] = []
     for la, lb, iou, n in candidates:
+        if iou < iou_threshold:
+            continue
         if la in used_a or lb in used_b:
             continue
         used_a.add(la)
         used_b.add(lb)
         matched.append((la, lb, iou, n))
+
+    if stats is not None:
+        _record_runner_ups(stats, candidates, matched)
     return matched
+
+
+def _record_runner_ups(stats: dict, candidates: list, matched: list) -> None:
+    """Accumulate, per matched pair, how many other candidates share one of its labels."""
+    by_a: dict[int, int] = {}
+    by_b: dict[int, int] = {}
+    for la, lb, iou, _n in candidates:
+        if iou >= RUNNER_UP_IOU:
+            by_a[la] = by_a.get(la, 0) + 1
+            by_b[lb] = by_b.get(lb, 0) + 1
+    histogram = stats.setdefault("runner_up_histogram", {})
+    for la, lb, iou, _n in matched:
+        # A candidate other than the pair itself shares at most ONE of the two labels,
+        # so it is counted once; the pair itself is counted in both indices.
+        self_counted = 2 if iou >= RUNNER_UP_IOU else 0
+        others = by_a.get(la, 0) + by_b.get(lb, 0) - self_counted
+        histogram[others] = histogram.get(others, 0) + 1
+    stats["n_matched"] = stats.get("n_matched", 0) + len(matched)
 
 
 class UnionFind:
@@ -432,6 +473,13 @@ def _find_results(mosaic: Mosaic, results_dirs) -> dict[str, Path]:
 def _global_ids(uf: UnionFind, nodes: list[tuple[str, int]]) -> dict[tuple[str, int], int]:
     """Assign dense ids ``0..N-1`` to the components of ``nodes``, in shuffled order.
 
+    Note this is a Weyl (low-discrepancy) permutation rather than a hash: consecutive
+    ids come from ranks a fixed few steps apart. That is what the brief asked for and it
+    meets the goal -- a sub-tile's ~300 trees land in ~300 distinct LUT slots and each
+    slot mixes several sub-tiles -- so please do not "fix" it into an avalanche mixer
+    without re-checking the viewer's colouring; the ids are written into published LAS
+    files and changing the permutation renumbers every tree.
+
     The order is the multiplicative hash of the component root's RANK among the sorted
     roots, not of anything spatial: ids that follow each other must not belong to
     neighbouring trees, because the Potree viewer buckets the id range into 8192 colour
@@ -476,14 +524,15 @@ def _label_lookup(tables: dict[str, tuple[np.ndarray, np.ndarray]], stem: str,
 
 
 def _write_source_las(source: dict, out_las: Path, tree_id: np.ndarray,
-                      semantic: np.ndarray, score: np.ndarray) -> None:
+                      semantic: np.ndarray, score: np.ndarray,
+                      epsg: int = EPSG) -> None:
     """Rewrite a source km tile with the stitched labels, in its own point order."""
     source_path = Path(source["path"])
     out_las.parent.mkdir(parents=True, exist_ok=True)
     tmp_las = out_las.with_name(out_las.name + ".tmp")
     try:
         with laspy.open(str(source_path)) as reader:
-            header = result_point_header(EPSG, [0.001, 0.001, 0.001],
+            header = result_point_header(epsg, [0.001, 0.001, 0.001],
                                          np.floor(reader.header.mins))
             source_dims = {d.name for d in reader.header.point_format.dimensions}
             copy_dims = [d for d in _COPY_DIMS if d in source_dims]
@@ -521,20 +570,30 @@ def _write_source_las(source: dict, out_las: Path, tree_id: np.ndarray,
 
 
 def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
-           min_shared: int = 20, runtime_s: float | None = None) -> dict:
+           min_shared: int = 20, runtime_s: float | None = None,
+           epsg: int = EPSG) -> dict:
     """Unify sub-tile instances over their halo overlaps and rewrite the km tiles.
 
     ``manifests`` are ``split_manifest.json`` paths, ``results_dirs`` the directories
     holding ``<stem>.las`` per sub-tile (searched in order; a missing one raises
     ``FileNotFoundError`` naming the stem). Writes per source km tile ``<out>/<S>.las``
     (all of its points, in its own order, with the extra dims of
-    :func:`ff3d_geo.convert.result_point_header`), ``<S>_trees.gpkg`` and
+    :func:`ff3d_geo.convert.result_point_header` and the CRS ``epsg``, which a caller
+    should set to whatever ``las_to_ply`` used), ``<S>_trees.gpkg`` and
     ``<S>_report.json``/``.md``, plus ``<out>/stitch_ids.npy`` (the
     ``(gid, stem, local)`` id map) and ``<out>/stitch.json``.
 
+    Only the sources that OWN at least one sub-tile are written. ``Mosaic.sources`` also
+    holds the km tiles that merely supplied halo points to somebody else's split
+    (``split_las(..., neighbours=[...])`` lists them); no sub-tile core covers those, so
+    writing them would produce a full-size km tile of pure nodata and a report claiming
+    zero trees. They are named in ``stitch.json``'s ``neighbour_only_sources`` instead.
+
     A tree on a km-tile border ends up with the SAME global id in both km tiles, which
-    is the whole point of the exercise; a core point no sub-tile claimed (its sub-tile
-    was dropped by ``split``'s ``min_points``) keeps ``-1 / 255 / -1.0``.
+    is the whole point of the exercise. A point keeps the nodata values
+    ``-1 / 255 / -1.0`` when no sub-tile core claimed it -- because its sub-tile was
+    dropped by ``split``'s ``min_points``, or because the run simply has no result for
+    that part of the km tile.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -546,6 +605,7 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
     source_of = {sub["stem"]: sub["source"] for sub in mosaic.subtiles}
 
     uf = UnionFind()
+    match_stats: dict = {}
     n_pairs_tested = 0
     n_unified = 0
     n_cross_km = 0
@@ -556,7 +616,7 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
         cross = source_of[stem_a] != source_of[stem_b]
         for la, lb, _iou, _n in match_instances(
             a.keys, a.labels, b.keys, b.labels,
-            iou_threshold=iou_threshold, min_shared=min_shared,
+            iou_threshold=iou_threshold, min_shared=min_shared, stats=match_stats,
         ):
             if uf.union((stem_a, la), (stem_b, lb)):
                 n_unified += 1
@@ -575,13 +635,23 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
     tables = _lookup_tables(gids)
     n_trees = len(set(gids.values()))
 
-    id_map = np.empty(len(nodes), dtype=[("gid", "u4"), ("stem", "U64"), ("local", "i4")])
+    # The stem field is sized to the longest stem actually present: a fixed "U64" would
+    # silently TRUNCATE a longer one (a custom split --prefix), and a truncated stem
+    # makes the id map unjoinable with the sub-tile results.
+    stem_width = max((len(stem) for stem, _ in nodes), default=1)
+    id_map = np.empty(len(nodes),
+                      dtype=[("gid", "u4"), ("stem", f"U{stem_width}"), ("local", "i4")])
     for i, (stem, label) in enumerate(sorted(nodes)):
         id_map[i] = (gids[(stem, label)], stem, label)
     np.save(out_dir / "stitch_ids.npy", id_map)
 
+    owning_sources = {sub["source"] for sub in mosaic.subtiles}
+    neighbour_only = [s["key"] for s in mosaic.sources if s["key"] not in owning_sources]
+
     tiles: dict[str, dict] = {}
     for source in mosaic.sources:
+        if source["key"] not in owning_sources:
+            continue
         source_stem = Path(source["path"]).stem
         n_points = int(source["n_points"])
         tree_id = np.full(n_points, NODATA_TREE_ID, dtype=np.int32)
@@ -596,13 +666,26 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
             # A core point always comes from this source, but the halo does not, so the
             # ownership mask is core AND "from this km tile" before indexing by index.
             own = data.core & ((data.keys >> np.int64(32)) == global_tile)
+            # The core box is re-derived here from the RESULT LAS coordinates, which
+            # went through split's local shift, the model's float32 PLY and
+            # results_to_las; split computed it on the source coordinates. They agree
+            # today, but a point that flipped side would silently be written twice (last
+            # writer wins below) or not at all, so the count is checked against the
+            # manifest -- cheaper and sharper than any coordinate tolerance.
+            if int(own.sum()) != sub["n_core"]:
+                raise ValueError(
+                    f"stitch: sub-tile {sub['stem']} owns {int(own.sum())} points of "
+                    f"{source['key']} but split recorded n_core={sub['n_core']}; core "
+                    "membership no longer round-trips through the result LAS "
+                    "coordinates, so points would be written twice or not at all"
+                )
             index = (data.keys[own] & _KEY_INDEX_MASK).astype(np.int64)
             tree_id[index] = _label_lookup(tables, sub["stem"], data.labels[own])
             semantic[index] = data.semantic[own]
             score[index] = data.score[own]
 
         out_las = out_dir / f"{source_stem}.las"
-        _write_source_las(source, out_las, tree_id, semantic, score)
+        _write_source_las(source, out_las, tree_id, semantic, score, epsg=epsg)
         out_gpkg = out_dir / f"{source_stem}_trees.gpkg"
         n_trees_in_tile = trees_to_gpkg(out_las, out_gpkg)
         report = build_report(out_las, out_gpkg, runtime_s=runtime_s)
@@ -626,10 +709,18 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
         **{k: v for k, v in info.items() if k != "tiles"},
         "n_subtiles": len(mosaic.subtiles),
         "n_sources": len(mosaic.sources),
+        "neighbour_only_sources": neighbour_only,
         "size_m": mosaic.size_m,
         "buffer_m": mosaic.buffer_m,
+        "epsg": int(epsg),
         "iou_threshold": float(iou_threshold),
         "min_shared": int(min_shared),
+        # How often the greedy one-to-one rule left a second plausible partner on the
+        # table: {number of other candidates above RUNNER_UP_IOU sharing a label with
+        # the matched pair: number of matched pairs}.
+        "runner_up_iou": RUNNER_UP_IOU,
+        "runner_up_histogram": {str(k): v for k, v in
+                                sorted(match_stats.get("runner_up_histogram", {}).items())},
         "manifests": [str(Path(m).resolve()) for m in manifest_paths],
         "tiles": tiles,
     }, indent=2))
