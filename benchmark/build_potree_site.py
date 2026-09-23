@@ -13,6 +13,12 @@ light-weight overlays that the viewer drapes on top of them:
   data/<tile>_dop2025.png|.json   leaf-on orthophoto   (downsampled)
   data/tiles.json               manifest read by index.html
 
+With ``--variant sat --sat-dir <dir>`` it instead attaches a second segmentation
+(SegmentAnyTree, converted to the same contract by benchmark/sat_to_ff3d.py) to tiles
+already in the manifest: the octree is expected under ``pointclouds_sat/<tile>/``, and
+``data/<tile>_sat_trees.geojson``, ``_sat_crowns.geojson`` and ``_sat_instance.png|.json``
+are written; ``tiles.json`` gets ``variants.sat`` per tile. CHM and orthophotos are shared.
+
 Example
 -------
     .venv-cpu/bin/python benchmark/build_potree_site.py \
@@ -182,7 +188,8 @@ def write_dop_png(tif: Path, out_png: Path, out_json: Path, bounds, px: int, gro
     _extent_json(out_json, bounds, {"z": round(ground_z, 2)})
 
 
-def write_vectors(ff3d_dir: Path, tile: str, data_dir: Path):
+def write_vectors(ff3d_dir: Path, tile: str, data_dir: Path, infix: str = ""):
+    """``data/<tile><infix>_trees.geojson`` and ``_crowns.geojson`` from ``<dir>/<tile>/``."""
     import geopandas as gpd
     from shapely.geometry import mapping
 
@@ -204,7 +211,7 @@ def write_vectors(ff3d_dir: Path, tile: str, data_dir: Path):
                 "top_z": round(float(row.top_z), 2),
             },
         })
-    p = data_dir / f"{tile}_trees.geojson"
+    p = data_dir / f"{tile}{infix}_trees.geojson"
     p.write_text(json.dumps({"type": "FeatureCollection", "crs_note": CRS,
                              "features": feats}))
     out["trees"] = {"file": p.name, "count": len(feats)}
@@ -221,11 +228,60 @@ def write_vectors(ff3d_dir: Path, tile: str, data_dir: Path):
             "geometry": {"type": "Polygon", "coordinates": _round_coords(g["coordinates"], 1)},
             "properties": {"tree_id": int(row.tree_id), "top_z": round(float(row.top_z), 2)},
         })
-    p = data_dir / f"{tile}_crowns.geojson"
+    p = data_dir / f"{tile}{infix}_crowns.geojson"
     p.write_text(json.dumps({"type": "FeatureCollection", "crs_note": CRS,
                              "features": feats}))
     out["crowns"] = {"file": p.name, "count": len(feats)}
     return out
+
+
+def attach_variant(recs: list[dict], tile: str, name: str, sub: dict) -> dict:
+    """Store ``sub`` as ``variants[name]`` of the manifest record of ``tile``.
+
+    The top-level fields of a record stay the ForestFormer3D variant (the viewer's
+    default, and what older manifests hold); a second method only ever adds to
+    ``variants``. Raises ``KeyError`` when the tile is not in the manifest, because a
+    variant without the base record (CHM, DOPs, bounds) cannot be shown.
+    """
+    for rec in recs:
+        if rec["tile"] == tile:
+            rec.setdefault("variants", {})[name] = sub
+            return rec
+    raise KeyError(f"{tile} is not in the manifest; build the ForestFormer3D variant first")
+
+
+def build_variant(tile: str, name: str, args_dict: dict) -> dict:
+    """The ``variants[name]`` sub-record: octree under ``pointclouds_<name>/<tile>/``,
+    vectors and instance overlay from ``<variant dir>/<tile>/`` with ``_<name>_`` names."""
+    a = argparse.Namespace(**args_dict)
+    src_dir = Path(a.variant_dir)
+    site = Path(a.site)
+    data_dir = site / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    import laspy
+
+    meta = json.loads((site / f"pointclouds_{name}" / tile / "metadata.json").read_text())
+    las = src_dir / tile / f"{tile}.las"
+    hdr = laspy.open(str(las)).header
+    bounds = tile_bounds_from_name(hdr)
+    ground_z = json.loads((data_dir / f"{tile}_chm.json").read_text())["z"]
+    sub: dict = {
+        "pointcloud": f"pointclouds_{name}/{tile}/metadata.json",
+        "points": meta["points"],
+        "attributes": {at["name"]: {"min": at.get("min"), "max": at.get("max")}
+                       for at in meta["attributes"]},
+        "layers": {},
+    }
+    inst = src_dir / tile / f"{tile}_instance_50cm.tif"
+    if inst.exists():
+        write_instance_png(inst, data_dir / f"{tile}_{name}_instance.png",
+                           data_dir / f"{tile}_{name}_instance.json", bounds, ground_z)
+        sub["layers"]["instance"] = {"png": f"data/{tile}_{name}_instance.png",
+                                     "json": f"data/{tile}_{name}_instance.json"}
+    vec = write_vectors(src_dir, tile, data_dir, infix=f"_{name}")
+    sub["trees"] = {"file": f"data/{vec['trees']['file']}", "count": vec["trees"]["count"]}
+    sub["crowns"] = {"file": f"data/{vec['crowns']['file']}", "count": vec["crowns"]["count"]}
+    return sub
 
 
 # --------------------------------------------------------------------------- tile
@@ -289,7 +345,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--site", required=True, help="output site root (holds pointclouds/)")
-    p.add_argument("--ff3d-dir", required=True, help="dir with <tile>/<tile>.las + gpkg + tif")
+    p.add_argument("--ff3d-dir", default=None, help="dir with <tile>/<tile>.las + gpkg + tif")
+    p.add_argument("--variant", default=None, choices=["sat"],
+                   help="attach a second method to tiles already in the manifest")
+    p.add_argument("--variant-dir", "--sat-dir", dest="variant_dir", default=None,
+                   help="dir with <tile>/<tile>.las + gpkg + tif of that method")
     p.add_argument("--dop2021-dir", default=None)
     p.add_argument("--dop2025-dir", default=None)
     p.add_argument("--tiles", nargs="*", default=None, help="subset of tile names")
@@ -304,6 +364,12 @@ def main() -> int:
     a = p.parse_args()
 
     site = Path(a.site)
+    manifest_path = site / "data" / "tiles.json"
+    if a.variant:
+        return build_variant_main(a, site, manifest_path)
+    if not a.ff3d_dir:
+        p.error("--ff3d-dir is required unless --variant is given")
+
     pc_dir = site / "pointclouds"
     tiles = a.tiles or sorted(
         d.name for d in pc_dir.iterdir()
@@ -313,7 +379,6 @@ def main() -> int:
         print(f"no tiles found under {pc_dir}", file=sys.stderr)
         return 1
 
-    manifest_path = site / "data" / "tiles.json"
     old = {}
     if a.skip_existing and manifest_path.exists():
         old = {t["tile"]: t for t in json.loads(manifest_path.read_text())["tiles"]}
@@ -338,10 +403,61 @@ def main() -> int:
     manifest_path.write_text(json.dumps({"crs": CRS, "tiles": recs}, indent=1))
     print(f"wrote {manifest_path} ({len(recs)} tiles)")
 
-    if not a.no_index:
-        tpl = Path(__file__).with_name("potree_index.html")
-        (site / "index.html").write_text(tpl.read_text())
-        print(f"wrote {site / 'index.html'} from {tpl}")
+    write_index(site, a.no_index)
+    return 0
+
+
+def write_index(site: Path, no_index: bool) -> None:
+    if no_index:
+        return
+    tpl = Path(__file__).with_name("potree_index.html")
+    (site / "index.html").write_text(tpl.read_text())
+    print(f"wrote {site / 'index.html'} from {tpl}")
+
+
+def build_variant_main(a, site: Path, manifest_path: Path) -> int:
+    """``--variant <name>``: add that method's octrees/vectors to the existing manifest."""
+    name = a.variant
+    if not a.variant_dir:
+        print("--variant needs --variant-dir (--sat-dir)", file=sys.stderr)
+        return 1
+    if not manifest_path.exists():
+        print(f"{manifest_path} missing: build the ForestFormer3D site first", file=sys.stderr)
+        return 1
+    manifest = json.loads(manifest_path.read_text())
+    recs = manifest["tiles"]
+    known = {r["tile"] for r in recs}
+    pc_dir = site / f"pointclouds_{name}"
+    tiles = a.tiles
+    if not tiles and pc_dir.is_dir():
+        tiles = sorted(
+            d.name for d in pc_dir.iterdir()
+            if (d / "metadata.json").exists()
+            and (Path(a.variant_dir) / d.name / f"{d.name}.las").exists()
+        )
+    if not tiles:
+        print(f"no {name} tiles found under {pc_dir}", file=sys.stderr)
+        return 1
+    if a.skip_existing:
+        tiles = [t for t in tiles if not (next((r for r in recs if r["tile"] == t), {})
+                                          .get("variants", {}).get(name))]
+    args_dict = vars(a)
+    print(f"building {name} variant for {len(tiles)} tile(s) with {a.jobs} job(s)")
+    with ProcessPoolExecutor(max_workers=max(1, a.jobs)) as ex:
+        futs = {ex.submit(build_variant, t, name, args_dict): t for t in tiles if t in known}
+        for t in set(tiles) - known:
+            print(f"  SKIP {t}: not in the manifest (no ForestFormer3D variant)")
+        for fut in as_completed(futs):
+            t = futs[fut]
+            try:
+                attach_variant(recs, t, name, fut.result())
+                print(f"  ok   {t}", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  FAIL {t}: {exc!r}", flush=True)
+    manifest_path.write_text(json.dumps(manifest, indent=1))
+    n = sum(1 for r in recs if r.get("variants", {}).get(name))
+    print(f"wrote {manifest_path} ({n} tiles carry the {name} variant)")
+    write_index(site, a.no_index)
     return 0
 
 

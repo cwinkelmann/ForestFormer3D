@@ -3,7 +3,7 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-	<title>Berlin ALS 2021 &mdash; ForestFormer3D tree segmentation</title>
+	<title>Berlin ALS 2021 &mdash; tree segmentation (ForestFormer3D / SegmentAnyTree)</title>
 
 	<link rel="stylesheet" type="text/css" href="build/potree/potree.css">
 	<link rel="stylesheet" type="text/css" href="libs/jquery-ui/jquery-ui.min.css">
@@ -83,8 +83,11 @@
 	</div>
 
 	<div id="ff3d_panel">
-		<h1>Berlin ALS 2021 &mdash; ForestFormer3D</h1>
+		<h1>Berlin ALS 2021 &mdash; tree segmentation</h1>
 		<div class="muted" id="ff3d_intro">loading tile manifest &hellip;</div>
+
+		<h2>Method</h2>
+		<div id="ff3d_methods"></div>
 
 		<h2>Tiles</h2>
 		<div id="ff3d_tiles"></div>
@@ -146,11 +149,28 @@
 			tiles: new Map(),                       // tile -> record
 			loaded: new Map(),                      // tile -> {pointcloud, meshes, crowns, markers, trees}
 			colorMode: "treeid",
+			method: "ff3d",                         // which segmentation the loaded tiles show
+			wanted: new Set(),                      // tiles the user checked (survive a method switch)
 			layers: { chm: false, instance: false, dop2021: false, dop2025: false },
 			opacity: { chm: 0.85, instance: 0.85, dop2021: 1.0, dop2025: 1.0 },
 			vectors: { crowns: false, markers: false },
 			dz: 0,
 		};
+
+		// ------------------------------------------------------------------ methods
+		// A manifest record holds the ForestFormer3D products at its top level and any
+		// second method under variants[<key>] (build_potree_site.py --variant). view()
+		// returns the record as the active method sees it: octree, attributes, tree
+		// count, vectors and instance mask from the variant; bounds, ground, CHM and
+		// orthophotos (which depend only on the input tile) from the base record.
+		const METHODS = { ff3d: "ForestFormer3D", sat: "SegmentAnyTree" };
+		function view(rec, method = state.method) {
+			if (!rec || method === "ff3d") return rec;
+			const v = rec.variants && rec.variants[method];
+			if (!v) return null;
+			return Object.assign({}, rec, v, { layers: Object.assign({}, rec.layers, v.layers || {}) });
+		}
+		function hasMethod(rec, method = state.method) { return view(rec, method) !== null; }
 
 		// --------------------------------------------------- categorical LUT textures
 		// Potree's renderer uploads the gradient texture only for textures created by its
@@ -306,10 +326,10 @@
 		function applyColorMode() {
 			for (const [tile, L] of state.loaded) {
 				if (!L.pointcloud) continue;
-				try { COLOR_MODES[state.colorMode].apply(L.pointcloud, state.tiles.get(tile)); }
+				try { COLOR_MODES[state.colorMode].apply(L.pointcloud, view(state.tiles.get(tile))); }
 				catch (e) { console.warn("colour mode failed for", tile, e); }
 			}
-			const anyRec = state.loaded.size ? state.tiles.get([...state.loaded.keys()][0]) : null;
+			const anyRec = state.loaded.size ? view(state.tiles.get([...state.loaded.keys()][0])) : null;
 			document.getElementById("ff3d_legend").innerHTML =
 				COLOR_MODES[state.colorMode].legend(anyRec);
 			for (const b of document.querySelectorAll("#ff3d_colors button"))
@@ -416,8 +436,9 @@
 
 		async function loadTile(tile) {
 			if (state.loaded.has(tile)) return;
-			const rec = state.tiles.get(tile);
-			const L = { pointcloud: null, meshes: {}, crowns: null, markers: null, trees: [] };
+			const rec = view(state.tiles.get(tile));
+			if (!rec) { console.warn("no", METHODS[state.method], "variant for", tile); renderTileList(); return; }
+			const L = { pointcloud: null, meshes: {}, crowns: null, markers: null, trees: [], method: state.method };
 			state.loaded.set(tile, L);
 
 			for (const key of ["chm", "instance", "dop2021", "dop2025"]) {
@@ -489,20 +510,65 @@
 		function renderTileList() {
 			const el = document.getElementById("ff3d_tiles");
 			el.innerHTML = "";
-			for (const [tile, rec] of state.tiles) {
+			for (const [tile, base] of state.tiles) {
+				const rec = view(base);
 				const short = tile.replace(/^3dm_33_/, "").replace(/_1_be$/, "");
 				const div = document.createElement("div");
 				div.className = "tile";
 				const cb = document.createElement("input");
 				cb.type = "checkbox";
-				cb.checked = state.loaded.has(tile);
-				cb.onchange = () => { cb.checked ? loadTile(tile) : unloadTile(tile); };
+				cb.checked = state.wanted.has(tile);
+				cb.disabled = !rec;
+				cb.onchange = () => {
+					if (cb.checked) { state.wanted.add(tile); loadTile(tile); }
+					else { state.wanted.delete(tile); unloadTile(tile); }
+				};
 				const lab = document.createElement("span");
-				lab.innerHTML = `${short} <span class="st">${(rec.points / 1e6).toFixed(1)} M pts &middot;
-					${rec.trees.count.toLocaleString()} trees</span>`;
+				lab.innerHTML = rec
+					? `${short} <span class="st">${(rec.points / 1e6).toFixed(1)} M pts &middot;
+					${rec.trees.count.toLocaleString()} trees</span>`
+					: `${short} <span class="st">no ${METHODS[state.method]} result</span>`;
 				div.appendChild(cb); div.appendChild(lab);
 				el.appendChild(div);
 			}
+		}
+
+		// Switching the method reloads every checked tile from the other method's octree
+		// and vectors (a Potree point cloud cannot swap its geometry in place). A tile
+		// without a result in the new method stays checked-but-unloaded and comes back
+		// when switching again.
+		async function setMethod(key) {
+			if (key === state.method) return;
+			for (const tile of [...state.loaded.keys()]) unloadTile(tile);
+			state.method = key;
+			for (const b of document.querySelectorAll("#ff3d_methods button"))
+				b.classList.toggle("active", b.dataset.method === key);
+			renderTileList();
+			for (const tile of state.wanted) if (hasMethod(state.tiles.get(tile))) await loadTile(tile);
+			applyColorMode();
+			updateIntro();
+		}
+
+		function buildMethodButtons() {
+			const el = document.getElementById("ff3d_methods");
+			for (const [key, label] of Object.entries(METHODS)) {
+				const b = document.createElement("button");
+				b.textContent = label;
+				b.dataset.method = key;
+				b.classList.toggle("active", key === state.method);
+				b.onclick = () => setMethod(key);
+				el.appendChild(b);
+			}
+		}
+
+		function updateIntro() {
+			const tiles = [...state.tiles.values()];
+			const avail = tiles.filter(r => hasMethod(r));
+			const totalTrees = avail.reduce((a, r) => a + view(r).trees.count, 0);
+			const totalPts = avail.reduce((a, r) => a + view(r).points, 0);
+			document.getElementById("ff3d_intro").innerHTML =
+				`<b>${METHODS[state.method]}</b>: ${avail.length} of ${tiles.length} km&sup2; tiles &middot;
+				 ${(totalPts / 1e6).toFixed(0)} M points &middot; ${totalTrees.toLocaleString()} trees &middot; EPSG:25833`;
 		}
 
 		function buildColorButtons() {
@@ -610,6 +676,7 @@
 			popup.innerHTML = `
 				<span class="x">&times;</span><b>tree ${p.tree_id}</b>
 				<table>
+					<tr><td class="k">method</td><td>${METHODS[(state.loaded.get(best.tile) || {}).method || "ff3d"]}</td></tr>
 					<tr><td class="k">tile</td><td>${best.tile.replace(/^3dm_33_/, "").replace(/_1_be$/, "")}</td></tr>
 					<tr><td class="k">height</td><td>${p.height.toFixed(2)} m</td></tr>
 					<tr><td class="k">top z</td><td>${p.top_z.toFixed(2)} m</td></tr>
@@ -626,6 +693,7 @@
 		// --------------------------------------------------------------------- start
 		document.getElementById("ff3d_fit").onclick = fitToLoaded;
 		document.getElementById("ff3d_unload_all").onclick = () => {
+			state.wanted.clear();
 			for (const tile of [...state.loaded.keys()]) unloadTile(tile);
 		};
 		const dz = document.getElementById("ff3d_dz");
@@ -635,21 +703,22 @@
 			refreshDrapeZ();
 		};
 
+		buildMethodButtons();
 		buildColorButtons();
 		buildLayerControls();
 		buildVectorControls();
 
 		fetch("data/tiles.json").then(r => r.json()).then(async manifest => {
 			for (const rec of manifest.tiles) state.tiles.set(rec.tile, rec);
-			const totalTrees = manifest.tiles.reduce((a, r) => a + r.trees.count, 0);
-			const totalPts = manifest.tiles.reduce((a, r) => a + r.points, 0);
-			document.getElementById("ff3d_intro").innerHTML =
-				`${manifest.tiles.length} km&sup2; tiles &middot; ${(totalPts / 1e6).toFixed(0)} M points &middot;
-				 ${totalTrees.toLocaleString()} trees &middot; ${manifest.crs}`;
+			const m = new URLSearchParams(location.search).get("method");
+			if (m && METHODS[m]) state.method = m;
+			for (const b of document.querySelectorAll("#ff3d_methods button"))
+				b.classList.toggle("active", b.dataset.method === state.method);
+			updateIntro();
 			renderTileList();
 			applyColorMode();
 			const first = manifest.tiles[0];
-			if (first) { await loadTile(first.tile); fitToLoaded(); }
+			if (first) { state.wanted.add(first.tile); await loadTile(first.tile); fitToLoaded(); }
 		}).catch(err => {
 			console.error("FF3D chain failed:", err && err.stack ? err.stack : err);
 			document.getElementById("ff3d_intro").innerHTML =

@@ -150,3 +150,21 @@ def test_patched_copy_leaves_terminated_descriptions_alone(tmp_path):
     dst = tmp_path / "dst.las"
     assert patched_copy(src, dst) == []
     assert src.read_bytes() == dst.read_bytes()
+
+
+def test_attach_variant_keeps_the_base_record_and_refuses_unknown_tiles():
+    from build_potree_site import attach_variant
+
+    recs = [{"tile": "a", "pointcloud": "pointclouds/a/metadata.json", "trees": {"count": 3},
+             "layers": {"chm": {"png": "data/a_chm.png"}}}]
+    sub = {"pointcloud": "pointclouds_sat/a/metadata.json", "trees": {"count": 5},
+           "layers": {"instance": {"png": "data/a_sat_instance.png"}}}
+    rec = attach_variant(recs, "a", "sat", sub)
+    assert rec is recs[0]
+    assert rec["pointcloud"] == "pointclouds/a/metadata.json" and rec["trees"]["count"] == 3
+    assert rec["variants"]["sat"] is sub
+    assert rec["layers"] == {"chm": {"png": "data/a_chm.png"}}   # shared layers untouched
+    attach_variant(recs, "a", "sat", {"trees": {"count": 6}})     # a rebuild replaces it
+    assert rec["variants"]["sat"]["trees"]["count"] == 6
+    with pytest.raises(KeyError):
+        attach_variant(recs, "b", "sat", sub)
