@@ -102,7 +102,8 @@ instead of offsetting each sub-tile's ids into a disjoint range:
   so the SAME physical tree gets the SAME id in every sub-tile (and every km tile) that saw
   it. It rewrites each source km tile that owns at least one sub-tile core as one seamless
   `<T>.las` / `<T>_trees.gpkg` / `<T>_report.json/.md` (a km tile that only supplied halo
-  points to a neighbour is not written). This is a single call over the WHOLE mosaic being
+  points to a neighbour is not written). A tree spanning a km-tile border gets one tree-table
+  row, in the tile holding most of its points, computed over all of its points. This is a single call over the WHOLE mosaic being
   stitched, not per km tile, so ids stay unique and dense across all of it; benchmark's
   production wrapper is `benchmark/berlin_stitch.sh`, run once all of `berlin_run_gpu.sh`'s
   per-GPU queues have finished.

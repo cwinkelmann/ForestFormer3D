@@ -27,8 +27,10 @@ Per km tile, after `stitch`, `masks` and `border-check` (the production path;
 `ff3d-inference-km-tiles`): `<T>.las`, `<T>_trees.gpkg`, `<T>_report.json/.md`,
 `<T>_instance_50cm.tif`, `<T>_semantic_50cm.tif`, `<T>_crowns.gpkg`, `<T>_border.json`, plus
 two mosaic-wide (not per-tile) files in `--out`: `stitch.json` (the run summary —
-`n_trees`, `n_pairs_tested`, `n_unified`, `n_cross_km`, `neighbour_only_sources`,
-`runner_up_histogram`) and `stitch_ids.npy` (the `(gid, stem, local)` map from every global
+`n_trees`, `n_pairs_tested`, `n_unified`, `n_cross_km` (unified pairs across a km-tile
+border), `n_cross_km_trees` (trees whose points span more than one km tile),
+`neighbour_only_sources`, `runner_up_histogram`, `runner_up_iou`, `n_subtiles`,
+`n_sources`, `size_m`, `buffer_m`) and `stitch_ids.npy` (the `(gid, stem, local)` map from every global
 id back to the sub-tile and local instance id(s) it was unified from).
 
 **Tree ids are mosaic-wide and dense**: `stitch` matches instances across every adjacent
@@ -43,13 +45,14 @@ border-check --las <T>.las --json <T>_border.json` measures what is left of the 
 stitching: the strip of unlabelled vegetation along the sub-tile grid lines and how many
 crowns still get cut by them (see `ff3d-inference-km-tiles` section 2).
 
-**A tree on a km-tile border has a row in BOTH tiles' tables.** `stitch` writes
-`trees_to_gpkg` once per km tile it owns, so a unified tree appears in `<A>_trees.gpkg`
-*and* `<B>_trees.gpkg` under the SAME `tree_id`, each row built only from that file's own
-points (so `n_points`, `crown_area_m2` and possibly `top_z`/`height` are partial in each,
-and the two rows do not sum to the whole tree). Concatenating tree tables across a mosaic
-therefore double-counts every border tree; `stitch.json`'s mosaic-wide `n_trees` (not the
-sum of `tiles[*].n_trees_in_tile`) is the deduplicated count. Also: **re-stitching a larger
+**A tree on a km-tile border has exactly ONE row, in the tile holding most of its points**
+(tie: the tile with its highest point). `stitch` computes that row over ALL the tree's
+points across every km tile it spans, so `n_points`, `crown_area_m2`, `top_z` and `height`
+describe the whole tree, and the same `tree_id` in the other tile's `.las` has no row
+there. Concatenating the per-tile tree tables of one `stitch` call therefore gives exactly
+`stitch.json`'s `n_trees` rows, and the per-tile `n_trees_in_tile` / report `n_trees` sum
+to that mosaic total; `stitch.json`'s `n_cross_km_trees` says how many trees span more
+than one km tile. Also: **re-stitching a larger
 mosaic renumbers every id** — ids are assigned per `stitch` call over exactly the tiles
 given to it, so a tree's id is not stable across two different mosaics (e.g. stitching one
 new tile in with its neighbours vs. stitching the whole region at once); treat ids as valid
@@ -74,7 +77,9 @@ when completeness matters.
 **Report JSON keys**: `tile, n_points, n_trees, chm_baseline_count, height_stats,
 chm_height_stats, ground_vs_vegetation_agreement, nodata_fraction, n_voted, confusion,
 per_class_counts, runtime_s, recommendation`, plus `buildings` once the
-ALKIS mask has run (section 4). `recommendation.first_pass_usable` is true
+ALKIS mask has run (section 4). A `stitch`-produced report additionally carries
+`n_trees_in_las` (distinct ids in this tile's `.las`, border trees included); `n_trees`
+there is the owned-row count described above. `recommendation.first_pass_usable` is true
 when the tree count is within ±50 % of the CHM local-maxima baseline **and** the median
 height within 3 m of the CHM median. For a `stitch`-produced report, `runtime_s` is
 `--runtime-s` **as given to that `stitch` call — the summed GPU wall time of the WHOLE
