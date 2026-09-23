@@ -442,6 +442,13 @@ def run_ams3d_pipeline(las_path, out_dir, params: Ams3dParams = Ams3dParams(),
     t0 = time.perf_counter()
     results: list[dict] = []
     n_workers = min(workers, len(jobs))
+    # numpy's and scipy's bundled OpenBLAS each start a thread pool sized to the host
+    # (64 threads apiece on carrot's 224 cores) in every spawned worker; 48 workers x
+    # 127 pool threads then spend their time in the pool barrier and the km tile
+    # crawled at ~13 runnable processes. Spawned children inherit os.environ, and
+    # OpenBLAS reads these on import, so pin the pools to one thread per worker.
+    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
     if n_workers == 1:
         for job in jobs:
             info = _subtile_job(job)
