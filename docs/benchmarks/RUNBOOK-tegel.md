@@ -232,10 +232,10 @@ Notes:
   `merge` has run and the merged files are copied back, clear them per tile with
 
   ```bash
-  rm data/ForAINetV2/test_data/<T>_E*_100m.ply data/ForAINetV2/forainetv2_instance_data/<T>_E*_100m_*.npy
+  P=${T%_1_be}; rm data/ForAINetV2/test_data/${P}_E*_100m.ply data/ForAINetV2/forainetv2_instance_data/${P}_E*_100m_*.npy
   ```
 
-  (`<T>` without the `_1_be` suffix, i.e. the sub-tile prefix `split` used - check one
+  (`$P` is `$T` without the `_1_be` suffix, i.e. the sub-tile prefix `split` used - check one
   file name from `split-$T.txt` first). The tracked benchmark plots do not match that
   glob. The split *inputs* live in `inputs/berlin/sub/<T>/` and are separate - keep them
   if the tile might be re-run, delete that directory otherwise; `work_dirs/berlin-$T/`
