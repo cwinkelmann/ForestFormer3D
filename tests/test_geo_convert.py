@@ -155,3 +155,14 @@ def test_results_to_las_rejects_point_count_mismatch(tmp_path):
 
     with pytest.raises(ValueError, match="3 points"):
         results_to_las(result_ply, sidecar_path, offsets_npy, tmp_path / "out.las")
+
+
+def test_result_point_header_matches_results_to_las():
+    from ff3d_geo.convert import result_point_header
+    h = result_point_header(25833, [0.001] * 3, [0.0, 0.0, 0.0])
+    assert h.point_format.id == 6 and str(h.version) == "1.4"
+    assert [(d.name, d.description) for d in h.point_format.extra_dimensions] == [
+        ("treeID", "ForestFormer3D instance, -1 none"),
+        ("semantic", "0 ground 1 wood 2 leaf 255 n/a"),
+        ("score", "instance score")]
+    assert h.parse_crs().to_epsg() == 25833

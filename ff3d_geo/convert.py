@@ -25,6 +25,38 @@ _PLY_INPUT_DTYPE = [
 # Value written to the ``semantic`` extra dim for points the model left unlabelled (-1).
 SEMANTIC_UNLABELLED = 255
 
+# The three extra dimensions of a result LAS, with their descriptions. laspy compares
+# point formats dimension by dimension and a DimensionInfo carries its description, so
+# a writer that re-declares these from names only produces a format that compares
+# unequal to a results_to_las file ("Incompatible point formats" in merge/stitch).
+RESULT_EXTRA_DIMS = (
+    ("treeID", np.int32, "ForestFormer3D instance, -1 none"),
+    ("semantic", np.uint8, "0 ground 1 wood 2 leaf 255 n/a"),
+    ("score", np.float32, "instance score"),
+)
+
+
+def result_point_header(epsg: int, scales, offsets) -> laspy.LasHeader:
+    """The LAS 1.4 / point format 6 header every ForestFormer3D result file uses.
+
+    ``scales`` and ``offsets`` are the three-element LAS scale/offset vectors (LAS
+    X/Y/Z are int32, so at UTM scale the offsets must sit near the data). The three
+    extra dimensions of :data:`RESULT_EXTRA_DIMS` are added in order and the CRS is
+    written as a WKT VLR for ``epsg``.
+
+    Shared by :func:`results_to_las` and :mod:`ff3d_geo.stitch` so the km-tile output
+    of a stitch is byte-compatible with a per-sub-tile result.
+    """
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.scales = np.asarray(scales, dtype=np.float64)
+    header.offsets = np.asarray(offsets, dtype=np.float64)
+    for name, dtype, description in RESULT_EXTRA_DIMS:
+        header.add_extra_dim(
+            laspy.ExtraBytesParams(name=name, type=dtype, description=description)
+        )
+    header.add_crs(pyproj.CRS.from_epsg(int(epsg)))
+    return header
+
 
 def las_to_ply(
     las_path,
@@ -133,23 +165,11 @@ def results_to_las(result_ply, sidecar_path, offsets_npy, out_las) -> None:
     y = vertex["y"].astype(np.float64) + offsets[1] + origin_n
     z = vertex["z"].astype(np.float64) + offsets[2]
 
-    header = laspy.LasHeader(point_format=6, version="1.4")
-    header.scales = np.array(sidecar["source_scale"], dtype=np.float64)
-    header.offsets = np.floor([x.min(), y.min(), z.min()])
-    header.add_extra_dim(
-        laspy.ExtraBytesParams(
-            name="treeID", type=np.int32, description="ForestFormer3D instance, -1 none"
-        )
+    header = result_point_header(
+        int(sidecar["epsg"]),
+        sidecar["source_scale"],
+        np.floor([x.min(), y.min(), z.min()]),
     )
-    header.add_extra_dim(
-        laspy.ExtraBytesParams(
-            name="semantic", type=np.uint8, description="0 ground 1 wood 2 leaf 255 n/a"
-        )
-    )
-    header.add_extra_dim(
-        laspy.ExtraBytesParams(name="score", type=np.float32, description="instance score")
-    )
-    header.add_crs(pyproj.CRS.from_epsg(int(sidecar["epsg"])))
 
     las = laspy.LasData(header)
     las.x = x
