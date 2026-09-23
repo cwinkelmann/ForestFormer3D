@@ -6,7 +6,7 @@ Produces four figures into ``docs/benchmarks/assets/berlin-dop``:
   a) berlin-dop-381-5829-crowns.png   full 1 km tile, crowns coloured by height
   b) berlin-dop-381-5829-zoom.png     150 m zoom, DOP + ALS instance raster
   c) berlin-dop-381-5829-drone2025.png same 150 m window on the 2025 drone ortho
-  d) berlin-dop-mosaic-density.png    eleven-tile mosaic + crown centroid density
+  d) berlin-dop-mosaic-density.png    mosaic of every tile with results + crown density
 
 Run with the repo's CPU venv::
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 
 import matplotlib
 matplotlib.use("Agg")
@@ -30,7 +31,14 @@ from PIL import Image
 from rasterio.enums import Resampling
 from rasterio.windows import from_bounds
 
-DOP_DIR = "/Volumes/2TB/winmol/ALS_Data/berlin_dop_2021/dop_2021_rgb"
+# DOP 2021 tiles. The 3-band RGB rendering is preferred; the 4-band RGBI stack of the
+# same service is the fallback, since `read_rgb` only ever reads bands 1-3 and the later
+# production blocks were fetched as RGBI only.
+DOP_DIRS = [
+    "/Volumes/2TB/winmol/ALS_Data/berlin_dop_2021/dop_2021_rgb",
+    "/Volumes/2TB/winmol/ALS_Data/berlin_dop_2021/dop_2021_rgbi",
+]
+DOP_DIR = DOP_DIRS[0]
 ALS_DIRS = [
     "/Users/christian/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021",
     "/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d",
@@ -40,14 +48,47 @@ DRONE = ("/Volumes/2TB/winmol/training_data/WINDWURF_Tegel/Revier_12/"
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "docs", "benchmarks", "assets", "berlin-dop")
 
-TILES = ["379_5828", "379_5829", "380_5828", "380_5829", "381_5828",
-         "381_5829", "381_5830", "382_5828", "382_5829", "383_5828", "383_5829"]
+# The original eleven-tile benchmark set. It is only a fallback: `discover_tiles()`
+# below returns every km tile that actually has ForestFormer3D results under one of
+# `ALS_DIRS`, so a new production block is picked up without editing this list.
+BENCHMARK_TILES = ["379_5828", "379_5829", "380_5828", "380_5829", "381_5828",
+                   "381_5829", "381_5830", "382_5828", "382_5829", "383_5828",
+                   "383_5829"]
 MAIN = "381_5829"
 ZOOM_SIZE = 150.0
+
+TILE_RE = re.compile(r"^3dm_33_(\d+_\d+)_1_be$")
 
 
 def tname(t: str) -> str:
     return f"3dm_33_{t}_1_be"
+
+
+def discover_tiles():
+    """Every km tile with a merged tree table in one of ALS_DIRS, sorted by E then N."""
+    found = set()
+    for root in ALS_DIRS:
+        if not os.path.isdir(root):
+            continue
+        for entry in os.listdir(root):
+            m = TILE_RE.match(entry)
+            if m and os.path.exists(os.path.join(root, entry, f"{entry}_trees.gpkg")):
+                found.add(m.group(1))
+    if not found:
+        found = set(BENCHMARK_TILES)
+    return sorted(found, key=lambda t: (int(t.split("_")[0]), int(t.split("_")[1])))
+
+
+TILES = discover_tiles()
+
+
+def dop_path(t: str):
+    """The DOP 2021 GeoTIFF for a tile key, RGB first then RGBI, or None."""
+    for root in DOP_DIRS:
+        p = os.path.join(root, tname(t) + ".tif")
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def tile_bounds(t: str):
@@ -156,7 +197,7 @@ def pick_zoom(tile):
 
 
 def fig_a(zoom_bounds):
-    path = os.path.join(DOP_DIR, tname(MAIN) + ".tif")
+    path = dop_path(MAIN)
     img, ext = read_rgb(path, max_px=2200)
     g = load_crowns(MAIN)
     segs = crown_lines(g)
@@ -182,7 +223,7 @@ def fig_a(zoom_bounds):
 
 
 def fig_b(zoom_bounds):
-    img, ext = read_rgb(os.path.join(DOP_DIR, tname(MAIN) + ".tif"),
+    img, ext = read_rgb(dop_path(MAIN),
                         bounds=zoom_bounds, max_px=1600)
     g = load_crowns(MAIN, bounds=zoom_bounds)
     segs = crown_lines(g)
@@ -223,7 +264,7 @@ def fig_c(zoom_bounds):
     x1, y1 = tr.transform(zoom_bounds[2], zoom_bounds[3])
     db = (x0, y0, x1, y1)
     dimg, dext = read_rgb(DRONE, bounds=db, max_px=1600)
-    img21, ext21 = read_rgb(os.path.join(DOP_DIR, tname(MAIN) + ".tif"),
+    img21, ext21 = read_rgb(dop_path(MAIN),
                             bounds=zoom_bounds, max_px=1600)
     segs21 = crown_lines(load_crowns(MAIN, bounds=zoom_bounds))
     segs = crown_lines(g)
@@ -245,7 +286,7 @@ def fig_c(zoom_bounds):
 def fig_d():
     import geopandas as gpd
     present = [t for t in TILES
-               if os.path.exists(os.path.join(DOP_DIR, tname(t) + ".tif"))]
+               if dop_path(t)]
     es = sorted({int(t.split("_")[0]) for t in present})
     ns = sorted({int(t.split("_")[1]) for t in present}, reverse=True)
     cell = 420
@@ -256,7 +297,7 @@ def fig_d():
     for t in present:
         e, n = int(t.split("_")[0]), int(t.split("_")[1])
         r, c = ns.index(n), es.index(e)
-        img, _ = read_rgb(os.path.join(DOP_DIR, tname(t) + ".tif"), max_px=cell)
+        img, _ = read_rgb(dop_path(t), max_px=cell)
         mosaic[r * cell:(r + 1) * cell, c * cell:(c + 1) * cell] = img[:cell, :cell]
         if als_path(t, "trees.gpkg"):
             have_trees.append(t)
@@ -269,7 +310,7 @@ def fig_d():
     ext = (minx, maxx, miny, maxy)
     fig, ax = plt.subplots(1, 2, figsize=(13, 6.4), constrained_layout=True)
     ax[0].imshow(mosaic, extent=ext)
-    ax[0].set_title(f"DOP20 RGB 2021 mosaic — {len(present)} km tiles\n(grey = no tile in the benchmark set)", fontsize=11)
+    ax[0].set_title(f"DOP20 RGB 2021 mosaic — {len(present)} km tiles\n(grey = no ForestFormer3D result for that km square)", fontsize=11)
     ax[1].imshow(mosaic, extent=ext, alpha=0.55)
     if xs.size:
         nb = (int((maxx - minx) // 50), int((maxy - miny) // 50))
