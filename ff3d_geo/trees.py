@@ -54,10 +54,20 @@ def trees_to_gpkg(las_path, gpkg_path, ground_grid_m: float = 1.0) -> int:
 
     ground, extent = ground_surface(x, y, z, semantic, classification, ground_grid_m)
 
+    # Group the points by tree with ONE sort rather than a `tree_id == tid` pass per
+    # tree: a km tile has ~31 k instances and ~23 M points, so the naive loop costs
+    # ~31 k x 23 M comparisons (measured: 14 minutes of CPU for a single km tile).
+    order = np.argsort(tree_id, kind="stable")
+    sorted_ids = tree_id[order]
+    first_real = int(np.searchsorted(sorted_ids, 0, side="left"))
+    ids, starts = np.unique(sorted_ids[first_real:], return_index=True)
+    starts = starts + first_real
+    stops = np.append(starts[1:], sorted_ids.size)
+
     rows: list[dict] = []
     geoms: list[Point] = []
-    for tid in np.unique(tree_id[tree_id >= 0]):
-        member = tree_id == tid
+    for tid, start, stop in zip(ids, starts, stops):
+        member = order[start:stop]
         tx, ty, tz = x[member], y[member], z[member]
         low = tz <= tz.min() + 1.0
         stem_x = float(np.median(tx[low]))
@@ -79,7 +89,7 @@ def trees_to_gpkg(las_path, gpkg_path, ground_grid_m: float = 1.0) -> int:
                 "top_z": top_z,
                 "height": top_z - ground_z,
                 "crown_area_m2": crown_area,
-                "n_points": int(member.sum()),
+                "n_points": int(member.size),
                 "mean_score": float(score[member].mean()),
             }
         )
