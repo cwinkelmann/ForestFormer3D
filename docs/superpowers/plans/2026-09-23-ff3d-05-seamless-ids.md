@@ -1,6 +1,6 @@
 # Phase 5: Seamless tree ids across sub-tiles (core + halo inference, overlap stitching) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove the 100 m sub-tile seams from the Berlin km-tile results: no under-segmented strip along the grid lines, no tree cut into two ids by a line, one id namespace over the whole mosaic (km-tile borders included), with the Potree viewer showing hashed colours.
 
