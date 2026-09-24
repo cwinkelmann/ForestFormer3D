@@ -13,8 +13,9 @@ light-weight overlays that the viewer drapes on top of them:
   data/<tile>_dop2025.png|.json   leaf-on orthophoto   (downsampled)
   data/tiles.json               manifest read by index.html
 
-With ``--variant sat --sat-dir <dir>`` it instead attaches a second segmentation
-(SegmentAnyTree, converted to the same contract by benchmark/sat_to_ff3d.py) to tiles
+With ``--variant sat --sat-dir <dir>`` (or ``--variant ams3d --ams3d-dir <dir>``) it
+instead attaches a second segmentation -- SegmentAnyTree, converted to the same contract
+by benchmark/sat_to_ff3d.py, or the AMS3D baseline, which writes that contract itself -- to tiles
 already in the manifest: the octree is expected under ``pointclouds_sat/<tile>/``, and
 ``data/<tile>_sat_trees.geojson``, ``_sat_crowns.geojson`` and ``_sat_instance.png|.json``
 are written; ``tiles.json`` gets ``variants.sat`` per tile. CHM and orthophotos are shared.
@@ -346,9 +347,9 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--site", required=True, help="output site root (holds pointclouds/)")
     p.add_argument("--ff3d-dir", default=None, help="dir with <tile>/<tile>.las + gpkg + tif")
-    p.add_argument("--variant", default=None, choices=["sat"],
+    p.add_argument("--variant", default=None, choices=["sat", "ams3d"],
                    help="attach a second method to tiles already in the manifest")
-    p.add_argument("--variant-dir", "--sat-dir", dest="variant_dir", default=None,
+    p.add_argument("--variant-dir", "--sat-dir", "--ams3d-dir", dest="variant_dir", default=None,
                    help="dir with <tile>/<tile>.las + gpkg + tif of that method")
     p.add_argument("--dop2021-dir", default=None)
     p.add_argument("--dop2025-dir", default=None)

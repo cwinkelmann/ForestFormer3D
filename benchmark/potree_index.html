@@ -163,7 +163,7 @@
 		// returns the record as the active method sees it: octree, attributes, tree
 		// count, vectors and instance mask from the variant; bounds, ground, CHM and
 		// orthophotos (which depend only on the input tile) from the base record.
-		const METHODS = { ff3d: "ForestFormer3D", sat: "SegmentAnyTree" };
+		const METHODS = { ff3d: "ForestFormer3D", sat: "SegmentAnyTree", ams3d: "AMS3D" };
 		function view(rec, method = state.method) {
 			if (!rec || method === "ff3d") return rec;
 			const v = rec.variants && rec.variants[method];
