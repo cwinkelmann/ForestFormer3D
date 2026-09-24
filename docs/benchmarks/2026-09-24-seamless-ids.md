@@ -62,8 +62,14 @@ now belong to a tree.
 `n_pairs` and `touching_frac` do not go to zero for a seamless cloud: in a closed canopy
 crowns end near *any* line and have a neighbour across it. The floor was measured directly
 by running the same `ff3d_geo.border` functions on the same LAS with the 100 m lattice
-**shifted 50 m in both axes**, so no line is a sub-tile seam
-(`work_dirs/logs/border_control.py` on carrot):
+**shifted 50 m in both axes**, so no line is a sub-tile seam. It was run at the time with
+an ad-hoc `work_dirs/logs/border_control.py` on carrot; `border-check` has an `--offset`
+since, so the control is now a tracked one-liner that reproduces these rows:
+
+```bash
+python -m ff3d_geo border-check --las work_dirs/berlin-mosaic/3dm_33_381_5829_1_be.las \
+  --offset 50 --json work_dirs/berlin-mosaic/3dm_33_381_5829_1_be_border_control.json
+```
 
 | LAS | lines | `strip_excess_pp` | `touching_frac` | `n_crossing` | `n_pairs` |
 |---|---|---:|---:|---:|---:|
@@ -87,6 +93,34 @@ So the plan's `n_pairs < 100` was unreachable by construction and its 6–10 % b
 floor. The residual seam signal is real but small: about **244 crowns per km tile**
 (0.7 % of the tree table) still end at a seam with a partner across it, against 1,112
 before.
+
+**Caveat: the control lattice is not quite the same measurement as the seam lattice, so
+the four excess figures above are approximations rather than exact numbers.** The control
+shifts the lattice *within one km LAS*, while the seam lattice includes the two km-border
+lines per axis (`ff3d_geo/border.py` treats every multiple of `size_m` as a line, `x = E`
+and `x = E + 1000` included). Across those two lines the partner crowns live in the
+*neighbouring* LAS file, which `border_check` never reads, so on them no pair can form and
+no crown can be seen to "cross", while every cross-km tree is "touching" by construction —
+its extent in this file ends exactly at the file boundary. The control's lines at 50, 150,
+…, 950 have neither property. Correcting for that:
+
+- the seam lattice has ~9 pairing/crossing lines per axis against the control's 10, so the
+  `n_pairs` floor is ~610 rather than ~675: the residual is **~315 pairs per km tile, not
+  244**, and the reduction ~72 % rather than 78 %;
+- the expected crossing count at the ordinary-line rate is ~3,500, so the measured 3,277
+  is **~94 % of it, not 84 %** — the crossing result is *better* than the table claims;
+- ~470 truncated cross-km trees per tile (2,600 tile-pair occurrences over 11 tiles) are
+  counted as touching for free, about 1.4 pp of the 3.28 pp touching excess, so the
+  seam-specific touching residual is nearer **1.9 pp** than 3.3 pp.
+
+The per-tile ±0.5 pp `strip_excess_pp` spread in §5 is consistent with the same effect on
+mosaic-edge tiles, whose outer km borders have no neighbour halo at all (~2 % of a tile's
+area, at the old +25 pp). None of this changes the conclusion: the direction and the size
+of the improvement stand, and two of the three corrections move the result the favourable
+way. The number to use when the untuned `--iou 0.5` is revisited is the corrected residual
+(~315 pairs per tile), not 244. A control free of the asymmetry would have to be measured
+on a merged two-tile cloud, or with lines within a tolerance of the file's own bounding
+box ignored; neither was done here.
 
 ## 4. Tree counts
 
@@ -254,10 +288,11 @@ remains either — that was the viewer half of the problem, fixed separately in 
 The three artefacts the design set out to remove are gone or reduced to a small residue:
 the under-segmented strip along the grid lines is at the interior level everywhere
 (+0.011 pp on the validation tile, within ±0.5 pp on all eleven), crowns now cross the
-lines at 84 % of the rate they cross an arbitrary line, and every tree carries one id over
-the whole mosaic, km-tile borders included (2,574 trees straddle a km border and hold the
+lines at close to the rate they cross an arbitrary line (3,277 against the ~3,500 the
+control implies once §3's lattice asymmetry is accounted for), and every tree carries one
+id over the whole mosaic, km-tile borders included (2,574 trees straddle a km border and hold the
 same id in both files). The price is 1.99x inference time; the stitch is minutes.
 
-Open items: the residual ~244 split pairs per km tile (IoU 0.5 / `min_shared` 20 may be
-tunable), and 200 m cores (`split --size 200 --buffer 20`, 1.44x) which the same code path
+Open items: the residual ~315 split pairs per km tile (§3's corrected figure; IoU 0.5 /
+`min_shared` 20 may be tunable), and 200 m cores (`split --size 200 --buffer 20`, 1.44x) which the same code path
 supports but which has not been run.

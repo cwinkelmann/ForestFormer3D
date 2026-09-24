@@ -143,22 +143,33 @@ queues are done, `berlin_stitch.sh`'s own log has the same `=== <timestamp> <til
 `border-check` / `masks` / `buildings` / `tile done` per tile:
 
 ```
-=== 2026-09-24T09:12:03 mosaic: stitch (3 tiles) ===
-=== 2026-09-24T09:41:57 mosaic: stitch done ===
-=== 2026-09-24T09:41:57 3dm_33_374_5827_1_be: border-check ===
-=== 2026-09-24T09:42:05 3dm_33_374_5827_1_be: masks ===
-=== 2026-09-24T09:42:19 3dm_33_374_5827_1_be: tile done ===
+=== 2026-09-24T09:12:03 mosaic: stitch (11 tiles) ===
+=== 2026-09-24T09:17:34 mosaic: stitch done ===       # 331 s for the eleven-tile mosaic
+=== 2026-09-24T09:17:34 3dm_33_374_5827_1_be: border-check ===
+=== 2026-09-24T09:17:42 3dm_33_374_5827_1_be: masks ===
+=== 2026-09-24T09:17:56 3dm_33_374_5827_1_be: tile done ===
 ...
 === ... block finished ===
 ```
 
 ## 4. Timings
 
-**Not yet re-measured with the halo.** All the numbers below predate `--buffer 20`
-(commit `b1715a3`): a haloed sub-tile is its `-20..120` box on both axes, **≈1.96x the
-core's point count**, all of which `run` feeds to the model — expect roughly **double**
-the per-sub-tile run time (and the residue footprint, section 7) until the haloed runs are
-actually timed.
+**Measured with the halo** — `docs/benchmarks/2026-09-24-seamless-ids.md` sections 6
+and 1, eleven Berlin km tiles. A haloed sub-tile is its `-20..120` box on both axes and
+carries **1.941x** the core's point count (45.1 M points per km tile in
+`inputs/berlin/sub/` against 23.2 M core points; the `140²/100²` prediction is 1.96x),
+all of which `run` feeds to the model, and the run time follows it almost exactly:
+
+- **2026-09-24, `3dm_33_381_5829_1_be`, 100 sub-tiles, one uncontended H100**:
+  **68.4 s per sub-tile, 6,840 s = 1 h 54 per km tile**, against **34.3 s / 57 min** for
+  the same tile split without a halo in the same window — **1.99x**. The residue
+  footprint (section 7) scales the same way.
+- **2026-09-24, whole mosaic, five to six GPUs in parallel**: 1,066 sub-tiles,
+  **67,353 s = 18 h 42 of GPU time, 3 h 57 wall**, 51.5–74.8 s per sub-tile depending on
+  the tile. `stitch` itself is host-only and cheap: **331 s for the whole eleven-tile
+  mosaic**.
+
+Pre-halo numbers, kept for the comparison:
 
 - **2026-09-22, one GPU per tile, pre-vectorisation**: 55–60 s per 100 m sub-tile,
   **92–99 min per km tile** (4 h 47 min for three tiles).
@@ -234,7 +245,7 @@ GeoTIFFs, `_report.json/.md`); the unmasked originals stay in place, and instanc
 `ff3d-outputs-and-viewers` section 4 and
 `docs/benchmarks/2026-09-22-tegel-berlin-2021.md` section "Buildings".
 
-## 7. Residue cleanup (1–2 GB per km tile pre-halo; expect roughly double until measured)
+## 7. Residue cleanup (~2–4 GB per km tile: 1.94x the pre-halo 1–2 GB)
 
 A km-tile run leaves the ~100 input PLYs and their `.npy` exports behind. After
 `benchmark/berlin_stitch.sh` has stitched the mosaic and the results are copied back:

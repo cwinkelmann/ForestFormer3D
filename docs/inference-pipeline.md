@@ -119,12 +119,16 @@ instead of offsetting each sub-tile's ids into a disjoint range:
 exists for a single split without `--buffer`, but is no longer part of the Berlin production
 path.
 
-Measured on carrot (H100), pre-halo: 55-60 s per 100 m sub-tile, about 1.6 h per km tile on
-one GPU; km tiles run in parallel one per GPU. The profile of where that time goes is in
-`docs/benchmarks/2026-09-23-inference-profile.md` (when present). With `--buffer 20` each
-sub-tile carries ~2x its core point count (a 140x140 m halo box vs. a 100x100 m core), so
-expect roughly **double** the per-sub-tile run time and the `inputs/berlin/sub/` disk
-footprint of these pre-halo numbers until the haloed runs are actually measured.
+Measured on carrot (H100) with `--buffer 20`, eleven Berlin km tiles
+(`docs/benchmarks/2026-09-24-seamless-ids.md` sections 6 and 1): **68.4 s per 100 m
+sub-tile, 1 h 54 per km tile** on one uncontended GPU, against 34.3 s / 57 min for the
+same tile split with no halo - **1.99x**, which is what the measured point ratio predicts
+(45.1 M points per km tile in `inputs/berlin/sub/` against 23.2 M core points = 1.941x,
+a 140x140 m halo box vs. a 100x100 m core); the `inputs/berlin/sub/` disk footprint
+scales the same way. Whole mosaic on five to six GPUs in parallel: 1,066 sub-tiles,
+18 h 42 of GPU time, **3 h 57 wall**, 51.5-74.8 s per sub-tile. `stitch` is host-only and
+cheap: **331 s for that whole mosaic**. The profile of where the per-sub-tile time goes is
+in `docs/benchmarks/2026-09-23-inference-profile.md`.
 
 ## Where the results are
 
