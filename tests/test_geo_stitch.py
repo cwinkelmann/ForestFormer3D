@@ -385,3 +385,86 @@ def test_stitch_over_a_real_two_km_tile_neighbour_split(tmp_path):
     for key in sources:
         np.testing.assert_array_equal(
             np.asarray(laspy.read(tmp_path / "out_pairs" / f"{key}_1_be.las").treeID), ids[key])
+
+
+def test_grid_extent_contains_is_the_unclamped_form_of_index():
+    from ff3d_geo.grid import GridExtent
+
+    g = GridExtent(x0=100.0, y0=200.0, cell=1.0, nx=10, ny=10)
+    assert bool(g.contains(105.0, 205.0)) and not bool(g.contains(99.9, 205.0))
+    assert not bool(g.contains(110.0, 205.0))          # half-open upper edge, like index
+    assert not bool(g.contains(105.0, 210.0))
+    assert g.contains([105.0, 130.0], [205.0, 205.0]).tolist() == [True, False]
+    # index() would have clamped that second point into the grid without saying so
+    assert [int(v[1]) for v in g.index([105.0, 130.0], [205.0, 205.0])] == [9, 5]
+
+
+def test_cross_km_stem_takes_the_ground_of_the_tile_that_contains_it():
+    """A tree owned by one km tile whose stem sits across the border in the other.
+
+    ``GridExtent.index`` clamps, so looking the stem up in the OWNER's ground grid
+    would silently take the ground of the owner's edge cell -- a systematic height
+    bias on exactly the cross-border trees this phase creates.
+    """
+    from ff3d_geo.grid import GridExtent
+    from ff3d_geo.stitch import _mosaic_tree_rows
+
+    hull = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    west_grid = GridExtent(x0=0.0, y0=0.0, cell=1.0, nx=100, ny=100)
+    east_grid = GridExtent(x0=100.0, y0=0.0, cell=1.0, nx=100, ny=100)
+    extents = {"west": west_grid, "east": east_grid}
+    grounds = {"west": np.full((100, 100), 10.0), "east": np.zeros((100, 100))}
+    # gid 0 has most of its points in "west" (the owner) but its lowest metre -- and so
+    # its stem median -- lies at x = 105, inside "east".
+    parts = {
+        "west": {0: {"n": 100, "score_sum": 50.0, "top_z": 30.0, "min_z": 2.0,
+                     "low": np.array([[105.0, 50.0, 2.0]]), "hull": hull}},
+        "east": {0: {"n": 10, "score_sum": 5.0, "top_z": 20.0, "min_z": 2.5,
+                     "low": np.array([[105.0, 50.0, 2.5]]), "hull": hull}},
+    }
+    rows, n_cross = _mosaic_tree_rows(parts, grounds, extents)
+    assert n_cross == 1 and rows["east"] == [] and len(rows["west"]) == 1
+    row = rows["west"][0]
+    assert row["x"] == 105.0 and row["n_points"] == 110
+    assert row["height"] == pytest.approx(30.0)     # 30 - east's 0.0, not 30 - west's 10.0
+
+
+def _write_split_subtiles(manifest_path, res_dir):
+    """Put each sub-tile's SPLIT las (local coordinates) next to its ident sidecar.
+
+    ``_mosaic`` only fabricates the ident sidecars and the results; the stitch's point
+    order check compares a result against the split sub-tile it came from, which the
+    km-tile workflow keeps on disk until the stitch runs.
+    """
+    manifest_dir = manifest_path.parent
+    manifest = json.loads(manifest_path.read_text())
+    for sub in manifest["subtiles"]:
+        stem = sub["stem"]
+        res = laspy.read(str(res_dir / f"{stem}.las"))
+        x0, y0 = sub["origin"]
+        xyz = np.column_stack([np.asarray(res.x) - x0, np.asarray(res.y) - y0,
+                               np.asarray(res.z)])
+        write_grid_las(manifest_dir / f"{stem}.las", xyz,
+                       np.full(len(xyz), 5, np.uint8))
+
+
+def test_stitch_checks_the_result_is_in_the_split_sub_tiles_point_order(tmp_path):
+    manifest, res, xyz, _ = _mosaic(tmp_path)
+    _write_split_subtiles(manifest, res)
+    info = stitch([manifest], [res], tmp_path / "out")
+    assert info["n_trees"] == 3
+    assert laspy.read(tmp_path / "out" / "3dm_33_381_5829_1_be.las").header.point_count == len(xyz)
+
+
+def test_stitch_refuses_a_result_whose_points_were_reordered(tmp_path):
+    manifest, res, _, _ = _mosaic(tmp_path)
+    _write_split_subtiles(manifest, res)
+    # A permutation INSIDE the sub-tile keeps every point in its own halo box, so both
+    # the point counts and stitch's own core-ownership guard still pass; only the
+    # coordinate comparison catches it.
+    stem = "t_E381000_N5829000_100m"
+    las = laspy.read(str(res / f"{stem}.las"))
+    las.points = las.points[np.random.default_rng(11).permutation(len(las.points))]
+    las.write(str(res / f"{stem}.las"))
+    with pytest.raises(ValueError, match="not in its split sub-tile's point order"):
+        stitch([manifest], [res], tmp_path / "out")

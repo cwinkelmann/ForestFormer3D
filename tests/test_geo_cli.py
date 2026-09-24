@@ -496,7 +496,7 @@ def test_check_preprocess_names_a_missing_artefact_of_the_second_tile(fake_repo,
     steps = plan_run([tmp_path / f"{BATCH_A}.las", tmp_path / f"{BATCH_B}.las"],
                      out=out, repo=fake_repo)
     next(s for s in steps if s.name == "prepare_inputs").func()
-    inst.mkdir(parents=True)
+    inst.mkdir(parents=True, exist_ok=True)   # prepare_inputs creates it to claim the stems
     for stem in (BATCH_A, BATCH_B):
         np.save(inst / f"{stem}_vert.npy", np.zeros((1, 3)))
     np.save(inst / f"{BATCH_A}_offsets.npy", np.zeros(3))  # the second tile's is missing
@@ -814,3 +814,70 @@ def test_border_check_without_json_writes_nothing(tmp_path, capsys):
     assert main(["border-check", "--las", str(las), "--size", "50"]) == 0
     assert "size 50.0 m" in capsys.readouterr().out
     assert not list(tmp_path.glob("*.json"))
+
+
+def test_border_check_offset_is_plumbed_through_and_recorded(tmp_path, capsys):
+    parser = build_parser()
+    assert parser.parse_args(["border-check", "--las", "t.las"]).offset == 0.0
+
+    las, _ = _border_las(tmp_path)
+    out_json = tmp_path / "control.json"
+    assert main(["border-check", "--las", str(las), "--offset", "50",
+                 "--json", str(out_json)]) == 0
+    printed = capsys.readouterr().out
+    assert "size 100.0 m, offset 50.0 m)" in printed
+    # the seam at x = 381100 is not a line of the shifted lattice, so it pairs nothing
+    assert "paired 0" in printed
+    saved = json.loads(out_json.read_text())
+    assert saved["offset_m"] == 50.0 and saved["n_pairs"] == 0
+
+
+# --- concurrent runs must not share sub-tile stems ---------------------------------
+
+
+def _claimed_stems(instance_dir):
+    return sorted(p.name for p in instance_dir.glob("*.ff3d-run.lock"))
+
+
+def test_prepare_inputs_refuses_a_stem_another_live_run_owns(fake_repo, tmp_path):
+    from ff3d_geo.cli import _stem_lock
+
+    las = write_two_cone_las(tmp_path / f"{STEM}.las")
+    instance_dir = fake_repo / "data/ForAINetV2/forainetv2_instance_data"
+    instance_dir.mkdir(parents=True)
+    np.save(instance_dir / f"{STEM}_vert.npy", np.zeros((1, 3)))
+    # pid 1 always exists and is never this process, so the marker reads as a live run
+    _stem_lock(instance_dir, STEM).write_text(json.dumps(
+        {"pid": 1, "out": "/elsewhere/out", "started": "2026-09-24T00:00:00"}))
+
+    steps = plan_run(las, DEFAULT_CHECKPOINT, fake_repo / "work_dirs" / "o", repo=fake_repo)
+    with pytest.raises(RuntimeError, match="already being processed by pid 1"):
+        next(s for s in steps if s.name == "prepare_inputs").func()
+    # the other run's exports were NOT deleted, and its claim is left with it
+    assert (instance_dir / f"{STEM}_vert.npy").is_file()
+    assert json.loads(_stem_lock(instance_dir, STEM).read_text())["out"] == "/elsewhere/out"
+
+
+def test_a_stale_claim_from_a_dead_run_is_taken_over(fake_repo, tmp_path):
+    from ff3d_geo.cli import _stem_lock
+
+    las = write_two_cone_las(tmp_path / f"{STEM}.las")
+    instance_dir = fake_repo / "data/ForAINetV2/forainetv2_instance_data"
+    instance_dir.mkdir(parents=True)
+    np.save(instance_dir / f"{STEM}_vert.npy", np.zeros((1, 3)))
+    _stem_lock(instance_dir, STEM).write_text(json.dumps(
+        {"pid": -1, "out": "/gone", "started": "2026-09-23T00:00:00"}))
+
+    steps = plan_run(las, DEFAULT_CHECKPOINT, fake_repo / "work_dirs" / "o", repo=fake_repo)
+    next(s for s in steps if s.name == "prepare_inputs").func()
+    assert not (instance_dir / f"{STEM}_vert.npy").exists()      # the run really proceeded
+    assert json.loads(_stem_lock(instance_dir, STEM).read_text())["pid"] == os.getpid()
+
+
+def test_a_finished_run_releases_its_claims(tmp_path, monkeypatch, capsys):
+    out, steps, timings = _two_tile_batch(tmp_path, monkeypatch)
+    instance_dir = out.parent.parent / "data/ForAINetV2/forainetv2_instance_data"
+    assert _claimed_stems(instance_dir) == sorted(f"{s}.ff3d-run.lock" for s in BATCH_STEMS)
+    execute(steps[5:], dry_run=False, timings=timings)
+    capsys.readouterr()
+    assert _claimed_stems(instance_dir) == []

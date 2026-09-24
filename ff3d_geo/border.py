@@ -8,7 +8,11 @@ correct for the sub-tile grid this repo produces (``ff3d_geo.split``/``merge``):
 sub-tile origins are ``floor(min / size_m) * size_m``, so their shared edges are
 exactly the multiples of ``size_m`` in UTM easting/northing, and a km-tile border
 lands on a multiple of ``size_m`` too whenever ``size_m`` divides 1000 (100 does).
-No origin parameter is needed as a result.
+No origin parameter is needed as a result. ``offset_m`` shifts the whole lattice
+(lines at ``k * size_m + offset_m``) and exists for the CONTROL measurement of
+``docs/benchmarks/2026-09-24-seamless-ids.md`` section 3: with ``--offset 50`` no
+line is a sub-tile seam any more, so the same metrics on the same LAS give the
+floor these metrics have in a closed canopy.
 
 ``no_instance_profile`` measures artefact (2) of the design doc (a strip of
 under-segmented, ``treeID == -1`` vegetation along every line); ``split_pairs``
@@ -41,6 +45,7 @@ def no_instance_profile(
     size_m: float = 100.0,
     bin_m: float = 0.5,
     max_m: float = 10.0,
+    offset_m: float = 0.0,
 ) -> dict:
     """Fraction of unlabelled (``treeID == -1``) vegetation points by distance to
     the nearest ``size_m`` grid line, in ``bin_m`` bins out to ``max_m``.
@@ -53,9 +58,11 @@ def no_instance_profile(
     fraction of vegetation points at least ``max_m`` from any line. ``strip_excess_pp``
     is ``100 * (frac(< max_m) - interior_frac)``, the percentage-point excess of
     unlabelled points the whole ``< max_m`` strip carries over the interior level.
+
+    ``offset_m`` shifts the grid lines to ``k * size_m + offset_m`` on both axes.
     """
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64) - offset_m
+    y = np.asarray(y, dtype=np.float64) - offset_m
     tree_id = np.asarray(tree_id)
     vegetation = np.asarray(vegetation, dtype=bool)
 
@@ -163,7 +170,8 @@ def _greedy_match(candidates: list, used: set) -> int:
 
 
 def split_pairs(x: np.ndarray, y: np.ndarray, tree_id: np.ndarray,
-                size_m: float = 100.0, tol_m: float = 1.0) -> dict:
+                size_m: float = 100.0, tol_m: float = 1.0,
+                offset_m: float = 0.0) -> dict:
     """Count instances split by a ``size_m`` grid line: touching, crossing, and
     greedily paired fragments.
 
@@ -176,11 +184,13 @@ def split_pairs(x: np.ndarray, y: np.ndarray, tree_id: np.ndarray,
     instances that START across it (an edge approaching from above/right) whose
     extent on the OTHER axis overlaps, best overlap first, each instance used once.
 
+    ``offset_m`` shifts the grid lines to ``k * size_m + offset_m`` on both axes.
+
     Returns ``{"n_trees": int, "n_touching": int, "n_crossing": int, "n_pairs": int,
     "touching_frac": float}``.
     """
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64) - offset_m
+    y = np.asarray(y, dtype=np.float64) - offset_m
     tree_id = np.asarray(tree_id)
 
     ids, x_min, x_max, y_min, y_max = _instance_extents(x, y, tree_id)
@@ -231,12 +241,13 @@ def split_pairs(x: np.ndarray, y: np.ndarray, tree_id: np.ndarray,
     }
 
 
-def border_check(las_path, size_m: float = 100.0) -> dict:
+def border_check(las_path, size_m: float = 100.0, offset_m: float = 0.0) -> dict:
     """Read a result LAS once and return the merged :func:`no_instance_profile` and
     :func:`split_pairs` metrics, plus ``n_points``.
 
     ``vegetation`` is ``classification in {3, 4, 5} and semantic not in {0, 255}``
-    (ALS vegetation-ish minus model-ground and model-nodata points).
+    (ALS vegetation-ish minus model-ground and model-nodata points). ``offset_m``
+    shifts the lattice off the seams for the control measurement.
     """
     import laspy
 
@@ -249,6 +260,7 @@ def border_check(las_path, size_m: float = 100.0) -> dict:
 
     vegetation = np.isin(classification, VEGETATION_CLASSES) & (semantic != 0) & (semantic != 255)
 
-    profile = no_instance_profile(x, y, tree_id, vegetation, size_m=size_m)
-    pairs = split_pairs(x, y, tree_id, size_m=size_m)
+    profile = no_instance_profile(x, y, tree_id, vegetation, size_m=size_m,
+                                  offset_m=offset_m)
+    pairs = split_pairs(x, y, tree_id, size_m=size_m, offset_m=offset_m)
     return {**profile, **pairs, "n_points": int(len(x))}

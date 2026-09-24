@@ -122,3 +122,26 @@ def test_caller_supplied_test_list_is_never_deleted(tmp_path):
     # it deletes its own default temp file on exit.
     assert caller_list.exists()
     assert f'--test_scan_names_file {caller_list}' in proc.stdout
+
+
+def _km_tile_stem_guard(stem):
+    """Run berlin_run_gpu.sh's own stem guard, lifted out of the script, on ``stem``.
+
+    The script cds into carrot's checkout on line 1 of its body, so it cannot be run
+    here; the guard condition is extracted verbatim instead, so this tests the real
+    expression rather than a copy of it.
+    """
+    text = BERLIN_RUN_GPU_SCRIPT.read_text()
+    condition = next(line.strip() for line in text.splitlines() if '=~ ^3dm_33' in line)
+    program = f'T={stem!r}\n{condition}\n  exit 2\nfi\nexit 0\n'
+    return subprocess.run(['bash', '-c', program], capture_output=True, text=True).returncode
+
+
+def test_berlin_run_gpu_rejects_a_stem_its_neighbour_lookup_cannot_parse():
+    # A stem in any other naming leaves E/N empty in `IFS=_ read`, so $((E + dE)) would
+    # evaluate on an empty operand and the tile would be inferred halo-starved on its
+    # km borders with no message at all.
+    assert _km_tile_stem_guard('3dm_33_381_5829_1_be') == 0
+    for bad in ('tegel_r12', '3dm_33_381_5829', '3dm_33_381_1_be', 'my_tile_100m',
+                '3dm_33_381_5829_1_be_copy'):
+        assert _km_tile_stem_guard(bad) == 2, bad

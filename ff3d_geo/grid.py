@@ -25,6 +25,19 @@ class GridExtent:
         iy = np.clip(np.floor((np.asarray(y) - self.y0) / self.cell).astype(int), 0, self.ny - 1)
         return ix, iy
 
+    def contains(self, x, y) -> np.ndarray:
+        """True where ``(x, y)`` really falls inside the grid.
+
+        :meth:`index` clamps out-of-grid coordinates to the edge cell silently, which
+        is what a raster pass wants but not what a caller asking "is this point in
+        this tile?" wants (``ff3d_geo.stitch`` picks the ground grid of the tile that
+        holds a cross-border stem). Half-open on the upper edge, like ``index``.
+        """
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        return ((x >= self.x0) & (x < self.x0 + self.nx * self.cell)
+                & (y >= self.y0) & (y < self.y0 + self.ny * self.cell))
+
     def center(self, ix: int, iy: int) -> tuple[float, float]:
         return self.x0 + (ix + 0.5) * self.cell, self.y0 + (iy + 0.5) * self.cell
 

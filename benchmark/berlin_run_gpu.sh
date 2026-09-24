@@ -22,6 +22,13 @@ source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
 CK=work_dirs/clean_forestformer/epoch_3000_fix.pth
 for T in "$@"; do
   echo "=== $(date +%FT%T) $T: split ==="
+  # The neighbour lookup below reads E/N out of the stem, so a stem in any other
+  # naming would silently find no neighbours ($((E + dE)) on an empty operand) and
+  # the tile would be inferred halo-starved on its km borders with no message.
+  if [[ ! "$T" =~ ^3dm_33_[0-9]+_[0-9]+_1_be$ ]]; then
+    echo "!!! $T: not a 3dm_33_<E>_<N>_1_be km-tile stem; neighbour lookup impossible" >&2
+    exit 2
+  fi
   IFS=_ read -r P1 P2 E N P5 P6 <<< "$T"
   NB=()
   for dE in -1 0 1; do

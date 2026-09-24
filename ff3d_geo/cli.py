@@ -193,6 +193,78 @@ def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
     )
 
 
+#: Marker files that record which live ``run`` owns which scan stem in the SHARED
+#: data/ForAINetV2/forainetv2_instance_data/. Not a general-purpose lock: it only
+#: guards the one hazard of section 8 of docs/benchmarks/2026-09-24-seamless-ids.md.
+_STEM_LOCK_SUFFIX = ".ff3d-run.lock"
+
+
+def _stem_lock(instance_dir: Path, stem: str) -> Path:
+    return instance_dir / f"{stem}{_STEM_LOCK_SUFFIX}"
+
+
+def _pid_alive(pid: int) -> bool:
+    """True unless ``pid`` is certainly gone (a lock left by a crashed run is stale)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:      # someone else's process: alive, just not ours to signal
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _claim_stems(instance_dir: Path, stems: list[str], out: Path) -> None:
+    """Refuse to start when another LIVE ``run`` is working on one of these stems.
+
+    ``prepare_inputs`` deletes ``<stem>_*.npy`` in the shared instance dir because
+    ``batch_load_ForAINetV2_data.py`` skips a scan whose ``_vert.npy`` already exists.
+    Two runs whose sub-tiles carry the same stems therefore overwrite each other's
+    point clouds mid-inference and both results are silently wrong (the hazard of
+    section 8 of ``docs/benchmarks/2026-09-24-seamless-ids.md``). A marker file per
+    stem, naming the owning pid and its ``--out``, turns that into an immediate error.
+    A marker whose pid is gone is stale and is taken over.
+    """
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    for stem in stems:
+        path = _stem_lock(instance_dir, stem)
+        try:
+            held = json.loads(path.read_text())
+        except (OSError, ValueError):
+            held = None
+        if held is not None:
+            pid = int(held.get("pid", -1))
+            if pid != os.getpid() and _pid_alive(pid):
+                raise RuntimeError(
+                    f"ff3d_geo run: scan {stem} is already being processed by pid {pid} "
+                    f"(--out {held.get('out')}, started {held.get('started')}). Its "
+                    f"exports in {instance_dir} are shared, so both runs would overwrite "
+                    f"each other's point clouds and both results would be wrong. Wait for "
+                    f"that run, or re-split with a different --prefix. If that pid is "
+                    f"really gone, delete {path}."
+                )
+        path.write_text(json.dumps({
+            "pid": os.getpid(), "out": str(out),
+            "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }) + "\n")
+
+
+def _release_stems(instance_dir: Path, stems: list[str]) -> None:
+    """Drop the markers this process owns; leave another pid's alone."""
+    for stem in stems:
+        path = _stem_lock(instance_dir, stem)
+        try:
+            held = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if int(held.get("pid", -1)) == os.getpid():
+            path.unlink(missing_ok=True)
+
+
 def plan_run(
     las,
     checkpoint=DEFAULT_CHECKPOINT,
@@ -287,6 +359,10 @@ def plan_run(
         # las_to_ply normally creates <out> first; mkdir here too so this step can
         # also be run on its own (e.g. to rebuild only the scan list).
         out.mkdir(parents=True, exist_ok=True)
+        # Before anything in the SHARED instance dir is touched: claim these stems, so
+        # a second concurrent run over the same stems fails here instead of silently
+        # corrupting both runs' exports (see _claim_stems).
+        _claim_stems(instance_dir, stems, out)
         scan_list.write_text("".join(f"{s}\n" for s in stems))
         empty_list.write_text("")
         # batch_load skips a scan whose _vert.npy already exists: drop stale exports
@@ -358,11 +434,17 @@ def plan_run(
                 usable = "yes" if rep["recommendation"]["first_pass_usable"] else "no"
                 print(f"{stem}: {rep['n_trees']} trees, first pass usable: {usable}")
 
-        _run_per_tile("report", [
-            (stem, partial(one, stem, out_las, gpkg, report_json, report_md))
-            for stem, out_las, gpkg, report_json, report_md in zip(
-                stems, out_lass, gpkgs, report_jsons, report_mds)
-        ])
+        try:
+            _run_per_tile("report", [
+                (stem, partial(one, stem, out_las, gpkg, report_json, report_md))
+                for stem, out_las, gpkg, report_json, report_md in zip(
+                    stems, out_lass, gpkgs, report_jsons, report_mds)
+            ])
+        finally:
+            # Last step of the run: release the stem claims taken in prepare_inputs.
+            # A run that dies before this leaves its markers behind, which the next
+            # run takes over once the pid is gone.
+            _release_stems(instance_dir, stems)
 
     preprocess_inner = (
         'bash -c "'
@@ -625,6 +707,12 @@ def build_parser() -> argparse.ArgumentParser:
     bch.add_argument("--size", type=float, default=100.0, metavar="M",
                      help="sub-tile grid period; every multiple of it on either axis is "
                           "treated as a seam line (default: %(default)s)")
+    bch.add_argument("--offset", type=float, default=0.0, metavar="M",
+                     help="shift the grid lines to k * --size + M on BOTH axes "
+                          "(default: %(default)s). --offset 50 is the control "
+                          "measurement of docs/benchmarks/2026-09-24-seamless-ids.md "
+                          "section 3: no line is a sub-tile seam any more, so the same "
+                          "metrics give the floor they have in a closed canopy")
     bch.add_argument("--json", type=Path, default=None,
                      help="also write the full metrics (the distance-profile bins "
                           "included) here")
@@ -816,8 +904,10 @@ def main(argv: list[str] | None = None) -> int:
         # subcommand's --help like the rest of them.
         from ff3d_geo.border import border_check
 
-        metrics = border_check(args.las, size_m=args.size)
-        print(f"{args.las} ({metrics['n_points']} points, size {args.size} m)")
+        metrics = border_check(args.las, size_m=args.size, offset_m=args.offset)
+        offset_note = f", offset {args.offset} m" if args.offset else ""
+        print(f"{args.las} ({metrics['n_points']} points, size {args.size} m"
+              f"{offset_note})")
         bin_m = (metrics["bins"][1] - metrics["bins"][0]) if len(metrics["bins"]) > 1 else 0.0
         for lo, frac, n in zip(metrics["bins"], metrics["frac"], metrics["n"]):
             print(f"  {lo:5.1f}-{lo + bin_m:5.1f} m  {100 * frac:6.2f}% unlabelled  "
@@ -828,7 +918,8 @@ def main(argv: list[str] | None = None) -> int:
               f"({metrics['touching_frac']:.3f}), crossing {metrics['n_crossing']}, "
               f"paired {metrics['n_pairs']}")
         if args.json is not None:
-            payload = {"las": str(args.las), "size_m": float(args.size), **metrics}
+            payload = {"las": str(args.las), "size_m": float(args.size),
+                       "offset_m": float(args.offset), **metrics}
             Path(args.json).write_text(json.dumps(payload, indent=2))
             print(f"wrote {args.json}")
         return 0

@@ -76,6 +76,14 @@ _CHUNK_POINTS = 2_000_000
 #: the ~8 reads per sub-tile into ~1.
 _CACHE_SIZE = 32
 
+#: Point-order check (see ``_SubtileCache._check_point_order``): compare every
+#: ``_ORDER_STRIDE``-th point of a result LAS with the split sub-tile it came from, to
+#: within ``_ORDER_TOL_M``. The tolerance only has to absorb the pipeline's float32
+#: centering round trip (sub-millimetre) while still catching a reordering, which moves
+#: a point by metres.
+_ORDER_STRIDE = 10_000
+_ORDER_TOL_M = 0.5
+
 #: Knuth's multiplicative constant, used to shuffle component ids (see step 3).
 _MIX64 = 0x9E3779B97F4A7C15
 
@@ -444,6 +452,7 @@ class _SubtileCache:
         x = np.asarray(las.x, dtype=np.float64)
         y = np.asarray(las.y, dtype=np.float64)
         x0, y0 = sub["origin"]
+        self._check_point_order(stem, sub, las_path, x, y)
         size = self._mosaic.size_m
         core = (x >= x0) & (x < x0 + size) & (y >= y0) & (y < y0 + size)
         return _Subtile(
@@ -455,6 +464,40 @@ class _SubtileCache:
             score=np.asarray(las.score, dtype=np.float32),
             core=core,
         )
+
+    def _check_point_order(self, stem: str, sub: dict, las_path: Path,
+                           x: np.ndarray, y: np.ndarray) -> None:
+        """Verify the result LAS is in the SAME point order as its split sub-tile.
+
+        The ident sidecar maps result point ``i`` to source point ``ident[i]``, so every
+        stitched id is wrong -- silently -- if anything between ``split`` and
+        ``results_to_las`` ever reorders points. The count checks in :meth:`_load` and
+        the ``own.sum() == n_core`` guard in :func:`stitch` are both order-blind (a
+        permutation that keeps every point inside its own halo box passes them), so
+        compare a strided sample of coordinates against the split sub-tile LAS, which
+        the km-tile workflow keeps on disk next to ``split_manifest.json`` until the
+        stitch. A sub-tile LAS that has been cleaned up already is skipped rather than
+        refused: the check is an integrity guard, not a new input requirement.
+        """
+        split_las = Path(sub["manifest_dir"]) / f"{stem}.las"
+        if not split_las.is_file() or len(x) == 0:
+            return
+        x0, y0 = sub["origin"]
+        n = len(x)
+        indices = np.unique(np.append(np.arange(0, n, _ORDER_STRIDE), n - 1))
+        with laspy.open(str(split_las)) as reader:
+            for i in indices:
+                reader.seek(int(i))
+                point = reader.read_points(1)
+                sx = float(np.asarray(point.x)[0]) + x0
+                sy = float(np.asarray(point.y)[0]) + y0
+                if abs(sx - x[i]) > _ORDER_TOL_M or abs(sy - y[i]) > _ORDER_TOL_M:
+                    raise ValueError(
+                        f"stitch: point {i} of {las_path} is at ({x[i]:.3f}, {y[i]:.3f}) "
+                        f"but point {i} of {split_las} is at ({sx:.3f}, {sy:.3f}); the "
+                        f"result of {stem} is not in its split sub-tile's point order, so "
+                        f"{stem}_ident.npy would map every label to the wrong source point"
+                    )
 
 
 def _find_results(mosaic: Mosaic, results_dirs) -> dict[str, Path]:
@@ -658,8 +701,15 @@ def _mosaic_tree_rows(parts_by_tile: dict, ground_by_tile: dict, extent_by_tile:
     counts would double it and every attribute (height, crown area, n_points) would
     describe a fragment. Here each id goes to the tile holding the majority of its
     points -- ties to the tile holding its highest point, then to the first tile name, so
-    the choice is deterministic -- and its row is computed over ALL of its points, with
-    the height taken against the OWNER tile's ground grid at the stem.
+    the choice is deterministic -- and its row is computed over ALL of its points.
+
+    The height is taken against the ground grid of the tile whose extent CONTAINS the
+    stem, which is not always the owner: the owner holds most of the tree's points, but
+    the median of its lowest metre can sit a few metres across the km border. Looking
+    that up in the owner's grid would go through ``GridExtent.index``'s silent clamping
+    and take the ground of the tile's edge cell instead, a small but systematic height
+    bias on exactly the cross-border trees. The owner is the fallback when no tile's
+    extent contains the stem.
 
     Returns ``({tile stem: [row, ...]}, n_cross_km_trees)``.
     """
@@ -685,8 +735,14 @@ def _mosaic_tree_rows(parts_by_tile: dict, ground_by_tile: dict, extent_by_tile:
         low = low[low[:, 2] <= min_z + 1.0]
         stem_x = float(np.median(low[:, 0]))
         stem_y = float(np.median(low[:, 1]))
-        ix, iy = extent_by_tile[owner].index(stem_x, stem_y)
-        ground_z = float(ground_by_tile[owner][iy, ix])
+        ground_stem = owner
+        if not bool(extent_by_tile[owner].contains(stem_x, stem_y)):
+            for candidate in stems:
+                if bool(extent_by_tile[candidate].contains(stem_x, stem_y)):
+                    ground_stem = candidate
+                    break
+        ix, iy = extent_by_tile[ground_stem].index(stem_x, stem_y)
+        ground_z = float(ground_by_tile[ground_stem][iy, ix])
         rows_by_tile[owner].append({
             "tree_id": int(gid),
             "x": stem_x,
