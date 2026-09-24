@@ -41,10 +41,10 @@ Both measured with `ff3d_geo border-check` on the km-tile result LAS.
 | `n_crossing` | 0 | **3,277** | > 0 | **pass** |
 | `n_pairs` | 1,786 (spec: 1,843) | **923** | < 100 | pass, floor-corrected (§3) |
 | `n_touching` / `touching_frac` | 5,150 / 16.41 % | **3,665 / 11.16 %** | 6–10 % | pass, floor-corrected (§3) |
+| `n_trees` | 31,385 | **32,851** | ~29,500 ±5 % | pass, see §4 |
 
 The spec's 1,843 pairs came from an earlier ad-hoc script; `border-check` itself reports
 1,786 on the same seamed LAS, and that is the before-number used throughout this page.
-| `n_trees` | 31,385 | **32,851** | ~29,500 ±5 % | pass, see §4 |
 
 The unlabelled-point profile by distance to the nearest 100 m line (0.5 m bins, 0–10 m)
 is flat after the change instead of a 10 m gradient:
