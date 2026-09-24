@@ -12,9 +12,15 @@
 FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
 # Override with --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX" if MinkowskiEngine
-# fails to compile for 9.0 (design spec section 8).
+# fails to compile for 9.0 (design spec section 8). Naming a single arch that matches the
+# host GPU (e.g. "8.9" for an RTX 4080) cuts the extension builds to a quarter of the work,
+# at the cost of an image that only runs on that arch.
 ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+# Parallel nvcc invocations in the extension builds below. Each one can take a GB or more,
+# so lower it (--build-arg MAX_JOBS=4) on a host with little free RAM or few cores.
+ARG MAX_JOBS=16
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    MAX_JOBS=${MAX_JOBS} \
     CUDA_HOME=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
@@ -60,11 +66,12 @@ RUN pip install --no-cache-dir spconv-cu118==2.3.6 cumm-cu118==0.4.11 \
 
 # MinkowskiEngine at the commit the paper used, built from a clone: pip 23 removed
 # --install-option, so the flags go to setup.py directly. TORCH_CUDA_ARCH_LIST is read by
-# torch's CUDAExtension; MAX_JOBS caps the parallel nvcc invocations.
+# torch's CUDAExtension; MAX_JOBS (an ARG above, exported into ENV) caps the parallel
+# nvcc invocations.
 RUN git clone https://github.com/NVIDIA/MinkowskiEngine.git /opt/MinkowskiEngine \
     && cd /opt/MinkowskiEngine \
     && git checkout 02fc608bea4c0549b0a7b00ca1bf15dee4a0b228 \
-    && MAX_JOBS=16 python setup.py install --blas=openblas --force_cuda \
+    && python setup.py install --blas=openblas --force_cuda \
     && cd / && rm -rf /opt/MinkowskiEngine \
     && python -c "import MinkowskiEngine as ME; print('MinkowskiEngine', ME.__version__)"
 
