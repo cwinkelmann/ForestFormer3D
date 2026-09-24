@@ -61,6 +61,12 @@ two GPUs — they share `data/ForAINetV2/test_data/` and would overwrite each ot
 exports only if stems collided, and the sub-tile stems are derived from the km tile name,
 so different km tiles are safe); skip GPU 1 always and any card already busy.
 
+**Never run the same km tile — or any two sub-tile sets that share stems — on two GPUs at
+once**: `ff3d_geo/cli.py` deletes the stale `<stem>_*.npy` exports in the shared
+`data/ForAINetV2/forainetv2_instance_data/` before preprocessing, so the second `run`
+silently replaces the first one's point clouds mid-inference and both results are garbage.
+Re-running one tile for comparison needs its own prefix (`ff3d_geo split --prefix ...`).
+
 What the script does per tile `$T`:
 
 ```bash

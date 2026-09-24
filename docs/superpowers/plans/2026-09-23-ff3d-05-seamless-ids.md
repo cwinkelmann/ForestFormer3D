@@ -1,6 +1,6 @@
 # Phase 5: Seamless tree ids across sub-tiles (core + halo inference, overlap stitching) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Remove the 100 m sub-tile seams from the Berlin km-tile results: no under-segmented strip along the grid lines, no tree cut into two ids by a line, one id namespace over the whole mosaic (km-tile borders included), with the Potree viewer showing hashed colours.
 
@@ -46,7 +46,7 @@ Commit `afac64e` ("fix: Potree tree-id colours are hashed, not positional") repl
   - `<out>/split_manifest.json`: `{"size_m", "buffer_m", "prefix", "sources": [{"key", "path", "n_points"}], "subtiles": [{"stem", "origin": [x0, y0], "source": 0, "n_points", "n_core"}]}` where `key` is the source stem with a trailing `_1_be` stripped (`_default_prefix`) and `path` absolute. Written with `buffer_m == 0` too (then `n_core == n_points`).
 - `subtile_origins` unchanged.
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/test_geo_split.py`; `_write_las` there is `geo_fixtures.write_grid_las`, which truncates `xyz` in place to LAS precision, so comparisons against `xyz` are exact to 1e-3)
+- [x] **Step 1: Write the failing tests** (append to `tests/test_geo_split.py`; `_write_las` there is `geo_fixtures.write_grid_las`, which truncates `xyz` in place to LAS precision, so comparisons against `xyz` are exact to 1e-3)
 
 ```python
 import json
@@ -133,21 +133,21 @@ def test_split_min_points_counts_core_points_only(tmp_path):
     assert not (tmp_path / "sub" / "tile_E100_N0_100m_ident.npy").exists()
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv-cpu/bin/python -m pytest -q tests/test_geo_split.py`
 Expected: the four new tests FAIL (`ImportError: cannot import name 'IDENT_DTYPE'`), the six existing ones pass.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `split_las`: keep the existing chunk loop for the primary but replace the per-origin exact-cell mask by a box mask on the expanded box when `buffer_m > 0` (`(x >= x0 - halo) & (x < x0 + size + halo) & (y >= ...)`); count `core` with the existing exact-cell mask (`ex == origin[0]`) and `n_points` per sub-tile separately; collect `ident` pieces per origin as `np.empty(n_sel, IDENT_DTYPE)` with `tile = 0`, `index = chunk_start + np.flatnonzero(mask)` (track `chunk_start` across `chunk_iterator`). Then loop over `neighbours` with the same chunked reader, `tile = 1 + i`, skipping chunks with no point inside the primary grid's expanded outer bounds. The conservation check compares the primary's core counts with `header.point_count`, unchanged. After the writers close: rename the sub-tiles with `counts_core >= min_points`, `np.save(<stem>_ident.npy, np.concatenate(pieces))` for those, unlink the temp files and drop the pieces of the others; write the manifest last (the manifest's presence means the split is complete). Keep the `.tmp` cleanup on failure paths and add the ident files of an aborted split to it.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv-cpu/bin/python -m pytest -q tests/test_geo_split.py tests/test_geo_cli.py`
 Expected: 10 + 42 passed (the CLI's split round trip must be unaffected by the extra files).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ff3d_geo/split.py tests/test_geo_split.py
@@ -179,7 +179,7 @@ git commit -m "feat: split writes core-plus-halo sub-tiles with a point identity
   6. Return `{"n_trees", "n_pairs_tested", "n_unified", "n_cross_km", "tiles": {S: {"las", "gpkg", "n_points", "n_trees_in_tile"}}}`.
 - Any core point whose sub-tile was dropped by `min_points` keeps `-1 / 255 / -1.0` (documented; today such points are absent from the merged LAS altogether).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `tests/test_geo_stitch.py`:
 
@@ -335,19 +335,19 @@ def test_result_point_header_matches_results_to_las():
     assert h.parse_crs().to_epsg() == 25833
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv-cpu/bin/python -m pytest -q tests/test_geo_stitch.py tests/test_geo_convert.py`
 Expected: `ModuleNotFoundError: No module named 'ff3d_geo.stitch'`; the convert test fails on the import.
 
-- [ ] **Step 3: Implement** `ff3d_geo/stitch.py` per the interfaces (pure numpy for the matching: `np.unique(np.stack([la, lb]), axis=1, return_counts=True)` over shared points with both labels `>= 0`; label sizes over the shared set with `np.unique(..., return_counts=True)`), and the `result_point_header` refactor in `convert.py`. The km-tile write goes through `laspy.open(tmp, mode="w", header=...)` and `ScaleAwarePointRecord.zeros` per chunk like `split.py` does; `treeID` etc. are assigned per chunk from the full arrays by slice.
+- [x] **Step 3: Implement** `ff3d_geo/stitch.py` per the interfaces (pure numpy for the matching: `np.unique(np.stack([la, lb]), axis=1, return_counts=True)` over shared points with both labels `>= 0`; label sizes over the shared set with `np.unique(..., return_counts=True)`), and the `result_point_header` refactor in `convert.py`. The km-tile write goes through `laspy.open(tmp, mode="w", header=...)` and `ScaleAwarePointRecord.zeros` per chunk like `split.py` does; `treeID` etc. are assigned per chunk from the full arrays by slice.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv-cpu/bin/python -m pytest -q tests/test_geo_stitch.py tests/test_geo_convert.py tests/test_geo_merge.py`
 Expected: all passed (7 new in stitch, 1 in convert, merge unchanged).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ff3d_geo/stitch.py ff3d_geo/convert.py tests/test_geo_stitch.py tests/test_geo_convert.py
@@ -369,7 +369,7 @@ git commit -m "feat: ff3d_geo.stitch unifies sub-tile instances over halo overla
 - `border.border_check(las_path, size_m=100.0) -> dict`: reads the LAS once (`x, y, treeID, classification, semantic`), `vegetation = isin(classification, [3,4,5]) & (semantic != 0) & (semantic != 255)`, returns both dicts merged plus `n_points`.
 - CLI: `python -m ff3d_geo border-check --las <T>.las [--size 100] [--json <path>]` prints the profile table and the counts, writes JSON when asked.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `tests/test_geo_border.py`:
 
@@ -435,11 +435,11 @@ def test_parser_exposes_border_check():
     assert args.size == 100 and args.json is None
 ```
 
-- [ ] **Step 2: Run to verify they fail** — `.venv-cpu/bin/python -m pytest -q tests/test_geo_border.py tests/test_geo_cli.py -k "border"`; expected `ModuleNotFoundError` / `SystemExit` on the unknown subcommand.
+- [x] **Step 2: Run to verify they fail** — `.venv-cpu/bin/python -m pytest -q tests/test_geo_border.py tests/test_geo_cli.py -k "border"`; expected `ModuleNotFoundError` / `SystemExit` on the unknown subcommand.
 
-- [ ] **Step 3: Implement** `ff3d_geo/border.py` (numpy only, laspy for `border_check`) and the lazy-import subcommand in `cli.main`.
+- [x] **Step 3: Implement** `ff3d_geo/border.py` (numpy only, laspy for `border_check`) and the lazy-import subcommand in `cli.main`.
 
-- [ ] **Step 4: Run** `.venv-cpu/bin/python -m pytest -q tests/test_geo_border.py tests/test_geo_cli.py` — all passed. Then reproduce today's numbers as the baseline (this is the check that the metric is right):
+- [x] **Step 4: Run** `.venv-cpu/bin/python -m pytest -q tests/test_geo_border.py tests/test_geo_cli.py` — all passed. Then reproduce today's numbers as the baseline (this is the check that the metric is right):
 
 ```bash
 .venv-cpu/bin/python -m ff3d_geo border-check \
@@ -448,7 +448,7 @@ def test_parser_exposes_border_check():
 
 Expected (from the spec §1b, tolerance ±0.005 / ±20 pairs): `frac[0] = 0.374`, `interior_frac = 0.124`, `strip_excess_pp ≈ 6.3`, `n_trees = 31385`, `n_crossing = 0`, `n_touching = 5150`, `n_pairs ≈ 1843`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ff3d_geo/border.py ff3d_geo/cli.py tests/test_geo_border.py tests/test_geo_cli.py
@@ -468,7 +468,7 @@ git commit -m "feat: ff3d_geo border-check measures the sub-tile seam metrics"
 - `stitch --manifest <split_manifest.json>... --results <dir>... --out <dir> [--iou 0.5] [--min-shared 20] [--runtime-s S]` runs `stitch.stitch` and prints one line per km tile (`wrote <S>.las (<n_points> points, <n> trees in tile)`) and one summary line (`unified <n_unified> of <n_pairs_tested> tested pairs (<n_cross_km> across km tiles); <n_trees> trees in the mosaic`), then the report markdown for each tile.
 - `merge` is unchanged.
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/test_geo_cli.py`; the stitch fixture is importable as `from test_geo_stitch import _mosaic`)
+- [x] **Step 1: Write the failing tests** (append to `tests/test_geo_cli.py`; the stitch fixture is importable as `from test_geo_stitch import _mosaic`)
 
 ```python
 def test_parser_exposes_split_halo_and_stitch():
@@ -509,13 +509,13 @@ def test_split_subcommand_passes_halo_and_neighbours_through(tmp_path, capsys):
     assert (ident["tile"] == 1).sum() == int((b[:, 0] < 381120).sum())
 ```
 
-- [ ] **Step 2: Run to verify they fail** — `.venv-cpu/bin/python -m pytest -q tests/test_geo_cli.py -k "halo or stitch"`.
+- [x] **Step 2: Run to verify they fail** — `.venv-cpu/bin/python -m pytest -q tests/test_geo_cli.py -k "halo or stitch"`.
 
-- [ ] **Step 3: Implement** (lazy import of `ff3d_geo.stitch` in `main`, like `merge`).
+- [x] **Step 3: Implement** (lazy import of `ff3d_geo.stitch` in `main`, like `merge`).
 
-- [ ] **Step 4: Run** `.venv-cpu/bin/python -m pytest -q tests` — everything passes (system-python `python3 -m pytest tests` still skips the geo modules cleanly).
+- [x] **Step 4: Run** `.venv-cpu/bin/python -m pytest -q tests` — everything passes (system-python `python3 -m pytest tests` still skips the geo modules cleanly).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ff3d_geo/cli.py tests/test_geo_cli.py
@@ -537,10 +537,10 @@ git commit -m "feat: split --buffer/--neighbours and the stitch subcommand"
 - `benchmark/berlin_stitch.sh <tile stem>...`: one `python -m ff3d_geo stitch --manifest inputs/berlin/sub/$T/split_manifest.json ... --results work_dirs/berlin-$T ... --out work_dirs/berlin-mosaic --runtime-s <sum of runtime-$T.txt>` over ALL given tiles, then `python -m ff3d_geo masks --las work_dirs/berlin-mosaic/$T.las --out work_dirs/berlin-mosaic --prefix $T` and `python -m ff3d_geo border-check --las work_dirs/berlin-mosaic/$T.las --json work_dirs/berlin-mosaic/${T}_border.json` per tile.
 - Docs: replace the "Trees cut by a sub-tile border stay split" paragraph with the halo/stitch description and the id scheme; the skill's section 5 (recovery) gets "stitch needs every sub-tile result of every manifest; a missing one is named"; section 6 (residue) unchanged; section 7 (copy home) adds `work_dirs/berlin-mosaic/`.
 
-- [ ] **Step 1: Test** — in `tests/test_inference_script.py` add a parametrised `bash -n` check over `benchmark/berlin_run_gpu.sh` and `benchmark/berlin_stitch.sh`, and a grep-style assertion that `berlin_run_gpu.sh` no longer contains `ff3d_geo merge` and does contain `--buffer 20`.
-- [ ] **Step 2: Implement** the scripts and doc edits.
-- [ ] **Step 3: Run** `.venv-cpu/bin/python -m pytest -q tests/test_inference_script.py` and `bash -n` both scripts by hand.
-- [ ] **Step 4: Commit**
+- [x] **Step 1: Test** — in `tests/test_inference_script.py` add a parametrised `bash -n` check over `benchmark/berlin_run_gpu.sh` and `benchmark/berlin_stitch.sh`, and a grep-style assertion that `berlin_run_gpu.sh` no longer contains `ff3d_geo merge` and does contain `--buffer 20`.
+- [x] **Step 2: Implement** the scripts and doc edits.
+- [x] **Step 3: Run** `.venv-cpu/bin/python -m pytest -q tests/test_inference_script.py` and `bash -n` both scripts by hand.
+- [x] **Step 4: Commit**
 
 ```bash
 git add benchmark/berlin_run_gpu.sh benchmark/berlin_stitch.sh docs/inference-pipeline.md \
@@ -557,7 +557,7 @@ git commit -m "tools: per-GPU queue splits with a 20 m halo; mosaic-wide stitch 
 - Create: `docs/benchmarks/2026-09-24-seamless-ids.md`
 - Modify: `docs/benchmarks/2026-09-22-tegel-berlin-2021.md` (one pointer paragraph in §3), `docs/superpowers/plans/2026-09-23-ff3d-05-seamless-ids.md` (tick the boxes)
 
-- [ ] **Step 1: One km tile.** On carrot (`ssh carrot`, `cd /raid/cwinkelmann/ForestFormer3D && git pull --ff-only origin fix/review-findings`), with the seven available neighbours of `3dm_33_381_5829_1_be` present in `inputs/berlin/` (`380_5828, 380_5829, 381_5828, 381_5830, 382_5828, 382_5829` — `380_5830` and `382_5830` do not exist), on one idle GPU (never GPU 1):
+- [x] **Step 1: One km tile.** On carrot (`ssh carrot`, `cd /raid/cwinkelmann/ForestFormer3D && git pull --ff-only origin fix/review-findings`), with the seven available neighbours of `3dm_33_381_5829_1_be` present in `inputs/berlin/` (`380_5828, 380_5829, 381_5828, 381_5830, 382_5828, 382_5829` — `380_5830` and `382_5830` do not exist), on one idle GPU (never GPU 1):
 
 ```bash
 nohup bash benchmark/berlin_run_gpu.sh 5 3dm_33_381_5829_1_be > work_dirs/logs/berlin-halo-gpu5-$(date +%Y%m%d-%H%M%S).log 2>&1 &
@@ -568,13 +568,13 @@ Then `bash benchmark/berlin_stitch.sh 3dm_33_381_5829_1_be` (only this tile's ma
 
 Acceptance (spec §3): `strip_excess_pp` from 6.3 to below 1.0; `frac[0]` within 0.03 of `interior_frac`; `n_pairs` from 1843 to below 100; `n_touching / n_trees` from 16.4 % to 6-10 %; `n_crossing > 0` (crowns now cross lines); `n_trees` within ±5 % of 31,385 minus the ~1,843 duplicates (i.e. ~29,500). If `strip_excess_pp` stays above 1.0, print the profile: an excess confined to the outer bins means the halo is too small (raise `--buffer` to 24 or 32 and rerun); an excess flat over 10 m means something else (stop and report).
 
-- [ ] **Step 2: r12 regression.** `python -m ff3d_geo run --las inputs/r12_tegel_E381300_N5828300_100m.las --checkpoint work_dirs/clean_forestformer/epoch_3000_fix.pth --out work_dirs/tegel-r12-check --gpu 5`; the report must say 397 CHM maxima and a tree count within run-to-run noise of 402 (`docs/benchmarks/2026-09-22-tegel-als.md`; the noise floor is in `docs/benchmarks/2026-09-23-inference-profile.md`). No halo is involved, so any difference is nondeterminism, not this plan.
+- [x] **Step 2: r12 regression.** `python -m ff3d_geo run --las inputs/r12_tegel_E381300_N5828300_100m.las --checkpoint work_dirs/clean_forestformer/epoch_3000_fix.pth --out work_dirs/tegel-r12-check --gpu 5`; the report must say 397 CHM maxima and a tree count within run-to-run noise of 402 (`docs/benchmarks/2026-09-22-tegel-als.md`; the noise floor is in `docs/benchmarks/2026-09-23-inference-profile.md`). No halo is involved, so any difference is nondeterminism, not this plan.
 
-- [ ] **Step 3: The mosaic.** Split+run all eleven tiles (queues per GPU as in the skill, 1-2 tiles per GPU), then ONE `berlin_stitch.sh` over all eleven. Check `stitch.json`: `n_cross_km > 0`; for one cross-km pair from `stitch_ids.npy`, confirm the id appears in both km-tile LAS files. Copy `work_dirs/berlin-mosaic/` home (`rsync` as in the skill, section 7) to `/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d_v2/<T>/` (one directory per tile: `<T>.las`, `_trees.gpkg`, `_crowns.gpkg`, the GeoTIFFs, `_report.*`, `_border.json`).
+- [x] **Step 3: The mosaic.** Split+run all eleven tiles (queues per GPU as in the skill, 1-2 tiles per GPU), then ONE `berlin_stitch.sh` over all eleven. Check `stitch.json`: `n_cross_km > 0`; for one cross-km pair from `stitch_ids.npy`, confirm the id appears in both km-tile LAS files. Copy `work_dirs/berlin-mosaic/` home (`rsync` as in the skill, section 7) to `/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d_v2/<T>/` (one directory per tile: `<T>.las`, `_trees.gpkg`, `_crowns.gpkg`, the GeoTIFFs, `_report.*`, `_border.json`).
 
-- [ ] **Step 4: Viewer.** Rebuild the octrees with PotreeConverter 2.1.1 from the new LAS files into a new site directory (`berlin_potree_v2`; keep the old one), run `benchmark/build_potree_site.py --site ... --ff3d-dir .../berlin_als_2021_ff3d_v2 ...`, serve it (`benchmark/serve_potree.py --root ... --port 8081`), and take a headless screenshot of a tile boundary in `tree id` mode: no colour bands (Task 0) and crowns continuing across the 100 m lines.
+- [x] **Step 4: Viewer.** Rebuild the octrees with PotreeConverter 2.1.1 from the new LAS files into a new site directory (`berlin_potree_v2`; keep the old one), run `benchmark/build_potree_site.py --site ... --ff3d-dir .../berlin_als_2021_ff3d_v2 ...`, serve it (`benchmark/serve_potree.py --root ... --port 8081`), and take a headless screenshot of a tile boundary in `tree id` mode: no colour bands (Task 0) and crowns continuing across the 100 m lines.
 
-- [ ] **Step 5: Report** `docs/benchmarks/2026-09-24-seamless-ids.md`: the before/after table of the four metrics for `3dm_33_381_5829_1_be` (today's numbers from spec §1b), the mosaic totals (trees before: sum of the eleven tables, 300,452; after: `n_trees`; `n_unified`, `n_cross_km`), runtime per sub-tile with and without halo, and the screenshot pair under `docs/benchmarks/assets/seamless/`. Add one paragraph to `2026-09-22-tegel-berlin-2021.md` §3 pointing to it. Commit:
+- [x] **Step 5: Report** `docs/benchmarks/2026-09-24-seamless-ids.md`: the before/after table of the four metrics for `3dm_33_381_5829_1_be` (today's numbers from spec §1b), the mosaic totals (trees before: sum of the eleven tables, 300,452; after: `n_trees`; `n_unified`, `n_cross_km`), runtime per sub-tile with and without halo, and the screenshot pair under `docs/benchmarks/assets/seamless/`. Add one paragraph to `2026-09-22-tegel-berlin-2021.md` §3 pointing to it. Commit:
 
 ```bash
 git add docs/benchmarks/2026-09-24-seamless-ids.md docs/benchmarks/assets/seamless \
