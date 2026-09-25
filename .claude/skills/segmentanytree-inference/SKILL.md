@@ -159,7 +159,7 @@ python3 benchmark/potree_convert_tile.py --las work_dirs/sat-$T/$T.las \
 rsync -a carrot:/raid/cwinkelmann/ForestFormer3D/work_dirs/logs/potree/out_sat/$T/ /Volumes/2TB/winmol/ALS_Data/berlin_potree/pointclouds_sat/$T/
 .venv-cpu/bin/python benchmark/build_potree_site.py --site /Volumes/2TB/winmol/ALS_Data/berlin_potree \
     --variant sat --sat-dir /Volumes/2TB/winmol/ALS_Data/berlin_als_2021_sat [--tiles $T]
-python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree --port 8080
+(cd docker/potree && docker compose up -d --build)   # or: python3 benchmark/serve_potree.py --root <site> --port 8080
 ```
 
 `--variant sat` adds `variants.sat` to the tiles already in `data/tiles.json`

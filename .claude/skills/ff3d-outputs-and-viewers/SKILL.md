@@ -225,12 +225,28 @@ DOP overlays (`benchmark/plot_berlin_dop_overlays.py`) are covered in
 
 ## 7. Potree web viewer
 
-An offline Potree 3D site over the Berlin tiles lives on the 2TB volume:
+An offline Potree 3D site over the Berlin tiles lives on the 2TB volume: `berlin_potree_v2/`
+is the current 33-tile site (`pointclouds/` ForestFormer3D, `pointclouds_sat/` SegmentAnyTree,
+`pointclouds_ams3d/` AMS3D); `berlin_potree/` is the older 11-tile one. Serve it with the
+nginx container in `docker/potree/` (read-only bind mount of the site folder, no site content
+in the image):
 
 ```bash
-cd /Volumes/2TB/winmol/ALS_Data/berlin_potree
-python3 -m http.server 8080        # then open http://localhost:8080/
+cd ~/ForestFormer3D/docker/potree && cp .env.example .env   # POTREE_SITE = site root, POTREE_PORT, POTREE_BIND
+docker compose up -d --build        # then open http://localhost:8080/
+docker compose down
 ```
+
+`python3 -m http.server` does **not** work (no Range support: the cloud renders as scattered
+blobs); `benchmark/serve_potree.py --root <site> --port 8080` is the no-Docker fallback.
+**On the Mac, Docker Desktop cannot bind-mount `/Volumes/2TB` (exFAT via FSKit): the start
+hangs and wedges the daemon.** Either rsync the site onto the internal APFS disk and point
+`POTREE_SITE` there, or use `serve_potree.py`, which reads the volume directly. Sharing from
+carrot: copy the site folder to `/raid/cwinkelmann/potree/berlin_potree_v2`, set `POTREE_SITE`
+to it and `POTREE_BIND=0.0.0.0` in `docker/potree/.env`, `docker compose up -d --build`, open
+`http://carrot:8080/` over the VPN (or keep the default bind and tunnel with
+`ssh -L 8080:localhost:8080 carrot`). Details and the verification record:
+`docs/benchmarks/2026-09-23-potree-viewer.md`, "Serving".
 
 A `file://` open does **not** work — the octree loader uses `fetch` with range requests and
 web workers, which need HTTP.

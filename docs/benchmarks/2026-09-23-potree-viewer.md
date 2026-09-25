@@ -79,12 +79,38 @@ marker picking — is unverified.
 The site must be served by something that answers HTTP Range requests. Potree 2.0 reads every
 octree node as a byte range out of one large `octree.bin`; `python3 -m http.server` ignores the
 `Range` header and returns the whole file with `200`, so the viewer decodes the wrong bytes and
-the cloud appears as scattered blobs with no error anywhere. `benchmark/serve_potree.py` answers
-`206 Partial Content` and is threaded for the parallel node requests:
+the cloud appears as scattered blobs with no error anywhere.
+
+The supported server is the nginx container in `docker/potree/` (2026-09-25): the image is
+`nginx:1.27-alpine` plus one config, no site content, and `compose.yaml` bind-mounts the site
+folder read-only at `/usr/share/nginx/html`. nginx answers ranges natively; the config keeps
+them byte-exact (`gzip off` on `*.bin`, `max_ranges 1`), sets the `geojson`/`wasm` MIME
+types and hides the exFAT volume's `._*` sidecars. `tests/test_potree_docker.py` pins all of
+that against a throwaway site (the container tests skip when the daemon is down).
 
 ```bash
-python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree --port 8080
+cd docker/potree && cp .env.example .env     # POTREE_SITE = site root, POTREE_PORT, POTREE_BIND
+docker compose up -d --build                  # http://localhost:8080/
+docker compose logs -f                        # errors only; access log is off
+docker compose down
 ```
+
+**Docker Desktop on the Mac cannot bind-mount the 2TB exFAT volume.** Any `-v /Volumes/2TB/...`
+hangs the container in `Created` (VirtioFS and gRPC FUSE alike; a `/Users` or `/private/tmp`
+mount of the same files starts instantly) and the hung start wedges the daemon until Docker
+Desktop is force-quit. The volume is exFAT mounted through macOS FSKit (`fskit` in `mount`).
+Workarounds: rsync the site (23 GB for the 33-tile v2 site) onto the internal APFS disk and
+point `POTREE_SITE` there; run the container on a Linux host (carrot, T14) where the mount is
+native; or fall back to the Python server, which reads the volume directly:
+
+```bash
+python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree_v2 --port 8080
+```
+
+Verified 2026-09-25 against an APFS copy of the v2 site (page, `build/`, `libs/`, `data/`, one
+tile's octree): manifest, `metadata.json`, a `206` byte range out of the 700 MB `octree.bin`,
+`application/wasm` and `application/geo+json` all served correctly; the page initialises Potree
+1.8 and lists the 33 tiles with no console errors.
 
 Two fixes in `benchmark/potree_index.html`, both found by driving the page in a headless browser:
 
