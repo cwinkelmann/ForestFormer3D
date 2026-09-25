@@ -242,7 +242,10 @@ blobs); `benchmark/serve_potree.py --root <site> --port 8080` is the no-Docker f
 **On the Mac, Docker Desktop cannot bind-mount `/Volumes/2TB` (exFAT via FSKit): the start
 hangs and wedges the daemon.** Either rsync the site onto the internal APFS disk and point
 `POTREE_SITE` there, or use `serve_potree.py`, which reads the volume directly. Sharing from
-carrot: copy the site folder to `/raid/cwinkelmann/potree/berlin_potree_v2`, set `POTREE_SITE`
+carrot: copy the site folder with
+`rsync -r --size-only --chmod=Da+rx,Fa+r --exclude '._*' <site>/ carrot:/raid/cwinkelmann/potree/berlin_potree_v2/`
+(the exFAT tree is mode 0700 throughout and `rsync -a` keeps that; nginx's worker runs as
+uid 101 and would get 403 on everything), set `POTREE_SITE`
 to it and `POTREE_BIND=0.0.0.0` in `docker/potree/.env`, `docker compose up -d --build`, open
 `http://carrot:8080/` over the VPN (or keep the default bind and tunnel with
 `ssh -L 8080:localhost:8080 carrot`). Details and the verification record:

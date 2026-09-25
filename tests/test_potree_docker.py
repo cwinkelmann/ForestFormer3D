@@ -87,6 +87,25 @@ def test_env_example_documents_every_variable():
     assert "berlin_potree_v2" in env
 
 
+def test_env_example_does_not_default_to_the_exfat_volume():
+    # On the Mac, Docker Desktop hangs any bind mount from /Volumes/2TB (exFAT via FSKit)
+    # and wedges the daemon: `cp .env.example .env && docker compose up` must not do that.
+    env = _text(ENV_EXAMPLE)
+    site = re.search(r"^POTREE_SITE=(.*)$", env, re.M).group(1).strip()
+    assert site == "", "POTREE_SITE must be left empty so `:?` forces an explicit choice"
+    assert "exFAT" in env
+    compose = _text(COMPOSE)
+    assert "/Volumes/" not in compose, "the compose error text must not suggest the exFAT volume"
+
+
+def test_docs_tell_a_linux_copy_to_open_the_modes():
+    # The exFAT tree is 0700 throughout; `rsync -a` keeps that and nginx (uid 101) gets 403.
+    skill = _text(REPO_ROOT / ".claude" / "skills" / "ff3d-outputs-and-viewers" / "SKILL.md")
+    assert "--chmod=" in skill
+    doc = _text(REPO_ROOT / "docs" / "benchmarks" / "2026-09-23-potree-viewer.md")
+    assert "--chmod=" in doc
+
+
 def test_env_file_is_gitignored():
     ignore = _text(REPO_ROOT / ".gitignore")
     assert re.search(r"^docker/potree/\.env$", ignore, re.M)

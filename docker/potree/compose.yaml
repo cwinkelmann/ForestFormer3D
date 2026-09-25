@@ -15,4 +15,4 @@ services:
     ports:
       - "${POTREE_BIND:-127.0.0.1}:${POTREE_PORT:-8080}:80"
     volumes:
-      - "${POTREE_SITE:?set POTREE_SITE in docker/potree/.env to the site root, e.g. /Volumes/2TB/winmol/ALS_Data/berlin_potree_v2}:/usr/share/nginx/html:ro"
+      - "${POTREE_SITE:?set POTREE_SITE in docker/potree/.env to the site root (a local APFS/ext4 copy of berlin_potree_v2, see .env.example)}:/usr/share/nginx/html:ro"

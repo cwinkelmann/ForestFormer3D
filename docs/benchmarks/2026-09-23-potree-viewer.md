@@ -101,7 +101,12 @@ mount of the same files starts instantly) and the hung start wedges the daemon u
 Desktop is force-quit. The volume is exFAT mounted through macOS FSKit (`fskit` in `mount`).
 Workarounds: rsync the site (23 GB for the 33-tile v2 site) onto the internal APFS disk and
 point `POTREE_SITE` there; run the container on a Linux host (carrot, T14) where the mount is
-native; or fall back to the Python server, which reads the volume directly:
+native; or fall back to the Python server, which reads the volume directly. Whichever copy
+you make, open the modes: the exFAT tree is 0700 throughout, `rsync -a` keeps that, and
+nginx's worker (uid 101, not root) then gets 403 on every file. Use
+`rsync -r --size-only --chmod=Da+rx,Fa+r --exclude '._*' <site>/ <dest>/`
+(or `chmod -R a+rX <dest>` afterwards). `.env.example` therefore leaves `POTREE_SITE` empty
+so `docker compose up` refuses to start until a real path is chosen.
 
 ```bash
 python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree_v2 --port 8080
