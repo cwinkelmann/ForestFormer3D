@@ -90,3 +90,144 @@ def test_env_example_documents_every_variable():
 def test_env_file_is_gitignored():
     ignore = _text(REPO_ROOT / ".gitignore")
     assert re.search(r"^docker/potree/\.env$", ignore, re.M)
+
+
+# --- container smoke tests: skipped cleanly when the docker daemon is not reachable ---
+import gzip  # noqa: E402
+import json  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+
+def _docker_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+needs_docker = pytest.mark.skipif(not _docker_available(),
+                                  reason="docker daemon not reachable (start Docker Desktop)")
+
+OCTREE = bytes(range(256)) * 8  # 2048 bytes, byte i == i % 256
+
+
+@pytest.fixture(scope="module")
+def fake_site(tmp_path_factory) -> Path:
+    site = tmp_path_factory.mktemp("potree_site")
+    (site / "index.html").write_text("<html><body>potree</body></html>")
+    (site / "data").mkdir()
+    # comfortably above nginx's gzip_min_length (1024) so the gzip test is meaningful
+    (site / "data" / "tiles.json").write_text(json.dumps(
+        {"crs": "EPSG:25833", "tiles": [{"tile": f"3dm_33_{i}_1_be" * 4} for i in range(60)]}))
+    (site / "data" / "t_crowns.geojson").write_text('{"type":"FeatureCollection","features":[]}')
+    (site / "libs").mkdir()
+    (site / "libs" / "laz-perf.wasm").write_bytes(b"\0asm\1\0\0\0")
+    (site / "libs" / "._laz-perf.wasm").write_bytes(b"\0\5\26\7AppleDouble")
+    pc = site / "pointclouds" / "tile"
+    pc.mkdir(parents=True)
+    (pc / "octree.bin").write_bytes(OCTREE)
+    return site
+
+
+@pytest.fixture(scope="module")
+def potree_container(fake_site):
+    if not _docker_available():
+        pytest.skip("docker daemon not reachable (start Docker Desktop)")
+    subprocess.run(["docker", "build", "-q", "-t", "ff3d-potree:latest", str(POTREE_DIR)],
+                   check=True, capture_output=True)
+    cid = subprocess.run(
+        ["docker", "run", "-d", "--rm", "-p", "127.0.0.1:0:80",
+         "-v", f"{fake_site}:/usr/share/nginx/html:ro", "ff3d-potree:latest"],
+        check=True, capture_output=True, text=True).stdout.strip()
+    try:
+        port = subprocess.run(["docker", "port", cid, "80/tcp"], check=True,
+                              capture_output=True, text=True).stdout.strip().rsplit(":", 1)[-1]
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):  # wait for nginx to listen
+            try:
+                urllib.request.urlopen(base + "/index.html", timeout=1).read()
+                break
+            except (urllib.error.URLError, ConnectionError):
+                time.sleep(0.1)
+        yield base
+    finally:
+        subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
+
+
+def _get(base: str, path: str, headers: dict | None = None):
+    req = urllib.request.Request(base + path, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+@needs_docker
+def test_range_request_returns_206_and_exact_bytes(potree_container):
+    status, headers, body = _get(potree_container, "/pointclouds/tile/octree.bin",
+                                 {"Range": "bytes=100-199"})
+    assert status == 206
+    assert headers["Content-Range"] == f"bytes 100-199/{len(OCTREE)}"
+    assert body == OCTREE[100:200]
+    # nginx advertises Accept-Ranges on the 200 response, not on the 206 (RFC 9110 leaves it optional there)
+
+
+@needs_docker
+def test_open_ended_and_suffix_ranges(potree_container):
+    status, headers, body = _get(potree_container, "/pointclouds/tile/octree.bin",
+                                 {"Range": "bytes=2000-"})
+    assert (status, body) == (206, OCTREE[2000:])
+    status, headers, body = _get(potree_container, "/pointclouds/tile/octree.bin",
+                                 {"Range": "bytes=-16"})
+    assert (status, body) == (206, OCTREE[-16:])
+
+
+@needs_docker
+def test_bin_is_not_gzipped(potree_container):
+    status, headers, body = _get(potree_container, "/pointclouds/tile/octree.bin",
+                                 {"Accept-Encoding": "gzip"})
+    assert status == 200
+    assert "Content-Encoding" not in headers
+    assert headers["Accept-Ranges"] == "bytes"
+    assert body == OCTREE
+
+
+@needs_docker
+def test_json_is_gzipped_when_asked(potree_container):
+    status, headers, body = _get(potree_container, "/data/tiles.json", {"Accept-Encoding": "gzip"})
+    assert status == 200
+    assert headers.get("Content-Encoding") == "gzip"
+    assert json.loads(gzip.decompress(body))["crs"] == "EPSG:25833"
+    assert len(json.loads(gzip.decompress(body))["tiles"]) == 60
+
+
+@needs_docker
+def test_mime_types(potree_container):
+    for path, mime in (("/data/tiles.json", "application/json"),
+                       ("/data/t_crowns.geojson", "application/geo+json"),
+                       ("/libs/laz-perf.wasm", "application/wasm"),
+                       ("/index.html", "text/html")):
+        status, headers, _ = _get(potree_container, path)
+        assert status == 200, path
+        assert headers["Content-Type"].split(";")[0] == mime, path
+
+
+@needs_docker
+def test_appledouble_sidecar_is_404(potree_container):
+    status, _, _ = _get(potree_container, "/libs/._laz-perf.wasm")
+    assert status == 404
+    status, _, _ = _get(potree_container, "/libs/laz-perf.wasm")
+    assert status == 200
+
+
+@needs_docker
+def test_root_serves_index(potree_container):
+    status, headers, body = _get(potree_container, "/")
+    assert status == 200 and b"potree" in body
