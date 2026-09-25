@@ -7,6 +7,7 @@ __pycache__/
 .superpowers/
 .idea/
 .venv-cpu/
+docker/potree/.env
 
 # Symlink to the image's segmentator build, created by docker/entrypoint.sh
 segmentator/csrc/build

@@ -1,0 +1,18 @@
+# Potree viewer over a mounted site folder.
+#
+#   cp .env.example .env      # set POTREE_SITE to the site root
+#   docker compose up -d --build
+#   open http://localhost:${POTREE_PORT:-8080}/
+#
+# Compose reads .env from this directory, so run the commands from docker/potree/
+# (or pass -f docker/potree/compose.yaml --project-directory docker/potree).
+services:
+  potree:
+    build: .
+    image: ff3d-potree:latest
+    container_name: ff3d-potree
+    restart: unless-stopped
+    ports:
+      - "${POTREE_BIND:-127.0.0.1}:${POTREE_PORT:-8080}:80"
+    volumes:
+      - "${POTREE_SITE:?set POTREE_SITE in docker/potree/.env to the site root, e.g. /Volumes/2TB/winmol/ALS_Data/berlin_potree_v2}:/usr/share/nginx/html:ro"
