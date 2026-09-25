@@ -7,13 +7,19 @@ import MinkowskiEngine as ME
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import PointData
 from mmdet3d.models import Base3DDetector
+from mmengine.logging import MessageHub, print_log
+from .tiling import (SemanticVotes, degenerate_region_reason,
+                     generate_cylindrical_regions, merge_instances_by_score,
+                     relabel_contiguous, sample_region)
 from .mask_matrix_nms import mask_matrix_nms
+from .ply_io import result_ply_element
 import open3d as o3d
 import os
 import numpy as np
 from tools.base_modules import Seq, MLP, FastBatchNorm1d
 from .panoptic_losses import offset_loss, discriminative_loss, FastFocalLoss
 from torch_cluster import fps
+import logging
 import re
 import math
 import collections 
@@ -26,6 +32,30 @@ from sklearn.neighbors import NearestNeighbors
 from plyfile import PlyData, PlyElement
 
 import contextlib, time
+
+
+def current_epoch_from_hub() -> int:
+    """Epoch published by mmengine's RuntimeInfoHook; 0 when no runner is active."""
+    epoch = MessageHub.get_current_instance().get_info('epoch')
+    return 0 if epoch is None else int(epoch)
+
+
+def query_stage_active(prepare_epoch, epoch: int) -> bool:
+    """True when query/decoder losses are trained.
+
+    ``prepare_epoch=None`` disables the warm-up entirely; otherwise the decoder
+    is trained from epoch ``prepare_epoch + 1`` on (same comparison as before,
+    but 0 is no longer treated as "unset").
+    """
+    return prepare_epoch is None or epoch > prepare_epoch
+
+
+#: Element budget for the (K, N) float block `pred_inst_sem_test` builds when it
+#: takes the per-mask minimum z. 8M float32 = 32 MB per chunk; like the
+#: `max_points` cap in `_predict_full_plot`, lower it on a small GPU. The result
+#: does not depend on it -- only the peak allocation does.
+Z_FILTER_BLOCK_ELEMENTS = 8_000_000
+
 
 class UnionFind:
     def __init__(self, n):
@@ -1363,24 +1393,27 @@ class ForAINetV2OneFormer3D(Base3DDetector):
     
     @staticmethod
     def filter_stuff_masks(batch_data_samples_i, stuff_classes, ratio_inspoint):
+        """Drop stuff instances; crop ratios are looked up by instance id.
+
+        Row ``i`` of ``sp_inst_masks`` is instance id ``i`` (``get_gt_inst_masks``
+        one-hot encodes the ids in order), and ``ratio_inspoint`` is keyed by
+        the ids in force after the last transform that compacted them. A
+        missing key means the two drifted apart, which would silently rescale
+        the wrong instance's IoU, so fail loudly instead.
+        """
         labels_3d = batch_data_samples_i.labels_3d
         sp_inst_masks = batch_data_samples_i.sp_inst_masks
+        n_inst = len(labels_3d)
+        missing = [i for i in range(n_inst) if i not in ratio_inspoint]
+        if missing:
+            raise KeyError(f'ratio_inspoint lacks instance ids {missing}; '
+                           f'keys are {sorted(int(k) for k in ratio_inspoint)}')
+        ratio_tensor = torch.tensor([float(ratio_inspoint[i]) for i in range(n_inst)],
+                                    device=labels_3d.device)
+        keep = ~torch.isin(
+            labels_3d, torch.tensor(stuff_classes, device=labels_3d.device))
 
-        stuff_classes_tensor = torch.tensor(stuff_classes, device=labels_3d.device)
-
-        mask = torch.isin(labels_3d, stuff_classes_tensor)
-        indices_to_keep = ~mask
-
-        filtered_labels_3d = labels_3d[indices_to_keep]
-
-        filtered_sp_inst_masks = sp_inst_masks[indices_to_keep]
-
-        ratio_tensor = torch.zeros(len(labels_3d), device=labels_3d.device)
-        for i, idx in enumerate(labels_3d):
-            ratio_tensor[i] = ratio_inspoint[i]
-        ratio_subset = ratio_tensor[indices_to_keep]
-
-        return filtered_labels_3d, filtered_sp_inst_masks, ratio_subset
+        return labels_3d[keep], sp_inst_masks[keep], ratio_tensor[keep]
     
     @staticmethod
     def generate_cylindrical_regions(points, radius, step_size):
@@ -1564,23 +1597,19 @@ class ForAINetV2OneFormer3D(Base3DDetector):
 
     @staticmethod
     def save_ply_withscore(points, semantic_pred, instance_pred, scores, filename, semantic_gt=None, instance_gt=None):
-        from plyfile import PlyData, PlyElement
+        """Write the per-point result cloud as a binary little-endian PLY.
+
+        Same field names and dtypes as before (see `oneformer3d/ply_io.py`); only
+        the encoding changed from ASCII to binary, which removes a `numpy.savetxt`
+        over every point plus a per-row Python tuple comprehension (5-10 s per
+        100 m tile, see docs/benchmarks/2026-09-23-inference-profile.md).
+        """
         output_dir = os.path.dirname(filename)
         os.makedirs(output_dir, exist_ok=True)
-        
-        dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
-                ('semantic_pred', 'i4'), ('instance_pred', 'i4'), ('score', 'f4')]
-        
-        if semantic_gt is not None and instance_gt is not None:
-            dtype += [('semantic_gt', 'i4'), ('instance_gt', 'i4')]
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
-        else:
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
 
-        el = PlyElement.describe(vertex, 'vertex')
-        PlyData([el], text=True).write(filename)
+        el = result_ply_element(points, semantic_pred, instance_pred, scores,
+                                semantic_gt, instance_gt)
+        PlyData([el], text=False, byte_order='<').write(filename)
 
     @staticmethod
     def finalize_semantic_labels(all_pre_sem):
@@ -1762,7 +1791,6 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                  prepare_epoch=None,
                  #prepare_epoch2=None,
                  radius = 16,
-                 score_th = 0.4,
                  chunk = 20_000):
         super(Base3DDetector, self).__init__(
             data_preprocessor=data_preprocessor, init_cfg=init_cfg)
@@ -1783,7 +1811,6 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         self.Embed.append(torch.nn.Linear(num_channels, 5))
         self.query_point_num = query_point_num
         self.radius = radius
-        self.score_th = score_th
         self.chunk = chunk
         self.BiSemantic = (
             Seq()  
@@ -1935,19 +1962,23 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             bi_semantic_logit = bi_semantic_logits[i]
 
             # Sum the foreground (instance_mask) per voxel and determine whether the voxel is background/foreground
-            instance_mask_tensor = torch.from_numpy(instance_mask)
-            instance_mask = instance_mask_tensor.to(device)
+            instance_mask = torch.as_tensor(instance_mask).to(device)
             voxel_point_counts = scatter_add(torch.ones_like(instance_mask.float()), voxel_superpoints, dim=0)
             foreground_voxel_counts = scatter_add(instance_mask.float(), voxel_superpoints, dim=0)
-            
-            # If a voxel has more than half foreground points, consider it foreground
-            bi_y = (foreground_voxel_counts / voxel_point_counts) > 0.5
-            bi_y = bi_y.long()  # Convert to long for loss function compatibility
 
-            # Calculate semantic binary cross-entropy loss over all voxels (background and foreground)
-            semantic_loss_bi = torch.nn.functional.nll_loss(
-                bi_semantic_logit, bi_y.to(torch.int64)  # Removed ignore_index
-            )
+            # A voxel with more than half foreground points is foreground.
+            bi_y = ((foreground_voxel_counts / voxel_point_counts) > 0.5).long()
+            # Vegetation without a tree id (instance -1 but not ground) is
+            # ignored by the binary head; it keeps its class in the 3-class loss.
+            ignore_pts = (sem_mask != 0) & (pts_instance_mask == -1)
+            ignore_voxel_counts = scatter_add(ignore_pts.float(), voxel_superpoints, dim=0)
+            bi_y[(ignore_voxel_counts / voxel_point_counts) > 0.5] = -100
+
+            if (bi_y != -100).any():
+                semantic_loss_bi = torch.nn.functional.nll_loss(
+                    bi_semantic_logit, bi_y, ignore_index=-100)
+            else:
+                semantic_loss_bi = bi_semantic_logit.sum() * 0.0
             
             # Accumulate semantic loss for the batch
             total_semantic_loss_bi += semantic_loss_bi
@@ -1966,649 +1997,319 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         queries_inslabel = []
         queries_idx = []
 
-        if self.prepare_epoch:
-            if kwargs['epoch'] > self.prepare_epoch:
-                total_qscore_loss = 0
-                for i in range(batch_size):
-                    voxel_superpoints = inverse_mapping[coordinates[:, 0][inverse_mapping] == i]
-                    voxel_superpoints = torch.unique(voxel_superpoints, return_inverse=True)[1]
-                    pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
-                    instance_mask = batch_data_samples[i].gt_pts_seg.instance_mask
-                    valid_voxel_indices = torch.unique(voxel_superpoints[instance_mask])
+        if query_stage_active(self.prepare_epoch, current_epoch_from_hub()):
+            total_qscore_loss = 0
+            for i in range(batch_size):
+                voxel_superpoints = inverse_mapping[coordinates[:, 0][inverse_mapping] == i]
+                voxel_superpoints = torch.unique(voxel_superpoints, return_inverse=True)[1]
+                pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
+                instance_mask = batch_data_samples[i].gt_pts_seg.instance_mask
+                valid_voxel_indices = torch.unique(voxel_superpoints[instance_mask])
+                
+                with torch.no_grad():
+                    if valid_voxel_indices.numel() < 10:
+                        queries.append([])
+                        queries_inslabel.append([])
+                        continue
+                    voxel_instance_labels = self.get_voxel_instance_labels(
+                                        pts_instance_mask[instance_mask], 
+                                        voxel_superpoints[instance_mask]
+                                    )
                     
-                    with torch.no_grad():
-                        if valid_voxel_indices.numel() < 10:
-                            queries.append([])
-                            queries_inslabel.append([])
-                            continue
-                        voxel_instance_labels = self.get_voxel_instance_labels(
-                                            pts_instance_mask[instance_mask], 
-                                            voxel_superpoints[instance_mask]
-                                        )
-                        
-                        wood_class = 1
-                        
-                        semantic_predictions_bi = torch.argmax(bi_semantic_logits[i], dim=1)
-                        tree_indices = torch.where(semantic_predictions_bi == wood_class)[0]  #all voxel
-                        
-                        #FPS from all tree points
-                        batch_tensor_4 = torch.zeros(embed_logits[i][tree_indices].size(0), dtype=torch.long).to(embed_logits[i].device)  # Ensure batch_tensor on same device
-                        topk_indices_4 = fps(embed_logits[i][tree_indices], batch_tensor_4, ratio=min(self.query_point_num / embed_logits[i][tree_indices].size(0), torch.tensor([1.0]).to(embed_logits[i].device)))
-                        selected_indices_case4 = tree_indices[topk_indices_4]
+                    wood_class = 1
+                    
+                    semantic_predictions_bi = torch.argmax(bi_semantic_logits[i], dim=1)
+                    tree_indices = torch.where(semantic_predictions_bi == wood_class)[0]  #all voxel
+                    if tree_indices.numel() == 0:
+                        # no predicted foreground in this crop: nothing to sample queries from
+                        queries.append([])
+                        queries_inslabel.append([])
+                        continue
 
-                        # Retrieve relevant information for the selected points
-                        current_points = batch_inputs_dict['points'][i]
-                        current_points_add = scatter_add(current_points, voxel_superpoints, dim=0)
-                        voxel_counts = scatter_add(torch.ones_like(current_points[:, 0].float()), voxel_superpoints, dim=0)
-                        avg_points = current_points_add / voxel_counts.unsqueeze(-1).clamp(min=1)
+                    #FPS from all tree points
+                    batch_tensor_4 = torch.zeros(embed_logits[i][tree_indices].size(0), dtype=torch.long).to(embed_logits[i].device)  # Ensure batch_tensor on same device
+                    topk_indices_4 = fps(embed_logits[i][tree_indices], batch_tensor_4, ratio=min(self.query_point_num / embed_logits[i][tree_indices].size(0), torch.tensor([1.0]).to(embed_logits[i].device)))
+                    selected_indices_case4 = tree_indices[topk_indices_4]
 
-                        # add content queries
-                        queries.append(x[i][selected_indices_case4])
-                        
-                        pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
-                        voxel_instance_labels = self.get_voxel_instance_labels(
-                            pts_instance_mask, 
-                            voxel_superpoints
-                        )
+                    # Retrieve relevant information for the selected points
+                    current_points = batch_inputs_dict['points'][i]
+                    current_points_add = scatter_add(current_points, voxel_superpoints, dim=0)
+                    voxel_counts = scatter_add(torch.ones_like(current_points[:, 0].float()), voxel_superpoints, dim=0)
+                    avg_points = current_points_add / voxel_counts.unsqueeze(-1).clamp(min=1)
 
-                        # ins labels for queries
-                        queries_inslabel.append(voxel_instance_labels[selected_indices_case4])
+                    # add content queries
+                    queries.append(x[i][selected_indices_case4])
+                    
+                    pts_instance_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask  # Instance labels (per-point)
+                    voxel_instance_labels = self.get_voxel_instance_labels(
+                        pts_instance_mask, 
+                        voxel_superpoints
+                    )
 
-                        queries_idx.append(selected_indices_case4)
+                    # ins labels for queries
+                    queries_inslabel.append(voxel_instance_labels[selected_indices_case4])
 
-                if all(len(q) == 0 for q in queries):
-                    pass
+                    queries_idx.append(selected_indices_case4)
+
+            if all(len(q) == 0 for q in queries):
+                pass
+            else:
+                # First check if the length of x and queries are the same
+                if any(len(q) == 0 for q in queries):
+
+                    # Use list comprehension to filter out empty queries and save original indices
+                    filtered_results = [
+                        (x[i], queries[i], batch_data_samples[i], queries_inslabel[i], i)  # Keep the original index i
+                        for i in range(len(queries))
+                        if len(queries[i]) > 0  # Only keep non-empty queries
+                    ]
+                    # Unpack filtered results into separate lists
+                    x, queries, batch_data_samples, queries_inslabel, original_indices = zip(*filtered_results)
+                    # Convert the zipped result back to list format
+                    x = list(x)
+                    queries = list(queries)
+                    batch_data_samples = list(batch_data_samples)
+                    queries_inslabel = list(queries_inslabel)
+                    original_indices = list(original_indices)  # Keep track of original indices
                 else:
-                    # First check if the length of x and queries are the same
-                    if any(len(q) == 0 for q in queries):
+                    original_indices = list(range(len(batch_data_samples)))
+                    
+                x = self.decoder(x, queries)
 
-                        # Use list comprehension to filter out empty queries and save original indices
-                        filtered_results = [
-                            (x[i], queries[i], batch_data_samples[i], queries_inslabel[i], i)  # Keep the original index i
-                            for i in range(len(queries))
-                            if len(queries[i]) > 0  # Only keep non-empty queries
-                        ]
-                        # Unpack filtered results into separate lists
-                        x, queries, batch_data_samples, queries_inslabel, original_indices = zip(*filtered_results)
-                        # Convert the zipped result back to list format
-                        x = list(x)
-                        queries = list(queries)
-                        batch_data_samples = list(batch_data_samples)
-                        queries_inslabel = list(queries_inslabel)
-                        original_indices = list(original_indices)  # Keep track of original indices
-                    else:
-                        original_indices = list(range(len(batch_data_samples)))
-                        
-                    x = self.decoder(x, queries)
+                sp_gt_instances = []
+                for i in range(len(batch_data_samples)):
+                    voxel_superpoints = inverse_mapping[coordinates[:, 0][ \
+                                                                inverse_mapping] == original_indices[i]] #[326894]
+                    voxel_superpoints = torch.unique(voxel_superpoints,  
+                                                    return_inverse=True)[1]
+                    inst_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask 
+                    sem_mask = batch_data_samples[i].gt_pts_seg.pts_semantic_mask 
+                    assert voxel_superpoints.shape == inst_mask.shape
 
-                    sp_gt_instances = []
-                    for i in range(len(batch_data_samples)):
-                        voxel_superpoints = inverse_mapping[coordinates[:, 0][ \
-                                                                    inverse_mapping] == original_indices[i]] #[326894]
-                        voxel_superpoints = torch.unique(voxel_superpoints,  
-                                                        return_inverse=True)[1]
-                        inst_mask = batch_data_samples[i].gt_pts_seg.pts_instance_mask 
-                        sem_mask = batch_data_samples[i].gt_pts_seg.pts_semantic_mask 
-                        assert voxel_superpoints.shape == inst_mask.shape
+                    batch_data_samples[i].gt_instances_3d.sp_sem_masks = \
+                                        self.get_gt_semantic_masks(sem_mask,
+                                                                    voxel_superpoints,
+                                                                    self.num_classes)  
+                    batch_data_samples[i].gt_instances_3d.sp_inst_masks = \
+                                        self.get_gt_inst_masks(inst_mask,
+                                                            voxel_superpoints) 
+                    
+                    batch_data_samples[i].gt_instances_3d.labels_3d, batch_data_samples[i].gt_instances_3d.sp_inst_masks, batch_data_samples[i].gt_instances_3d.ratio_inspoint = \
+                                        self.filter_stuff_masks(batch_data_samples[i].gt_instances_3d, self.stuff_classes, batch_data_samples[i].gt_pts_seg.ratio_inspoint)
+                    
+                    batch_data_samples[i].gt_instances_3d.query_inslabel = queries_inslabel[i]
+                    
 
-                        batch_data_samples[i].gt_instances_3d.sp_sem_masks = \
-                                            self.get_gt_semantic_masks(sem_mask,
-                                                                        voxel_superpoints,
-                                                                        self.num_classes)  
-                        batch_data_samples[i].gt_instances_3d.sp_inst_masks = \
-                                            self.get_gt_inst_masks(inst_mask,
-                                                                voxel_superpoints) 
-                        
-                        batch_data_samples[i].gt_instances_3d.labels_3d, batch_data_samples[i].gt_instances_3d.sp_inst_masks, batch_data_samples[i].gt_instances_3d.ratio_inspoint = \
-                                            self.filter_stuff_masks(batch_data_samples[i].gt_instances_3d, self.stuff_classes, batch_data_samples[i].gt_pts_seg.ratio_inspoint)
-                        
-                        batch_data_samples[i].gt_instances_3d.query_inslabel = queries_inslabel[i]
-                        
+                    sp_gt_instances.append(batch_data_samples[i].gt_instances_3d)  
 
-                        sp_gt_instances.append(batch_data_samples[i].gt_instances_3d)  
-
-                    loss = self.criterion(x, sp_gt_instances) 
-                    loss_final.update(loss)
+                loss = self.criterion(x, sp_gt_instances) 
+                loss_final.update(loss)
         return loss_final
 
-    #def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
-    def predict_bm1orbm2(self, batch_inputs_dict, batch_data_samples, **kwargs):
-        """Predict results from a batch of inputs and data samples with post-
-        processing.
-        Args:
-            batch_inputs_dict (dict): The model input dict which include
-                `points` key.
-            batch_data_samples (List[:obj:`Det3DDataSample`]): The Data
-                Samples. It includes information such as
-                `gt_instance_3d` and `gt_sem_seg_3d`.
-        Returns:
-            list[:obj:`Det3DDataSample`]: Detection results of the
-            input samples. Each Det3DDataSample contains 'pred_pts_seg'.
-            And the `pred_pts_seg` contains following keys.
-                - instance_scores (Tensor): Classification scores, has a shape
-                    (num_instance, )
-                - instance_labels (Tensor): Labels of instances, has a shape
-                    (num_instances, )
-                - pts_instance_mask (Tensor): Instance mask, has a shape
-                    (num_points, num_instances) of type bool.
-        """
-        lidar_path = batch_data_samples[0].lidar_path
-        base_name = os.path.basename(lidar_path)
-        current_filename = os.path.splitext(base_name)[0]
-        #if 'val' in lidar_path:
-        if 'test' in lidar_path:
-            import numpy as np
-            from sklearn.neighbors import NearestNeighbors
-            from plyfile import PlyData, PlyElement
-            from tqdm import tqdm
-            step_size = self.radius
-            grid_size = 0.2
-            num_points = 640000
-            pts_semantic_gt = batch_data_samples[0].eval_ann_info['pts_semantic_mask']
-            pts_instance_gt = batch_data_samples[0].eval_ann_info['pts_instance_mask']
-            original_points = batch_inputs_dict['points'][0]
-            regions = self.generate_cylindrical_regions(original_points, self.radius, step_size)
-            all_pre_sem = [list() for _ in range(original_points.shape[0])]
-            all_pre_ins = np.full(original_points.shape[0], -1)
-            max_instance = 0
-
-            global_instance_scores = np.zeros((original_points.shape[0],), dtype=float) 
-
-            best_masks = []
-
-            all_instance_labels = set(np.unique(pts_instance_gt))
-            # Initialize an empty set to store the covered instance labels
-            covered_instance_labels_qp = set()
-
-            output_path = "work_dirs/oneformer3d_outputfolder"
-            for region_idx, region in enumerate(tqdm(regions, desc="Processing regions")):
-                region_mask = ((original_points[:, 0] - region[0]) ** 2 + (original_points[:, 1] - region[1]) ** 2) <= self.radius ** 2
-                pc1 = original_points[region_mask]
-                pc1_indices = torch.where(region_mask)[0]
-
-                if len(pc1) == 0:
-                    continue
-
-                pc2, pc2_indices = self.grid_sample(pc1, pc1_indices, grid_size)
-                if len(pc2) < num_points:
-                    pc3 = pc2
-                    pc3_indices = pc2_indices
-                elif len(pc2) > num_points:
-                    pc3, pc3_indices = self.points_random_sampling(pc2, pc2_indices, num_points)
-
-                coordinates, features, inverse_mapping2, spatial_shape = self.collate([pc3])
-                x = spconv.SparseConvTensor(features, coordinates, spatial_shape, len(batch_data_samples))
-                x = self.extract_feat(x)
-
-                embed_logits = self.Embed(x[0])
-                bi_semantic_logits = self.BiSemantic(x[0]) 
-
-                wood_class = 1
-                semantic_predictions_bi = torch.argmax(bi_semantic_logits, dim=1)
-                tree_indices = torch.where(semantic_predictions_bi == wood_class)[0]  #all voxel
-                    
-                if tree_indices.numel() > 0:
-                    
-                    # FPS from all tree points
-                    batch_tensor_4 = torch.zeros(embed_logits[tree_indices].size(0), dtype=torch.long).to(embed_logits.device)  # Ensure batch_tensor on same device
-                    topk_indices_4 = fps(embed_logits[tree_indices], batch_tensor_4, ratio=min(self.query_point_num / embed_logits[tree_indices].size(0), torch.tensor([1.0]).to(embed_logits.device)))
-                    selected_indices_case4 = tree_indices[topk_indices_4]
-
-                    # add content queries
-                    queries = []
-                    queries.append(x[0][selected_indices_case4])
-                    
-                    x = self.decoder(x, queries)
-                    results_list = self.predict_by_feat_test(x, inverse_mapping2, pc3, selected_indices_case4)
-                    
-                    # Collect masks and their scores, process them immediately
-                    masks = results_list[0].pts_instance_mask[0]
-                    scores = results_list[0].instance_scores
-                    valid_scores_mask = scores > 0.6
-                    masks = masks[valid_scores_mask]
-                    scores = scores[valid_scores_mask]
-
-                    # Nearest neighbor mapping for masks to pc1
-                    for mask, score in zip(masks, scores):
-                        mask_pc1 = self.nearest_neighbor_mapping(pc1, pc3, mask)
-                        mask_points = pc1_indices[mask_pc1].cpu().numpy()
-
-                        # Vectorized update of global instance mask and scores
-                        update_mask = score > global_instance_scores[mask_points]
-                        global_instance_scores[mask_points[update_mask]] = score
-                        all_pre_ins[mask_points[update_mask]] = max_instance
-
-                        if np.any(update_mask):
-                            # Add the new mask
-                            best_masks.append((mask_points, max_instance, score))
-
-                        max_instance += 1
-
-                    cylinder_current_semantic_pre = self.nearest_neighbor_mapping(pc1, pc3, results_list[0].pts_semantic_mask[0])
-                     
-                    originids = torch.where(region_mask)[0].cpu().numpy()  # Move to CPU before using np.where
-                    all_pre_sem = self.vote_semantic_labels(all_pre_sem, originids, cylinder_current_semantic_pre)
-
-                    originids = pc3_indices.cpu().numpy()  # Use pc3_indices for ground truth labels
-                    
-                else:
-                    projected_semantic_logits = bi_semantic_logits[inverse_mapping2]
-                    semantic_predictions_pc3 = torch.argmax(projected_semantic_logits, dim=1)
-                    cylinder_current_semantic_pre = self.nearest_neighbor_mapping(pc1, pc3, semantic_predictions_pc3)
-                    
-                    originids = torch.where(region_mask)[0].cpu().numpy()  # Move to CPU before using np.where
-                    all_pre_sem = self.vote_semantic_labels(all_pre_sem, originids, cylinder_current_semantic_pre)   
-                    
-            # Post-processing step
-            final_semantic_labels = self.finalize_semantic_labels(all_pre_sem)
-            ground_mask = (final_semantic_labels == 0)
-            all_pre_ins[ground_mask] = -1
-
-            # Remove instances with fewer than 10 points
-            unique_instances, instance_counts = np.unique(all_pre_ins, return_counts=True)
-            small_instances = unique_instances[instance_counts < 10]
-            for instance in small_instances:
-                all_pre_ins[all_pre_ins == instance] = -1
-
-            # Remove replaced old masks
-            unique_best_masks = []
-            for mask_points, instance_id, score in best_masks:
-                if np.any(all_pre_ins[mask_points] == instance_id):
-                    unique_best_masks.append((mask_points, instance_id, score))
-
-            # Merge masks bm1/bm2
-            #clean_all_pre_ins, merged_masks = self.merge_overlapping_instances(all_pre_ins, unique_best_masks)
-            clean_all_pre_ins, merged_masks = self.merge_overlapping_instances_by_score(all_pre_ins, unique_best_masks)
-
-            # Re-label instances to ensure continuous labeling
-            unique_labels = np.unique(clean_all_pre_ins)
-            unique_labels = unique_labels[unique_labels >= 0]  # Exclude background label (-1)
-            relabel_map = {old_label: new_label for new_label, old_label in enumerate(unique_labels)}
-            relabel_map[-1] = -1  # Keep background as -1
-            clean_all_pre_ins = np.vectorize(relabel_map.get)(clean_all_pre_ins)
-
-            # Save the final combined results
-            region_path = os.path.join(output_path, f"{current_filename}_final_results.ply")
-            self.save_ply_withscore(original_points.cpu().numpy(), final_semantic_labels, clean_all_pre_ins, global_instance_scores, region_path, pts_semantic_gt, pts_instance_gt)
-            
-            for i, data_sample in enumerate(batch_data_samples):
-                data_sample.pred_pts_seg = results_list[i]
-                data_sample.pred_pts_seg['originids'] = originids
-            return batch_data_samples
-        else:
-            coordinates, features, inverse_mapping, spatial_shape = self.collate(
-                batch_inputs_dict['points'])
-            x = spconv.SparseConvTensor(
-                features, coordinates, spatial_shape, len(batch_data_samples))
-
-            x = self.extract_feat(x)
-
-            queries = []
-            for i in range(len(x)):
-                max_len = min(self.query_point_num, len(x[i]))
-                queries.append(x[i][0:max_len])
-            
-            x = self.decoder(x, queries)
-
-            results_list = self.predict_by_feat(x, inverse_mapping)
-
-            for i, data_sample in enumerate(batch_data_samples):
-                data_sample.pred_pts_seg = results_list[i]
-
-            return batch_data_samples
-    
     def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
-    #def predict_rm_outputpoints(self, batch_inputs_dict, batch_data_samples, **kwargs):
-        t0 = time.time()            
-        lidar_path = batch_data_samples[0].lidar_path
-        base_name = os.path.basename(lidar_path)
-        current_filename = os.path.splitext(base_name)[0]
-        t1 = time.time()                 
-        #########print(f"load pc: {(t1 - t0)*1000:.0f} ms")
-        #is_test = True
-        #if is_test:
-        if 'test' in lidar_path:
-            step_size = self.radius/4
-            grid_size = 0.2
-            num_points = 640000
-            pts_semantic_gt = batch_data_samples[0].eval_ann_info['pts_semantic_mask']
-            pts_instance_gt = batch_data_samples[0].eval_ann_info['pts_instance_mask']
-            original_points = batch_inputs_dict['points'][0]
-            regions = self.generate_cylindrical_regions(original_points, self.radius, step_size)
-            num_cls = self.test_cfg.num_sem_cls        
-            votes_counter = np.zeros(                    # (N_total, num_cls)
-                (original_points.shape[0], num_cls),
-                dtype=np.int16
-            )
-            all_pre_ins = np.full(original_points.shape[0], -1)
-            max_instance = 0
+        """Predict semantic and instance masks.
 
-            global_instance_scores = np.zeros((original_points.shape[0],), dtype=float) 
+        ``test_cfg.full_plot`` (default True) runs tiled inference over a whole
+        plot and writes ``<test_cfg.output_dir>/<scan>.ply``; ``False`` scores
+        the batch as pre-cropped cylinders (validation during training).
+        """
+        if self.test_cfg.get('full_plot', True):
+            return self._predict_full_plot(batch_inputs_dict, batch_data_samples)
+        return self._predict_crop(batch_inputs_dict, batch_data_samples)
 
-            best_masks = []
+    def _predict_crop(self, batch_inputs_dict, batch_data_samples):
+        coordinates, features, inverse_mapping, spatial_shape = self.collate(
+            batch_inputs_dict['points'])
+        x = spconv.SparseConvTensor(
+            features, coordinates, spatial_shape, len(batch_data_samples))
+        x = self.extract_feat(x)
 
-            all_instance_labels = set(np.unique(pts_instance_gt))
-            
-            ##########output_path = "work_dirs/bluepoint_th04fixed_03_priority_test_tobedelete"
-            #########output_path = "work_dirs/bluepoint_forinstancev2"
-            output_path = self.test_cfg.get('output_dir', 'work_dirs/default_output')
-            score_th1 = self.score_th
-            score_th2 = 0.3
-            t2 = time.time()   
-            last_results   = None    
-            last_originids = None              
-            #########print(f"generate regions: {(t2 - t1)*1000:.0f} ms")
-            for region_idx, region in enumerate(tqdm(regions, desc="Processing regions")):
-                t2 = time.time()                 
-                region_mask = ((original_points[:, 0] - region[0]) ** 2 + (original_points[:, 1] - region[1]) ** 2) <= self.radius ** 2
-                pc1 = original_points[region_mask]
-                pc1_indices = torch.where(region_mask)[0]
-                t3 = time.time()                 
-                #########print(f"generate regions step2: {(t3 - t2)*1000:.0f} ms")
-                if len(pc1) == 0:
-                    continue
+        queries = []
+        for i in range(len(x)):
+            max_len = min(self.query_point_num, len(x[i]))
+            queries.append(x[i][0:max_len])
+        x = self.decoder(x, queries)
 
-                pc2, pc2_indices = self.grid_sample(pc1, pc1_indices, grid_size)
-                t4_1_1 = time.time()                 
-                #########print(f"u net 1--1: {(t4_1_1 - t3)*1000:.0f} ms")
-                if len(pc2) < num_points:
-                    pc3 = pc2
-                    pc3_indices = pc2_indices
-                elif len(pc2) > num_points:
-                    pc3, pc3_indices = self.points_random_sampling(pc2, pc2_indices, num_points)
-                
-                t4_1_2 = time.time()                 
-                #########print(f"u net 1--2: {(t4_1_2 - t4_1_1)*1000:.0f} ms")
+        results_list = self.predict_by_feat(x, inverse_mapping)
+        for i, data_sample in enumerate(batch_data_samples):
+            data_sample.pred_pts_seg = results_list[i]
+        return batch_data_samples
 
-                coordinates, features, inverse_mapping2, spatial_shape = self.collate([pc3])
-                t4_2 = time.time() 
-                #########print(f"u net 2: {(t4_2 - t4_1_2)*1000:.0f} ms")
-                x = spconv.SparseConvTensor(features, coordinates, spatial_shape, len(batch_data_samples))
-                t4_3 = time.time() 
-                #########print(f"u net 3: {(t4_3 - t4_2)*1000:.0f} ms")
+    def _predict_full_plot(self, batch_inputs_dict, batch_data_samples):
+        """Tiled inference: cylinders of ``self.radius`` on a lattice with
+        step ``radius / 4``; per-tile masks are merged by score, semantics are
+        voted per point."""
+        assert len(batch_data_samples) == 1, 'full-plot inference expects batch_size 1'
+        data_sample = batch_data_samples[0]
+        scan_name = os.path.splitext(os.path.basename(data_sample.lidar_path))[0]
+        eval_ann = data_sample.eval_ann_info if data_sample.eval_ann_info is not None else {}
+        pts_semantic_gt = eval_ann.get('pts_semantic_mask', None)
+        pts_instance_gt = eval_ann.get('pts_instance_mask', None)
+
+        cfg = self.test_cfg
+        output_dir = cfg.get('output_dir', None) or 'work_dirs/default_output'
+        score_th = float(cfg.get('score_th', 0.4))
+        overlap_threshold = float(cfg.get('overlap_threshold', 0.3))
+        num_cls = cfg.num_sem_cls
+        # Cylinder lattice pitch as a fraction of the radius. 0.25 is the
+        # paper's setting (625 cylinders over a 100 m tile, ~44 passes per
+        # point); a larger factor trades overlap for speed roughly as 1/f^2.
+        step_size = self.radius * float(cfg.get('region_step_factor', 0.25))
+        grid_size = 0.2          # voxel size of the tile downsampling
+        max_points = 640_000     # cap per tile; lower it on small GPUs
+        # Regions thinner than this cannot survive the backbone's stride-2
+        # downsampling; see `tiling.degenerate_region_reason`.
+        min_region_points = int(cfg.get('min_region_points', 64))
+
+        points = batch_inputs_dict['points'][0]
+        n_total = points.shape[0]
+        device = points.device
+        regions = generate_cylindrical_regions(points[:, :2], self.radius, step_size)
+        votes = SemanticVotes(n_total, num_cls)
+        mask_indices = []        # global point indices of every kept tile mask (CPU)
+        mask_scores = []         # its score
+        # Every region ends up in exactly one of these three, so that the summary
+        # below reconciles: n_empty + n_prefiltered + n_rejected + n_used == len(regions).
+        n_empty = 0              # no point inside the cylinder at all
+        n_prefiltered = 0        # degenerate_region_reason said no
+        n_rejected = 0           # spconv raised ValueError on it
+        n_used = 0               # regions that were actually segmented
+        log_cap = 3              # spell out at most this many of each kind
+
+        for region_idx, (cx, cy) in enumerate(regions.tolist()):
+            region_mask = ((points[:, 0] - cx) ** 2 + (points[:, 1] - cy) ** 2) <= self.radius ** 2
+            pc1_indices = torch.where(region_mask)[0]
+            if pc1_indices.numel() == 0:
+                n_empty += 1
+                continue
+            pc1 = points[pc1_indices]
+            pc2, pc2_indices = self.grid_sample(pc1, pc1_indices, grid_size)
+            pc3, pc3_indices = sample_region(pc2, pc2_indices, max_points)
+
+            reason = degenerate_region_reason(pc3, self.voxel_size, min_region_points)
+            if reason is not None:
+                n_prefiltered += 1
+                # An empty tile can hold hundreds of these; the summary below
+                # reports the total, so only the first few are spelled out.
+                if n_prefiltered <= log_cap:
+                    print_log(
+                        f'{scan_name}: skipping degenerate region {region_idx} '
+                        f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
+                        f'({pc3.shape[0]} after voxel downsampling): {reason}',
+                        logger='current', level=logging.WARNING)
+                del pc1, pc2, pc3
+                continue
+
+            x = None
+            try:
+                coordinates, features, inverse_mapping, spatial_shape = self.collate([pc3])
+                x = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
                 x = self.extract_feat(x)
-                t4_4 = time.time() 
-                #########print(f"u net 4: {(t4_4 - t4_3)*1000:.0f} ms")
-                embed_logits = self.Embed(x[0])
-                bi_semantic_logits = self.BiSemantic(x[0]) 
-                
-                wood_class = 1
-                semantic_predictions_bi = torch.argmax(bi_semantic_logits, dim=1)
-                tree_indices = torch.where(semantic_predictions_bi == wood_class)[0]  #all voxel
-                t5 = time.time()                 
-                #########print(f"u net heads: {(t5 - t4_4)*1000:.0f} ms")  
-                with torch.no_grad():
-                    nn_idx_pc1 = []                
-                    chunk = self.chunk
-                    for ss in range(0, pc1.shape[0], chunk):
-                        ee = min(ss + chunk, pc1.shape[0])
-                        nn_idx_pc1.append(
-                            torch.cdist(pc1[ss:ee].float(), pc3.float()).argmin(1)
-                        )
-                    nn_idx_pc1 = torch.cat(nn_idx_pc1)   # (N_pc1,)  
-                if tree_indices.numel() > 1:
-                    
-                    # FPS from all tree points
-                    batch_tensor_4 = torch.zeros(embed_logits[tree_indices].size(0), dtype=torch.long).to(embed_logits.device)  # Ensure batch_tensor on same device
-                    topk_indices_4 = fps(embed_logits[tree_indices], batch_tensor_4, ratio=min(self.query_point_num / embed_logits[tree_indices].size(0), torch.tensor([1.0]).to(embed_logits.device)))
-                    selected_indices_case4 = tree_indices[topk_indices_4]
+            except ValueError as err:
+                # spconv's "Your points vanished here": the region's voxels all
+                # fall outside the output grid of one of the UNet's stride-2
+                # convolutions. Only this region is lost -- its points simply get
+                # no vote here and fall back to whatever the overlapping regions
+                # say, or to nodata (-1) if there are none.
+                n_rejected += 1
+                # Capped like the pre-filter: a pathological tile must not put a
+                # WARNING per region into a km-tile log.
+                if n_rejected <= log_cap:
+                    print_log(
+                        f'{scan_name}: spconv rejected region {region_idx} '
+                        f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
+                        f'({pc3.shape[0]} after voxel downsampling); skipping it: '
+                        f'{str(err).strip().splitlines()[0]}',
+                        logger='current', level=logging.WARNING)
+                # `x` may hold the region's sparse tensor: drop it before the cache
+                # call, or `empty_cache()` frees less than it looks like it does.
+                del pc1, pc2, pc3, x
+                torch.cuda.empty_cache()
+                continue
 
-                    # add content queries
-                    queries = []
-                    queries.append(x[0][selected_indices_case4])
-                    t6 = time.time()                 
-                    #########print(f"generate queries: {(t6 - t5)*1000:.0f} ms")  
-                    x = self.decoder(x, queries)
-                    t7 = time.time()                 
-                    #########print(f"transformer decoder: {(t7 - t6)*1000:.0f} ms")  
-                    results_list = self.predict_by_feat_test(x, inverse_mapping2, pc3, selected_indices_case4)
-                    t7_1 = time.time() 
-                    #########print(f"postprocessing 1 step1: {(t7_1 - t7)*1000:.0f} ms")
-                    # Collect masks and their scores, process them immediately
-                    masks = results_list[0].pts_instance_mask[0]
-                    scores = results_list[0].instance_scores
-                    valid_scores_mask = scores > score_th1
+            n_used += 1
+            embed_logits = self.Embed(x[0])
+            bi_semantic_logits = self.BiSemantic(x[0])
+            tree_indices = torch.where(torch.argmax(bi_semantic_logits, dim=1) == 1)[0]
 
-                    # Prepare region for cylinder edge calculation
-                    center = region  # assuming region is the cylinder's center (x, y)
-                    edge_threshold = self.radius - 0.5  # Distance to cylinder edge threshold (0.5m from the edge)
+            # nearest pc3 point for every pc1 point, chunked to bound memory
+            nn_idx = torch.cat([
+                torch.cdist(pc1[s:s + self.chunk, :3].float(), pc3[:, :3].float()).argmin(1)
+                for s in range(0, pc1.shape[0], self.chunk)])
 
-                    # Compute distances to cylinder center for all points
-                    pc3_distances = torch.sqrt((pc3[:, 0] - center[0]) ** 2 + (pc3[:, 1] - center[1]) ** 2)
-                    t7_2 = time.time() 
-                    #########print(f"postprocessing 1 step2: {(t7_2 - t7_1)*1000:.0f} ms")
-                    valid_scores_mask2 = np.ones_like(valid_scores_mask, dtype=bool)  # Initialize mask (all True)
-                    for i, mask in enumerate(masks):
-                        if valid_scores_mask[i]:  # Only check valid masks (with scores > 0.6)
-                            # Check if any point in the mask is too close to the edge
-                            if torch.any(pc3_distances[mask] > edge_threshold):
-                                valid_scores_mask2[i] = False  # Invalidate this mask if any point is near the edge
-                    t8 = time.time()                 
-                    #########print(f"postprocessing 1: {(t8 - t7)*1000:.0f} ms")  
-                    ####### Apply both score and edge distance filtering
-                    '''
-                    final_valid_mask = valid_scores_mask & valid_scores_mask2
+            if tree_indices.numel() > 1:
+                batch_vec = torch.zeros(tree_indices.numel(), dtype=torch.long, device=device)
+                ratio = min(self.query_point_num / tree_indices.numel(), 1.0)
+                selected = tree_indices[fps(embed_logits[tree_indices], batch_vec, ratio=ratio)]
+                x = self.decoder(x, [x[0][selected]])
+                result = self.predict_by_feat_test(x, inverse_mapping, pc3, selected)[0]
 
-                    masks = masks[final_valid_mask]
-                    scores = scores[final_valid_mask]
+                sem_pc3 = torch.as_tensor(result.pts_semantic_mask[0], device=device).long()
+                votes.add(pc1_indices, sem_pc3[nn_idx])
 
-                    # Nearest neighbor mapping for masks to pc1
-                    for mask, score in zip(masks, scores):
-                        mask_pc1 = self.nearest_neighbor_mapping(pc1, pc3, mask)
-                        mask_points = pc1_indices[mask_pc1].cpu().numpy()
+                masks = torch.as_tensor(result.pts_instance_mask[0], device=device)   # (K, N3) bool
+                scores = torch.as_tensor(result.instance_scores, device=device).float()
+                if masks.shape[0] > 0:
+                    near_edge = torch.sqrt((pc3[:, 0] - cx) ** 2 + (pc3[:, 1] - cy) ** 2) \
+                        > (self.radius - 0.5)
+                    touches_edge = (masks & near_edge.unsqueeze(0)).any(1)
+                    keep = torch.where((scores > score_th) & ~touches_edge)[0]
+                    for k in keep.tolist():
+                        mask_indices.append(pc1_indices[masks[k][nn_idx]].cpu())
+                        mask_scores.append(float(scores[k]))
+            else:
+                bi_pc3 = torch.argmax(bi_semantic_logits[inverse_mapping], dim=1)
+                votes.add_binary(pc1_indices, bi_pc3[nn_idx] == 1)
 
-                        # Vectorized update of global instance mask and scores
-                        update_mask = score > global_instance_scores[mask_points]
-                        global_instance_scores[mask_points[update_mask]] = score
-                        all_pre_ins[mask_points[update_mask]] = max_instance
+            del pc1, pc2, pc3, x, embed_logits, bi_semantic_logits, nn_idx
+            torch.cuda.empty_cache()
 
-                        if np.any(update_mask):
-                            # Add the new mask
-                            best_masks.append((mask_points, max_instance, score))
+        n_skipped = n_prefiltered + n_rejected
+        if n_skipped:
+            print_log(
+                f'{scan_name}: of {len(regions)} cylinder regions {n_used} were segmented, '
+                f'{n_prefiltered} were degenerate, {n_rejected} were rejected by spconv, '
+                f'{n_empty} were empty',
+                logger='current', level=logging.WARNING)
+        if n_used == 0:
+            # Every region was empty or degenerate (a water / bare-ground tile).
+            # Fall through anyway: `votes.resolve()` returns -1 everywhere and
+            # `merge_instances_by_score` returns an all -1 labelling, so the scan
+            # still gets its result PLY -- all points unlabelled -- and the batch's
+            # per-tile files stay complete for the downstream merge.
+            print_log(
+                f'{scan_name}: no usable cylinder region; writing an all-unlabelled '
+                f'result for its {n_total} points',
+                logger='current', level=logging.WARNING)
 
-                        #max_instance += 1'''
+        semantic_pred = votes.resolve()                                   # (N,) cpu
+        instance_pred, kept = merge_instances_by_score(
+            mask_indices, torch.tensor(mask_scores), overlap_threshold, num_points=n_total)
+        point_scores = torch.full((n_total,), -1.0)
+        if kept.numel():
+            kept_scores = torch.tensor(mask_scores)[kept]
+            assigned = instance_pred >= 0
+            point_scores[assigned] = kept_scores[instance_pred[assigned]]
+        instance_pred[semantic_pred == 0] = -1                            # ground has no instance
+        ids, counts = torch.unique(instance_pred, return_counts=True)
+        small = ids[(ids >= 0) & (counts < cfg.npoint_thr)]
+        if small.numel():
+            instance_pred[torch.isin(instance_pred, small)] = -1
+        instance_pred = relabel_contiguous(instance_pred)
+        point_scores[instance_pred < 0] = -1.0
 
-                    keep = torch.where(
-                        torch.tensor(valid_scores_mask, device=pc3.device) &
-                        torch.tensor(valid_scores_mask2, device=pc3.device)
-                    )[0]                                            # (K,)
-
-                    if keep.numel():
-                        # mask/score（GPU）
-                        masks_kept  = torch.as_tensor(masks,  device=pc3.device)[keep]   # (K,N3)
-                        scores_kept = torch.as_tensor(scores, device=pc3.device)[keep]   # (K,)
-
-                        # ② voxel → pc1   (K, N_pc1)  → COO
-                        rows_list = []
-                        cols_list = []
-                        max_chunk = (torch.iinfo(torch.int32).max // masks_kept.shape[0]) - 1_000_000
-                        max_chunk = max(1, max_chunk)
-                        chunk_size = min(nn_idx_pc1.shape[0], max_chunk)
-
-                        for start in range(0, nn_idx_pc1.shape[0], chunk_size):
-                            end = min(start + chunk_size, nn_idx_pc1.shape[0])
-                            mk_bool_chunk = masks_kept[:, nn_idx_pc1[start:end]]
-                            rows_chunk, cols_chunk = mk_bool_chunk.nonzero(as_tuple=True)
-                            cols_chunk = cols_chunk + start
-                            rows_list.append(rows_chunk)
-                            cols_list.append(cols_chunk)
-
-                        rows = torch.cat(rows_list, dim=0)
-                        cols = torch.cat(cols_list, dim=0)     
-                        score_per_hit = scores_kept[rows]               # (nnz,)
-
-                        N1 = pc1.shape[0]
-                        best_score = torch.full((N1,), -1., device=pc3.device)
-                        best_mid   = torch.full((N1,), -1 , dtype=torch.long, device=pc3.device)
-
-                        best_score.index_reduce_(0, cols, score_per_hit, reduce='amax')
-                        improved_mask = score_per_hit == best_score[cols]
-                        best_mid.index_put_((cols[improved_mask],),
-                                            rows[improved_mask], accumulate=False)
-
-                        pts_glob   = pc1_indices.cpu().numpy()
-                        new_scores = best_score.cpu().numpy()
-                        better_pts = new_scores > global_instance_scores[pts_glob]
-
-                        if better_pts.any():
-                            global_instance_scores[pts_glob[better_pts]] = new_scores[better_pts]
-                            all_pre_ins[pts_glob[better_pts]] = (
-                                max_instance + best_mid.cpu().numpy()[better_pts]
-                            )
-
-                            mids_unique = np.unique(best_mid.cpu().numpy()[better_pts])
-                            for mid in mids_unique:
-                                sel_pts = (cols[rows == mid]).cpu().numpy()      
-                                best_masks.append(
-                                    (pts_glob[sel_pts],
-                                    max_instance + int(mid),
-                                    float(scores_kept[int(mid)]))
-                                )
-
-                        max_instance += int(masks_kept.size(0))        
-                    t9 = time.time()                 
-                    #########print(f"postprocessing 2: {(t9 - t8)*1000:.0f} ms")  
-                    #cylinder_current_semantic_pre = self.nearest_neighbor_mapping(pc1, pc3, results_list[0].pts_semantic_mask[0])
-                    sem_pred_pc3 = results_list[0].pts_semantic_mask[0]
-                    if isinstance(sem_pred_pc3, np.ndarray):
-                        sem_pred_pc3 = torch.from_numpy(sem_pred_pc3).to(pc3.device)
-                    else:
-                        sem_pred_pc3 = sem_pred_pc3.to(pc3.device)
-                    cylinder_current_semantic_pre = sem_pred_pc3[nn_idx_pc1]
-
-                    #originids = torch.where(region_mask)[0].cpu().numpy()  # Move to CPU before using np.where
-                    #all_pre_sem = self.vote_semantic_labels(all_pre_sem, torch.where(region_mask)[0], cylinder_current_semantic_pre)
-                    ids_np = torch.where(region_mask)[0].cpu().numpy()                 # (N_pc1,)
-                    sem_np = cylinder_current_semantic_pre.cpu().numpy().astype(int)   # (N_pc1,)
-
-                    np.add.at(votes_counter, (ids_np, sem_np), 1) 
-
-                    originids = pc3_indices.cpu().numpy()  # Use pc3_indices for ground truth labels
-                    last_results = results_list      
-                    last_originids = originids  
-                    last_batch_len = len(batch_data_samples)      
-                    t10 = time.time()                 
-                    #########print(f"postprocessing 3: {(t10 - t9)*1000:.0f} ms") 
-                    
-                    '''
-                    originids = pc3_indices.cpu().numpy()  # Use pc3_indices for ground truth labels
-                    # Get gt labels for pc3
-                    pc3_semantic_gt = pts_semantic_gt[originids]
-                    pc3_instance_gt = pts_instance_gt[originids]
-                    # Save each pc3 to a separate .ply file
-                    region_dir = f"work_dirs/to_be_delete/{current_filename}/region_0"
-                    region_dir = os.path.join(output_path, current_filename, f"region_0")
-                    region_ply_path = os.path.join(region_dir, "pc_ins_sem.ply")
-                    self.save_ply(pc3.cpu().numpy(), results_list[0].pts_semantic_mask[0], results_list[0].pts_instance_mask[1], region_ply_path, pc3_semantic_gt, pc3_instance_gt)
-                    '''
-                else:
-                    projected_semantic_logits = bi_semantic_logits[inverse_mapping2]
-                    semantic_predictions_pc3 = torch.argmax(projected_semantic_logits, dim=1)
-                    #cylinder_current_semantic_pre = self.nearest_neighbor_mapping(pc1, pc3, semantic_predictions_pc3)
-                    proj_logits   = bi_semantic_logits[inverse_mapping2]         # (N_pc3, C)
-                    sem_pred_pc3  = torch.argmax(proj_logits, dim=1) 
-                    if isinstance(sem_pred_pc3, np.ndarray):
-                        sem_pred_pc3 = torch.from_numpy(sem_pred_pc3).to(pc3.device)
-                    else:
-                        sem_pred_pc3 = sem_pred_pc3.to(pc3.device)
-                    cylinder_current_semantic_pre = sem_pred_pc3[nn_idx_pc1]   
-                    #originids = torch.where(region_mask)[0].cpu().numpy()  # Move to CPU before using np.where
-                    #all_pre_sem = self.vote_semantic_labels(all_pre_sem, torch.where(region_mask)[0], cylinder_current_semantic_pre)                    
-                    ids_np = torch.where(region_mask)[0].cpu().numpy()                 # (N_pc1,)
-                    sem_np = cylinder_current_semantic_pre.cpu().numpy().astype(int)   # (N_pc1,)
-
-                    np.add.at(votes_counter, (ids_np, sem_np), 1) 
-                    t10 = time.time()                 
-                    #########print(f"postprocessing 4: {(t10 - t5)*1000:.0f} ms") 
-                del pc1, pc1_indices, pc2, pc2_indices, pc3, pc3_indices
-                del embed_logits, bi_semantic_logits
-                torch.cuda.empty_cache() 
-                import gc
-                gc.collect()
-     
-            # Post-processing step
-            #final_semantic_labels = self.finalize_semantic_labels_old(all_pre_sem)
-            #ground_mask = (final_semantic_labels == 0)
-
-            final_semantic_labels = votes_counter.argmax(1)         # (N_total,)
-            final_semantic_labels[votes_counter.sum(1) == 0] = -1  
-            ground_mask = (final_semantic_labels == 0)
-
-            all_pre_ins[ground_mask] = -1
-            t11 = time.time()                 
-            #print(f"postprocessing 5: {(t11 - t10)*1000:.0f} ms") 
-            # Remove instances with fewer than 10 points
-            #unique_instances, instance_counts = np.unique(all_pre_ins, return_counts=True)
-            #small_instances = unique_instances[instance_counts < 10]
-            #for instance in small_instances:
-            #    all_pre_ins[all_pre_ins == instance] = -1
-            t11 = time.time()     
-            # Remove instances with fewer than 10 points  
-            uniq, cnt = np.unique(all_pre_ins, return_counts=True)
-            to_kill   = np.isin(all_pre_ins, uniq[(cnt < 10) & (uniq != -1)])
-            all_pre_ins[to_kill] = -1
-            t12 = time.time()
-            print(f"postprocessing 6: {(t12 - t11)*1000:.0f} ms")
-            # Remove replaced old masks
-            unique_best_masks = []
-            for mask_points, instance_id, score in best_masks:
-                if np.any(all_pre_ins[mask_points] == instance_id):
-                    unique_best_masks.append((mask_points, instance_id, score))
-            t13 = time.time()                 
-            print(f"postprocessing 7: {(t13 - t12)*1000:.0f} ms")
-
-            clean_all_pre_ins, merged_masks, merged_instance_scores = self.merge_overlapping_instances_by_score_speedup(all_pre_ins, unique_best_masks,overlap_threshold=score_th2)
-            t14 = time.time()                 
-            print(f"postprocessing 8: {(t14 - t13)*1000:.0f} ms")
-            # Re-label instances to ensure continuous labeling
-            unique_labels = np.unique(clean_all_pre_ins)
-            unique_labels = unique_labels[unique_labels >= 0]  # Exclude background label (-1)
-            relabel_map = {old_label: new_label for new_label, old_label in enumerate(unique_labels)}
-            relabel_map[-1] = -1  # Keep background as -1
-            clean_all_pre_ins = np.vectorize(relabel_map.get)(clean_all_pre_ins)
-            t14 = time.time()                 
-            ######print(f"postprocessing 8: {(t14 - t13)*1000:.0f} ms")
-            # Save the final combined results
-            region_path = os.path.join(output_path, f"{current_filename}.ply")
- 
-            self.save_ply_withscore(original_points.cpu().numpy(), final_semantic_labels, clean_all_pre_ins, merged_instance_scores, region_path, pts_semantic_gt, pts_instance_gt)
-            #self.save_bluepoints(original_points.cpu().numpy(), final_semantic_labels, clean_all_pre_ins, merged_instance_scores, region_path, pts_semantic_gt, pts_instance_gt)
-            
-            t15 = time.time()                 
-            ######print(f"postprocessing 9: {(t15 - t14)*1000:.0f} ms")
-            #for i, data_sample in enumerate(batch_data_samples):
-            #    data_sample.pred_pts_seg = results_list[i]
-            #    data_sample.pred_pts_seg['originids'] = originids
-                #data_sample.originids = originids
-            if last_results is not None and len(last_results)==len(batch_data_samples):                 # 本帧里至少有一个 region 得到了结果
-                for i, data_sample in enumerate(batch_data_samples):
-                    data_sample.pred_pts_seg = last_results[i]
-                    data_sample.pred_pts_seg['originids'] = last_originids
-            else:                                      
-                for data_sample in batch_data_samples:
-                    data_sample.pred_pts_seg = None
-            return batch_data_samples
-        else:
-            coordinates, features, inverse_mapping, spatial_shape = self.collate(
-                batch_inputs_dict['points'])
-            x = spconv.SparseConvTensor(
-                features, coordinates, spatial_shape, len(batch_data_samples))
-
-            x = self.extract_feat(x)
-
-            queries = []
-            for i in range(len(x)):
-                max_len = min(self.query_point_num, len(x[i]))
-                queries.append(x[i][0:max_len])
-            
-            x = self.decoder(x, queries)
-
-            results_list = self.predict_by_feat(x, inverse_mapping)
-
-            for i, data_sample in enumerate(batch_data_samples):
-                data_sample.pred_pts_seg = results_list[i]
-
-            return batch_data_samples
+        sem_np = semantic_pred.numpy().astype(np.int32)
+        inst_np = instance_pred.numpy().astype(np.int32)
+        score_np = point_scores.numpy().astype(np.float32)
+        self.save_ply_withscore(points[:, :3].cpu().numpy(), sem_np, inst_np, score_np,
+                                os.path.join(output_dir, f'{scan_name}.ply'),
+                                pts_semantic_gt, pts_instance_gt)
+        # index 1 is what UnifiedSegMetric reads; index 0 keeps the shape of crop mode
+        data_sample.pred_pts_seg = PointData(
+            pts_semantic_mask=[sem_np, sem_np],
+            pts_instance_mask=[inst_np, inst_np],
+            instance_scores=score_np)
+        return batch_data_samples
 
     def predict_by_feat(self, out, superpoints):
         """Predict instance, semantic, and panoptic masks for a single scene.
@@ -2653,53 +2354,31 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 instance_scores=inst_res[2].cpu().numpy())]
 
     def predict_by_feat_test(self, out, superpoints, coordinates, queries):
-        """Predict instance, semantic, and panoptic masks for a single scene.
-
-        Args:
-            out (Dict): Decoder output, each value is List of len 1. Keys:
-                `cls_preds` of shape (n_queries, n_instance_classes + 1),
-                `masks` of shape (n_queries, n_points),
-                `scores` of shape (n_queris, 1) or None.
-            superpoints (Tensor): of shape (n_raw_points,).
+        """Instance and semantic masks for one tile (no panoptic pass).
 
         Returns:
-            List[PointData]: of len 1 with `pts_semantic_mask`,
-                `pts_instance_mask`, `instance_labels`, `instance_scores`.
+            List[PointData]: of len 1 with `pts_semantic_mask` ([array (N,)]),
+                `pts_instance_mask` ([bool array (K, N)]), `instance_labels`,
+                `instance_scores`, `query_select_voxel_idx`.
         """
-        #pred_labels = out['cls_preds'][0]
         pred_masks = out['masks'][0]
         pred_scores = out['scores'][0]
+        n_cls = self.test_cfg.num_sem_cls
 
-        #inst_res = self.pred_inst(pred_masks[:-self.test_cfg.num_sem_cls, :],
-        #                          pred_scores[:-self.test_cfg.num_sem_cls, :],
-        #                          #pred_labels[:-self.test_cfg.num_sem_cls, :],
-        #                          superpoints, self.test_cfg.inst_score_thr)
-        sem_res = self.pred_sem(pred_masks[-self.test_cfg.num_sem_cls:, :],
-                                superpoints)
-        
-        # Calculate ground_z_max from coordinates of points classified as ground
+        sem_res = self.pred_sem(pred_masks[-n_cls:, :], superpoints)
         ground_points = coordinates[sem_res == 0]
         ground_z_max = ground_points[:, 2].max().item() if ground_points.size(0) > 0 else float('inf')
 
-        
-        inst_res = self.pred_inst_sem_test(pred_masks[:-self.test_cfg.num_sem_cls, :],
-                                  pred_scores[:-self.test_cfg.num_sem_cls, :],
-                                  superpoints, self.test_cfg.inst_score_thr, sem_res, coordinates, ground_z_max, queries)
-        pan_res = self.pred_pan_sem(pred_masks, pred_scores, #pred_labels,
-                                superpoints, sem_res, coordinates, ground_z_max, queries)
+        inst_res = self.pred_inst_sem_test(
+            pred_masks[:-n_cls, :], pred_scores[:-n_cls, :], superpoints,
+            self.test_cfg.inst_score_thr, sem_res, coordinates, ground_z_max, queries)
 
-        pts_semantic_mask = [sem_res.cpu().numpy(), pan_res[0].cpu().numpy()]
-        pts_instance_mask = [inst_res[0].cpu().bool().numpy(),
-                             pan_res[1].cpu().numpy()]
-
-        return [
-            PointData(
-                pts_semantic_mask=pts_semantic_mask,
-                pts_instance_mask=pts_instance_mask,
-                instance_labels=inst_res[1].cpu().numpy(),
-                instance_scores=inst_res[2].cpu().numpy(),
-                query_select_voxel_idx=inst_res[3].cpu().numpy(),
-                query_select_voxel_idx2=pan_res[2].cpu().numpy())]
+        return [PointData(
+            pts_semantic_mask=[sem_res.cpu().numpy()],
+            pts_instance_mask=[inst_res[0].cpu().bool().numpy()],
+            instance_labels=inst_res[1].cpu().numpy(),
+            instance_scores=inst_res[2].cpu().numpy(),
+            query_select_voxel_idx=inst_res[3].cpu().numpy())]
 
     def pred_inst(self, pred_masks, pred_scores, #pred_labels,
                   superpoints, score_threshold):
@@ -2899,6 +2578,8 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             kernel = self.test_cfg.matrix_nms_kernel
             scores, labels, mask_pred_sigmoid, keep_inds = mask_matrix_nms(
                 mask_pred_sigmoid, labels, scores, kernel=kernel)
+        else:
+            keep_inds = torch.arange(scores.shape[0], device=scores.device)
 
         queries_select = queries_select[keep_inds]
         mask_pred = mask_pred_sigmoid > self.test_cfg.sp_score_thr
@@ -2925,15 +2606,40 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         # Set scores to 0 where the majority of points are stuff_cls
         scores[mask_scores > (num_points_in_mask / 2)] = 0
 
-        # Filter instances based on z values
-        for i in range(mask_pred.size(0)):
-            mask = mask_pred[i]
-            if mask.sum().item() == 0:
-                scores[i] = 0
-                continue
-            z_values = coordinates[mask, 2]  # Get z values where mask is True
-            if z_values.numel() > 0 and z_values.min().item() > ground_z_max + 5:
-                scores[i] = 0
+        # Filter instances based on z values.
+        # Vectorised form of the former per-mask Python loop: a mask with no
+        # points, or whose lowest point sits more than 5 m above the highest
+        # ground point, scores 0. The loop issued three blocking `.item()` GPU
+        # syncs per mask (~590 per tile, 81 % of prediction time; see
+        # docs/benchmarks/2026-09-23-inference-profile.md); this does the same
+        # work in a handful of kernels, with the same result for every input.
+        if mask_pred.shape[0] > 0:
+            if mask_pred.shape[1] == 0:
+                # no points at all -> every mask is empty
+                scores[:] = 0
+            else:
+                z = coordinates[:, 2]
+                inf = torch.tensor(float('inf'), dtype=z.dtype, device=z.device)
+                # `torch.where` materialises a (K, N) float block; chunk over the
+                # masks so the peak allocation stays bounded on large tiles. The
+                # result does not depend on the chunk size.
+                chunk = max(1, Z_FILTER_BLOCK_ELEMENTS // mask_pred.shape[1])
+                z_min = torch.empty(
+                    mask_pred.shape[0], dtype=z.dtype, device=z.device)
+                for start in range(0, mask_pred.shape[0], chunk):
+                    block = mask_pred[start:start + chunk]
+                    z_min[start:start + chunk] = torch.where(
+                        block, z.unsqueeze(0), inf).min(dim=1).values
+                # `.double()` reproduces the loop's `z_values.min().item() >
+                # ground_z_max + 5`, which compared a float64 widening of the
+                # float32 minimum against a float64 threshold. Comparing in
+                # float32 instead would round `ground_z_max + 5` to float32 and
+                # flip masks whose lowest point sits exactly on that rounded
+                # value.
+                # An empty mask has z_min == inf, which the height test alone
+                # would not catch when ground_z_max is inf (no ground points).
+                empty = num_points_in_mask == 0
+                scores[empty | (z_min.double() > ground_z_max + 5)] = 0
 
         # score_thr
         score_mask = scores > score_threshold
@@ -3142,44 +2848,6 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         return voxel_instance_labels
     
     @staticmethod
-    def get_voxel_vote_labels(vote_label, pts_instance_mask, voxel_superpoints, voxel_main_instance):
-        """Aggregate vote labels (offsets) for each voxel based on the main instance.
-        
-        Args:
-            vote_label (Tensor): Offset vectors for each point (n_raw_points, 3).
-            pts_instance_mask (Tensor): Instance labels for each point (n_raw_points,).
-            voxel_superpoints (Tensor): Voxel indices for each point (n_raw_points,).
-            voxel_main_instance (Tensor): The main instance (majority) for each voxel.
-        
-        Returns:
-            voxel_vote_labels (Tensor): Aggregated vote labels (offsets) for the main instance in each voxel.
-        """
-        _, voxel_superpoints = torch.unique(voxel_superpoints, return_inverse=True, sorted=True)
-        _, pts_instance_mask = torch.unique(pts_instance_mask, return_inverse=True, sorted=True)
-
-        
-        # Create a unique key for (voxel_superpoints, pts_instance_mask) to distinguish different instances within each voxel
-        combined_idx = voxel_superpoints * (pts_instance_mask.max() + 1) + pts_instance_mask
-        
-        # Sum vote_label offsets for each instance in each voxel
-        vote_label_sum = scatter_add(vote_label, combined_idx, dim=0)
-        
-        # Count the number of points for each instance in each voxel
-        instance_counts = scatter_add(torch.ones_like(pts_instance_mask.float()), combined_idx, dim=0)
-
-        # Calculate the average vote_label for each instance in each voxel
-        avg_vote_label = vote_label_sum / instance_counts.unsqueeze(-1).clamp(min=1)
-
-        # Now map voxel_main_instance to the correct instance in each voxel
-        # For each voxel, create a unique key for (voxel_superpoints, voxel_main_instance)
-        voxel_main_idx = torch.arange(voxel_superpoints.max() + 1).to(voxel_main_instance.device) * (pts_instance_mask.max() + 1) + voxel_main_instance
-
-        # Select the average vote label for the main instance in each voxel
-        voxel_vote_labels = avg_vote_label[voxel_main_idx]
-
-        return voxel_vote_labels
-
-    @staticmethod
     def get_gt_semantic_masks(mask_src, sp_pts_mask, num_classes):    
         """Create ground truth semantic masks.
         
@@ -3238,62 +2906,28 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
     
     @staticmethod
     def filter_stuff_masks(batch_data_samples_i, stuff_classes, ratio_inspoint):
+        """Drop stuff instances; crop ratios are looked up by instance id.
+
+        Row ``i`` of ``sp_inst_masks`` is instance id ``i`` (``get_gt_inst_masks``
+        one-hot encodes the ids in order), and ``ratio_inspoint`` is keyed by
+        the ids in force after the last transform that compacted them. A
+        missing key means the two drifted apart, which would silently rescale
+        the wrong instance's IoU, so fail loudly instead.
+        """
         labels_3d = batch_data_samples_i.labels_3d
         sp_inst_masks = batch_data_samples_i.sp_inst_masks
+        n_inst = len(labels_3d)
+        missing = [i for i in range(n_inst) if i not in ratio_inspoint]
+        if missing:
+            raise KeyError(f'ratio_inspoint lacks instance ids {missing}; '
+                           f'keys are {sorted(int(k) for k in ratio_inspoint)}')
+        ratio_tensor = torch.tensor([float(ratio_inspoint[i]) for i in range(n_inst)],
+                                    device=labels_3d.device)
+        keep = ~torch.isin(
+            labels_3d, torch.tensor(stuff_classes, device=labels_3d.device))
 
-        stuff_classes_tensor = torch.tensor(stuff_classes, device=labels_3d.device)
-
-        mask = torch.isin(labels_3d, stuff_classes_tensor)
-        indices_to_keep = ~mask
-
-        filtered_labels_3d = labels_3d[indices_to_keep]
-
-        filtered_sp_inst_masks = sp_inst_masks[indices_to_keep]
-
-        ratio_tensor = torch.zeros(len(labels_3d), device=labels_3d.device)
-        for i, idx in enumerate(labels_3d):
-            ratio_tensor[i] = ratio_inspoint[i]
-        ratio_subset = ratio_tensor[indices_to_keep]
-
-        return filtered_labels_3d, filtered_sp_inst_masks, ratio_subset
+        return labels_3d[keep], sp_inst_masks[keep], ratio_tensor[keep]
     
-    @staticmethod
-    def generate_cylindrical_regions(points, radius, step_size):
-        x_coords = points[:, 0].cpu()  
-        y_coords = points[:, 1].cpu() 
-
-        x_min, x_max = x_coords.min().item(), x_coords.max().item()
-        y_min, y_max = y_coords.min().item(), y_coords.max().item()
-
-        regions = []
-        x = x_min
-        while x <= x_max:
-            y = y_min
-            while y <= y_max:
-                regions.append((x, y))
-                y += step_size
-            x += step_size
-
-        return regions
-
-    @staticmethod
-    def grid_sample_old(points, indices, grid_size):
-        scaled_points = points / grid_size
-        grid_points = torch.floor(scaled_points).int()
-        
-        # Use unique to find indices of each voxel
-        unique_grid_points, inverse_indices = torch.unique(grid_points, return_inverse=True, dim=0)
-
-        # Calculate the mean coordinates for each voxel
-        unique_points = torch.zeros((len(unique_grid_points), points.size(1)), dtype=points.dtype, device=points.device)
-        unique_indices = torch.zeros(len(unique_grid_points), dtype=indices.dtype, device=indices.device)
-        for i in range(len(unique_grid_points)):
-            mask = (inverse_indices == i)
-            unique_points[i] = points[mask].mean(dim=0)
-            unique_indices[i] = indices[mask][0]  # Just pick one of the indices in the voxel
-
-        return unique_points, unique_indices
-
     @staticmethod
     def grid_sample(points: torch.Tensor,
                     indices: torch.Tensor,
@@ -3339,142 +2973,6 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
 
 
     @staticmethod
-    def points_random_sampling(points, indices, num_points):
-        choices = np.random.choice(len(points), num_points, replace=False)
-        sampled_points = points[choices]
-        sampled_indices = indices[choices]
-        return sampled_points, sampled_indices
-
-    @staticmethod
-    def nearest_neighbor_mapping(pc1 : torch.Tensor,
-                             pc3 : torch.Tensor,
-                             preds: torch.Tensor | np.ndarray,
-                             chunk: int = 20_000) -> torch.Tensor:
-        # GPU Tensor
-        if isinstance(preds, np.ndarray):
-            preds = torch.from_numpy(preds).to(pc3.device, non_blocking=True)
-
-        if preds.ndim == 1:
-            preds = preds.unsqueeze(0)            # (1,N3)
-
-        K, N3  = preds.shape
-        N1     = pc1.size(0)
-        out    = torch.empty((K, N1), dtype=preds.dtype, device=preds.device)
-
-        for s in range(0, N1, chunk):
-            e   = min(s + chunk, N1)
-            nn  = torch.cdist(pc1[s:e].float(), pc3.float()).argmin(dim=1)  # (c,)
-            out[:, s:e] = preds[:, nn]     # (K,c)
-
-        return out.squeeze(0) if K == 1 else out
-
-    @staticmethod
-    def nearest_neighbor_mapping_2(pc1: torch.Tensor,
-                               pc3: torch.Tensor,
-                               preds: torch.Tensor,
-                               chunk: int = 20_000) -> torch.Tensor:
-
-        if isinstance(preds, np.ndarray):                     # keep downstream happy
-            preds = torch.as_tensor(preds, device=pc3.device)
-
-        if preds.dim() == 1:                                  # → (1, N3)
-            preds = preds.unsqueeze(0)
-
-        K, N3 = preds.shape
-        N1    = pc1.shape[0]
-        out   = torch.empty((K, N1), dtype=preds.dtype, device=preds.device)
-
-        for s in range(0, N1, chunk):
-            e   = min(s + chunk, N1)
-            # (c, 3) × (N3, 3) → (c, N3)
-            d   = torch.cdist(pc1[s:e].float(), pc3.float())   # fits in GPU
-            nn  = d.argmin(dim=1)                              # (c,)
-            out[:, s:e] = preds[:, nn]                         # gather once
-
-        return out.squeeze(0) if K == 1 else out
-
-
-    @staticmethod
-    def vote_semantic_labels(all_votes: list,
-                              ids:    torch.Tensor | np.ndarray,
-                              sem:    torch.Tensor | np.ndarray):
-        """
-        all_votes : List[List[int]] len == N_total
-        ids, sem  : (N_pts,)
-        """
-        if torch.is_tensor(ids):
-            ids = ids.cpu().numpy()
-        if torch.is_tensor(sem):
-            sem = sem.cpu().numpy()
-
-        for idx, lab in zip(ids, sem):
-            all_votes[int(idx)].append(int(lab))
-        return all_votes
-
-    @staticmethod
-    def region_merging(all_pre_ins, max_instance, pre_ins, originids):
-        idx = np.argwhere(all_pre_ins[originids] != -1)  # has label
-        idx2 = np.argwhere(all_pre_ins[originids] == -1)  # no label
-
-        if len(idx) == 0:
-            mask_valid = pre_ins != -1
-            all_pre_ins[originids[mask_valid]] = pre_ins[mask_valid] + max_instance
-            max_instance = max_instance + len(np.unique(pre_ins[mask_valid]))
-        elif len(idx2) == 0:
-            return all_pre_ins, max_instance
-        else:
-            new_label = pre_ins.reshape(-1)
-            unique_labels = np.unique(new_label)
-        
-            # Ignore the background label (-1)
-            unique_labels = unique_labels[unique_labels != -1]
-            
-            for ii_idx in unique_labels:
-            #for ii_idx in np.unique(new_label):
-                new_label_ii_idx = originids[np.argwhere(new_label == ii_idx).reshape(-1)]
-                #new_has_old_idx = new_label_ii_idx[np.argwhere(all_pre_ins[new_label_ii_idx] != -1)]
-                #new_not_old_idx = new_label_ii_idx[np.argwhere(all_pre_ins[new_label_ii_idx] == -1)]
-
-                new_has_old_idx = new_label_ii_idx[all_pre_ins[new_label_ii_idx] != -1]
-                new_not_old_idx = new_label_ii_idx[all_pre_ins[new_label_ii_idx] == -1]
-
-                #has_old_idx_mask = all_pre_ins[new_label_ii_idx] != -1
-                #new_has_old_idx = new_label_ii_idx[has_old_idx_mask]
-                #new_not_old_idx = new_label_ii_idx[~has_old_idx_mask]
-
-                if len(new_has_old_idx) == 0:
-                    all_pre_ins[new_not_old_idx] = max_instance
-                    max_instance += 1
-                elif len(new_not_old_idx) == 0:
-                    continue
-                else:
-                    old_labels_ii = all_pre_ins[new_has_old_idx]
-                    un = np.unique(old_labels_ii)
-                    max_iou_ii = 0
-                    max_iou_ii_oldlabel = 0
-                    for g in un:
-                        #idx_old_all = originids[np.argwhere(all_pre_ins[originids] == g).reshape(-1)]
-                        idx_old_all = np.argwhere(all_pre_ins == g).reshape(-1)
-                        inter_label_idx = np.intersect1d(idx_old_all, new_label_ii_idx)
-                        #union_label_idx = np.union1d(idx_old_all, new_label_ii_idx)
-                        iou1 = float(inter_label_idx.size) / float(idx_old_all.size)
-                        iou2 = float(inter_label_idx.size) / float(new_label_ii_idx.size)
-                        iou = max(iou1, iou2)
-                        #iou = float(inter_label_idx.size) / float(union_label_idx.size)
-
-                        if iou > max_iou_ii:
-                            max_iou_ii = iou
-                            max_iou_ii_oldlabel = g
-
-                    if max_iou_ii > 0.3:
-                        all_pre_ins[new_not_old_idx] = max_iou_ii_oldlabel
-                    else:
-                        all_pre_ins[new_not_old_idx] = max_instance
-                        max_instance += 1
-
-        return all_pre_ins, max_instance
-
-    @staticmethod
     def save_ply(points, semantic_pred, instance_pred, filename, semantic_gt=None, instance_gt=None):
         from plyfile import PlyData, PlyElement
         output_dir = os.path.dirname(filename)
@@ -3495,262 +2993,20 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         PlyData([el], text=True).write(filename)
     
     @staticmethod
-    def save_ply_2(points, instance_pred, filename):
-        from plyfile import PlyData, PlyElement
-        output_dir = os.path.dirname(filename)
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Filter out points with instance_pred == -1
-        valid_mask = instance_pred != -1
-        valid_points = points[valid_mask]
-        valid_instance_pred = instance_pred[valid_mask]
-        
-        # Define the dtype for the vertex elements
-        dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('instance_pred', 'i4')]
-        
-        # Create an array of vertices
-        vertex = np.array([tuple(valid_points[i]) + (valid_instance_pred[i],) for i in range(valid_points.shape[0])], dtype=dtype)
-
-        # Describe the elements and save the ply file
-        el = PlyElement.describe(vertex, 'vertex')
-        PlyData([el], text=True).write(filename)
-
-    @staticmethod
-    def save_ply_2_withscore(points, instance_pred, filename, scores):
-        from plyfile import PlyData, PlyElement
-        output_dir = os.path.dirname(filename)
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Filter out points with instance_pred == -1
-        valid_mask = instance_pred != -1
-        valid_points = points[valid_mask]
-        valid_instance_pred = instance_pred[valid_mask]
-        valid_scores = scores[valid_mask]
-        
-        # Define the dtype for the vertex elements
-        dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('instance_pred', 'i4'), ('score', 'f4')]
-        
-        # Create an array of vertices
-        vertex = np.array([tuple(valid_points[i]) + (valid_instance_pred[i], valid_scores[i]) for i in range(valid_points.shape[0])], dtype=dtype)
-
-        # Describe the elements and save the ply file
-        el = PlyElement.describe(vertex, 'vertex')
-        PlyData([el], text=True).write(filename)
-    
-    @staticmethod
-    def compute_mean_cov(features, labels):
-        # features: NxD tensor, where N is the number of points, D is the embedding dimension
-        # labels: N tensor, the instance label for each point
-        unique_labels = torch.unique(labels)
-        mean_cov_dict = {}
-        
-        for label in unique_labels:
-            # Get the points belonging to this instance
-            instance_points = features[labels == label]
-            
-            if instance_points.shape[0] > 1:
-                # Calculate the mean vector (mu)
-                mu = instance_points.mean(dim=0)
-                
-                # Calculate the covariance matrix (Sigma)
-                cov = torch.cov(instance_points.T)
-            else:
-                # If only one point, set cov as a zero matrix
-                mu = instance_points[0]
-                cov = torch.zeros((features.shape[1], features.shape[1]), device=features.device)
-            mean_cov_dict[label.item()] = (mu, cov)
-
-        return mean_cov_dict
-
-    
-    @staticmethod
-    def compute_mahalanobis_distances(features, labels, mean_cov_dict):
-        num_points = features.shape[0]
-        distances = torch.zeros(num_points, device=features.device)
-        
-        # Retrieve the mean and covariance matrix for each label and batch them
-        unique_labels = torch.unique(labels)
-        num_labels = unique_labels.size(0)
-        
-        mu_list = []
-        cov_inv_list = []
-        
-        # Preprocessing: compute the inverse of all covariance matrices
-        for label in unique_labels:
-            mu, cov = mean_cov_dict[label.item()]
-            
-            # Add a small diagonal matrix to prevent singular matrix issues
-            cov += torch.eye(cov.shape[0]).to(cov.device) * 1e-6
-            
-            # Compute the inverse matrix
-            cov_inv = torch.inverse(cov)
-            
-            mu_list.append(mu)
-            cov_inv_list.append(cov_inv)
-        
-        # Convert lists to tensors
-        mu_tensor = torch.stack(mu_list)  # (num_labels, D)
-        cov_inv_tensor = torch.stack(cov_inv_list)  # (num_labels, D, D)
-        
-        # Find the corresponding mean and inverse covariance matrix for each point based on its label
-        label_indices = torch.searchsorted(unique_labels, labels)
-        
-        # Get the mean and inverse covariance matrix for each point
-        mu_for_points = mu_tensor[label_indices]  # (N, D)
-        cov_inv_for_points = cov_inv_tensor[label_indices]  # (N, D, D)
-        
-        # Compute (q_i - mu)
-        delta = features - mu_for_points  # (N, D)
-        
-        # Compute Mahalanobis distance using batch operations
-        distances = torch.einsum('nd,ndd,nd->n', delta, cov_inv_for_points, delta)  # (N,)
-        
-        # Ensure distances are non-negative
-        distances = torch.clamp(distances, min=0)
-        
-        return torch.sqrt(distances)
-
-    @staticmethod
-    def compute_scores(distances):
-        # Compute the scores based on Mahalanobis distance
-        scores = torch.exp(-distances**2)
-        return scores
-    
-    @staticmethod
-    def compute_mean(embed_logits, labels):
-        """
-        Compute the mean vector (mu) for each instance.
-        :param embed_logits: N x D tensor, where N is the number of points and D is the feature dimension
-        :param labels: N tensor, where each value is the instance label for each point
-        :return: Mean vector for each instance
-        """
-        num_classes = labels.max().item() + 1
-        one_hot_labels = torch.nn.functional.one_hot(labels, num_classes=num_classes).float()  # (N, num_labels)
-
-        # One-hot encode the labels
-        #one_hot_labels = torch.nn.functional.one_hot(labels, num_classes=num_labels).float()  # (N, num_labels)
-        
-        # Count the number of points per label
-        count_per_label = one_hot_labels.sum(dim=0).unsqueeze(-1)  # (num_labels, 1)
-        
-        # Sum the feature vectors for each label
-        sum_per_label = torch.matmul(one_hot_labels.T, embed_logits)  # Equivalent to einsum
-
-        #sum_per_label = torch.einsum('nd,nl->ld', embed_logits, one_hot_labels)  # (num_labels, D)
-        
-        # Calculate the mean vector for each instance
-        mean_per_label = sum_per_label / count_per_label  # (num_labels, D)
-        
-        return mean_per_label, torch.unique(labels)
-
-    @staticmethod
-    def compute_euclidean_distances(embed_logits, labels, mean_per_label, unique_labels):
-        """
-        Compute the Euclidean distance between each point's feature vector and its corresponding instance mean vector.
-        :param embed_logits: N x D tensor of feature vectors
-        :param labels: N tensor of instance labels
-        :param mean_per_label: Mean vector for each instance
-        :param unique_labels: Unique labels for each instance
-        :return: Euclidean distance for each point
-        """
-        # Convert labels to indices corresponding to the unique labels
-        label_indices = torch.searchsorted(unique_labels, labels)
-        
-        # Retrieve the mean vector for each point based on its label
-        mu_for_points = mean_per_label[label_indices]  # (N, D)
-        
-        # Compute the Euclidean distance between each point and the corresponding mean vector
-        distances = torch.norm(embed_logits - mu_for_points, dim=-1)  # (N,)
-        
-        return distances
-
-    @staticmethod
-    def compute_scores_2(distances):
-        """
-        Convert Euclidean distances to scores, where a smaller distance results in a higher score.
-        :param distances: Euclidean distance for each point
-        :return: Scores in the range [0, 1]
-        """
-        return torch.exp(-distances)  # The smaller the distance, the closer the score is to 1
-
-    @staticmethod
-    def normalize_scores_per_instance(scores, labels):
-        """
-        Normalize the scores for each instance separately to the range [0, 1].
-        :param scores: N tensor of scores for each point.
-        :param labels: N tensor of instance labels for each point.
-        :return: Normalized scores in the range [0, 1].
-        """
-        unique_labels = torch.unique(labels)
-        
-        for label in unique_labels:
-            # Get the mask for points belonging to the current instance
-            mask = labels == label
-            
-            # Get the scores for the current instance
-            instance_scores = scores[mask]
-            
-            # Min-max normalization: (score - min) / (max - min)
-            min_score = instance_scores.min()
-            max_score = instance_scores.max()
-            
-            if max_score > min_score:
-                # Normalize if there is a range
-                scores[mask] = (instance_scores - min_score) / (max_score - min_score)
-            else:
-                # If all scores are the same, set them to 1 (since all distances are the same)
-                scores[mask] = 1.0
-        
-        return scores
-    
-    @staticmethod
-    def save_ply_with_logits(points, offset_logits, embed_logits, bi_semantic_logits, semantic_logits, voxel_instance_labels, voxel_semantic_labels, scores_embed, qscore_logits, filename):
-        from plyfile import PlyData, PlyElement
-        output_dir = os.path.dirname(filename)
-        os.makedirs(output_dir, exist_ok=True)
-        
-        dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),  
-                ('offset_x', 'f4'), ('offset_y', 'f4'), ('offset_z', 'f4'),  
-                ('embed_0', 'f4'), ('embed_1', 'f4'), ('embed_2', 'f4'), ('embed_3', 'f4'), ('embed_4', 'f4'),
-                ('bi_semantic_0', 'f4'), ('bi_semantic_1', 'f4'),  
-                ('semantic_0', 'f4'), ('semantic_1', 'f4'), ('semantic_2', 'f4'),
-                ('ins_label', 'f4'), ('sem_label', 'f4'), ('score_embed', 'f4'), ('score_pre', 'f4')] 
-
-        vertex = np.array([
-            tuple(points[i]) + 
-            tuple(offset_logits[i]) + 
-            tuple(embed_logits[i]) + 
-            tuple(bi_semantic_logits[i]) + 
-            tuple(semantic_logits[i]) +
-            (voxel_instance_labels[i].item(),) +
-            (voxel_semantic_labels[i].item(),) +
-            (scores_embed[i].item(),) +
-            (qscore_logits[i].item(),)
-            for i in range(points.shape[0])
-        ], dtype=dtype)
-
-        el = PlyElement.describe(vertex, 'vertex')
-        PlyData([el], text=True).write(filename)
-
-    @staticmethod
     def save_ply_withscore(points, semantic_pred, instance_pred, scores, filename, semantic_gt=None, instance_gt=None):
-        from plyfile import PlyData, PlyElement
+        """Write the per-point result cloud as a binary little-endian PLY.
+
+        Same field names and dtypes as before (see `oneformer3d/ply_io.py`); only
+        the encoding changed from ASCII to binary, which removes a `numpy.savetxt`
+        over every point plus a per-row Python tuple comprehension (5-10 s per
+        100 m tile, see docs/benchmarks/2026-09-23-inference-profile.md).
+        """
         output_dir = os.path.dirname(filename)
         os.makedirs(output_dir, exist_ok=True)
-        
-        dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
-                ('semantic_pred', 'i4'), ('instance_pred', 'i4'), ('score', 'f4')]
-        
-        if semantic_gt is not None and instance_gt is not None:
-            dtype += [('semantic_gt', 'i4'), ('instance_gt', 'i4')]
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
-        else:
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points.shape[0])],
-                            dtype=dtype)
 
-        el = PlyElement.describe(vertex, 'vertex')
-        PlyData([el], text=True).write(filename)
+        el = result_ply_element(points, semantic_pred, instance_pred, scores,
+                                semantic_gt, instance_gt)
+        PlyData([el], text=False, byte_order='<').write(filename)
 
     @staticmethod
     def save_bluepoints(points, semantic_pred, instance_pred, scores, filename, semantic_gt=None, instance_gt=None):
@@ -3830,216 +3086,6 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             el_filtered = PlyElement.describe(vertex_filtered, 'vertex')
             PlyData([el_filtered], text=False).write(new_filename_filtered)
 
-
-    @staticmethod
-    def finalize_semantic_labels_old(all_pre_sem):
-        from collections import Counter
-        final_semantic_labels = np.full(len(all_pre_sem), -1)
-        for i, labels in enumerate(all_pre_sem):
-            if labels:
-                final_semantic_labels[i] = Counter(labels).most_common(1)[0][0]
-        return final_semantic_labels
-
-    @staticmethod
-    def finalize_semantic_labels(all_pre_sem: list[list[int]]) -> np.ndarray:
-
-        lens = np.fromiter((len(v) for v in all_pre_sem), dtype=np.int32,
-                        count=len(all_pre_sem))                 # (N,)
-
-        if lens.max() == 0:                                        
-            return np.full(len(all_pre_sem), -1, dtype=np.int32)
-
-        offsets = np.cumsum(lens, dtype=np.int64)                  # (N,)
-        flat    = np.fromiter((lab for sub in all_pre_sem for lab in sub),
-                            dtype=np.int32,
-                            count=lens.sum())                    # (ΣL,)
-
-        starts = np.empty_like(offsets)
-        starts[0] = 0
-        starts[1:] = offsets[:-1]
-
-        out = np.full(len(all_pre_sem), -1, dtype=np.int32)
-        for idx, (s, e) in enumerate(zip(starts, offsets)):
-            if s == e:         
-                continue
-            slice_vals = flat[s:e]
-            binc = np.bincount(slice_vals)
-            out[idx] = binc.argmax()
-
-        return out
-
-    
-    @staticmethod
-    def merge_overlapping_instances(all_pre_ins, best_masks, iou_threshold=0.6):
-        """
-        Merge overlapping instances based on IoU.
-
-        Args:
-            all_pre_ins (numpy.ndarray): Array containing instance labels for each point.
-            best_masks (list): List of tuples, each containing (mask_points, instance_id).
-            iou_threshold (float): IoU threshold for merging instances.
-
-        Returns:
-            numpy.ndarray: Array containing the merged instance labels for each point.
-        """
-        from scipy.sparse import csr_matrix
-
-        # Create a sparse matrix for each mask using csr_matrix
-        num_points = all_pre_ins.shape[0]
-        num_masks = len(best_masks)
-        data = []
-        row_indices = []
-        col_indices = []
-
-        for idx, (mask_points, instance_id, score) in enumerate(best_masks):
-            data.extend([1] * len(mask_points))
-            row_indices.extend(mask_points)
-            col_indices.extend([idx] * len(mask_points))
-
-        mask_matrix = csr_matrix((data, (row_indices, col_indices)), shape=(num_points, num_masks), dtype=np.float32)
-
-        # Compute the IoU between masks
-        intersection = mask_matrix.T @ mask_matrix
-        mask_sizes = mask_matrix.sum(axis=0).A1
-        union = mask_sizes[:, None] + mask_sizes - intersection
-
-        # Ensure no division by zero
-        union[union == 0] = 1
-
-        iou = intersection / union
-
-        print(f"Computed IoU matrix:\n{iou}")
-
-        # Use Union-Find to manage merging of masks
-        uf = UnionFind(num_masks)
-        for i in range(num_masks):
-            for j in range(i + 1, num_masks):
-                if iou[i, j] > iou_threshold:
-                    print(f"Merging instances {best_masks[i][1]} and {best_masks[j][1]} with IoU {iou[i, j]}")
-                    uf.union(i, j)
-
-        # Map each mask to its root
-        #merged_instance_labels = np.copy(all_pre_ins)
-        #for i in range(num_masks):
-        #    root = uf.find(i)
-        #    instance_id_root = best_masks[root][1]
-        #    instance_id_i = best_masks[i][1]
-        #    merged_instance_labels[merged_instance_labels == instance_id_i] = instance_id_root
-        #return merged_instance_labels
-
-        # Update masks dynamically after merging
-        merged_masks = []
-        merged_instance_labels = np.copy(all_pre_ins)
-
-        for i in range(num_masks):
-            root = uf.find(i)
-            if root == i:  # If this is the root, create a new merged mask
-                merged_points = np.unique(np.concatenate([best_masks[k][0] for k in range(num_masks) if uf.find(k) == i]))
-                merged_instance_id = best_masks[i][1]  # Use the instance_id of the root
-                merged_score = max([best_masks[k][2] for k in range(num_masks) if uf.find(k) == i])  # Take the max score
-                merged_masks.append((merged_points, merged_instance_id, merged_score))
-
-                # Update point-wise labels
-                merged_instance_labels[merged_points] = merged_instance_id
-
-        return merged_instance_labels, merged_masks
-
-    @staticmethod
-    def merge_overlapping_instances_by_score(all_pre_ins, best_masks, overlap_threshold=0.3):
-        """
-        Merge overlapping instances based on score and point overlap ratio.
-        
-        This method compares each mask's points with the union of two masks and determines 
-        which mask to keep based on its points' proportion in the union.
-
-        Args:
-            all_pre_ins (numpy.ndarray): Array containing instance labels for each point.
-            best_masks (list): List of tuples, each containing (mask_points, instance_id, score).
-            overlap_threshold (float): Overlap threshold for merging instances based on mask proportion in union.
-
-        Returns:
-            numpy.ndarray: Array containing the merged instance labels for each point.
-            list: List of merged masks after applying the score-based merging.
-        """
-        num_masks = len(best_masks)
-
-        # Initialize all points as unassigned (-1) if necessary
-        all_pre_ins = np.full(all_pre_ins.shape, -1, dtype=int)
-        mask_kept = np.ones(num_masks, dtype=bool)  # Track which masks are kept
-
-        for i in range(num_masks):
-            if not mask_kept[i]:
-                continue
-            mask_i_points = set(best_masks[i][0])
-            for j in range(i + 1, num_masks):
-                if not mask_kept[j]:
-                    continue
-                mask_j_points = set(best_masks[j][0])
-
-                # Calculate the intersection of the point sets
-                intersection_points = mask_i_points & mask_j_points  # Intersection of the point sets
-                if len(intersection_points) == 0:
-                    continue  # No overlap, skip
-
-                # Calculate the proportion of intersection relative to each mask
-                mask1_ratio = len(intersection_points) / len(mask_i_points)  # intersection / mask1
-                mask2_ratio = len(intersection_points) / len(mask_j_points)  # intersection / mask2
-
-                # If either mask's proportion in the intersection is greater than the threshold, merge
-                if mask1_ratio > overlap_threshold or mask2_ratio > overlap_threshold:
-                    if best_masks[i][2] >= best_masks[j][2]:  # Keep the one with the higher score
-                        mask_kept[j] = False  # Discard mask2
-                    else:
-                        mask_kept[i] = False  # Discard mask1
-                        break  # If mask i is discarded, no need to compare with others
-
-
-        # Filter the masks to keep only those that are not discarded
-        masks_after_score_merge = [best_masks[i] for i in range(num_masks) if mask_kept[i]]
-
-        # Update point-wise instance labels
-        merged_instance_labels = np.copy(all_pre_ins)
-        merged_instance_scores = np.full(all_pre_ins.shape, -1, dtype=float) 
-        for mask_points, instance_id, score in masks_after_score_merge:
-            merged_instance_labels[mask_points] = instance_id
-            merged_instance_scores[mask_points] = score
-
-        return merged_instance_labels, masks_after_score_merge, merged_instance_scores
-
-    @staticmethod
-    def merge_overlapping_instances_by_score_speedup(all_pre_ins,
-                                            best_masks,
-                                            overlap_threshold=0.30):
-
-        N = all_pre_ins.shape[0]
-
-        merged_instance_labels  = np.full(N, -1, dtype=int)
-        merged_instance_scores  = np.full(N, -1.0, dtype=float)
-
-        if not best_masks:
-            return merged_instance_labels, [], merged_instance_scores
-
-        best_masks = sorted(best_masks, key=lambda x: -x[2])
-
-        taken_flag = np.zeros(N, dtype=np.bool_)        
-        kept_masks = []
-
-        for pts_idx, inst_id, score in best_masks:
-            pts_idx = np.asarray(pts_idx, dtype=int)   # 防止 list 进来
-            overlap = taken_flag[pts_idx].mean()       # == ratio
-
-            if overlap > overlap_threshold:
-                continue          # 丢弃低分
-
-            # 保留 & 写入
-            kept_masks.append((pts_idx, inst_id, score))
-
-            merged_instance_labels[pts_idx] = inst_id
-            merged_instance_scores[pts_idx] = score
-            taken_flag[pts_idx]             = True
-
-        return merged_instance_labels, kept_masks, merged_instance_scores
-        
 
 @MODELS.register_module()
 class ScanNet200OneFormer3D(ScanNetOneFormer3DMixin, Base3DDetector):

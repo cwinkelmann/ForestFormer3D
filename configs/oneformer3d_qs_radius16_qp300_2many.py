@@ -8,7 +8,6 @@ num_channels = 32
 num_instance_classes = 3
 num_semantic_classes = 3
 radius=16  #modify the radius of input cylinder
-score_th = 00.4
 chunk = 20_000
 model = dict(
     type='ForAINetV2OneFormer3D_XAwarequery',
@@ -24,7 +23,6 @@ model = dict(
     #prepare_epoch2=-1,#1000,
     query_point_num=300,   #modify the number of query points
     radius=radius,
-    score_th = score_th,
     backbone=dict(
         type='SpConvUNet',
         num_planes=[num_channels * (i + 1) for i in range(5)],
@@ -62,6 +60,11 @@ model = dict(
             fix_mean_loss=True)),
     train_cfg=dict(),
     test_cfg=dict(
+        full_plot=True,            # tiled whole-plot inference; tools/train.py sets False for validation
+        output_dir=None,           # tools/test.py overwrites this with cfg.work_dir; None -> work_dirs/default_output
+        score_th=0.4,              # instance score threshold per tile
+        overlap_threshold=0.3,     # drop a mask when this fraction of its points is already assigned
+        region_step_factor=0.25,   # cylinder lattice pitch = radius * this; larger is faster, less overlap
         topk_insts=300,
         inst_score_thr=0.0,
         pan_score_thr=0.0,
@@ -202,26 +205,10 @@ test_dataloader = dict(
         test_mode=True,
         backend_args=None))
 
-class_names = ['ground', 'wood', 'leaf']
-label2cat = {i: name for i, name in enumerate(class_names)}
-metric_meta = dict(
-    label2cat=label2cat,
-    ignore_index=[],
-    classes=class_names,
-    dataset_name='ForAINetV2')
-
-sem_mapping = [
-    0, 1, 2]
-inst_mapping = sem_mapping[1:]
 val_evaluator = dict(
     type='UnifiedSegMetric',
-    stuff_class_inds=[0], 
-    thing_class_inds=list(range(1, num_semantic_classes)), 
-    min_num_points=1, 
-    id_offset=2**16,
-    sem_mapping=sem_mapping,
-    inst_mapping=inst_mapping,
-    metric_meta=metric_meta)
+    stuff_class_inds=[0],
+    thing_class_inds=list(range(1, num_semantic_classes)))
 test_evaluator = val_evaluator
 
 optim_wrapper = dict(

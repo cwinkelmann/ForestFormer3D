@@ -1,0 +1,188 @@
+"""Plausibility report for one tile: model output vs ALS classification and CHM."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import geopandas as gpd
+import laspy
+import numpy as np
+
+from ff3d_geo.baseline import chm_local_maxima
+
+# Decision rule for the "Recommendation on ALS fine-tuning" section of the report.
+COUNT_TOLERANCE = 0.5  # tree count within +-50 % of the CHM baseline
+HEIGHT_TOLERANCE_M = 3.0  # median tree height within 3 m of the CHM maxima median
+
+
+def _stats(values: np.ndarray) -> dict | None:
+    if values.size == 0:
+        return None
+    return {
+        "min": float(np.min(values)),
+        "median": float(np.median(values)),
+        "max": float(np.max(values)),
+    }
+
+
+def build_report(las_path, gpkg_path, runtime_s: float | None = None,
+                 buildings: dict | None = None) -> dict:
+    """Build the ``<stem>_report.json`` content from a result LAS and its GeoPackage.
+
+    ``buildings`` is the dict returned by :func:`ff3d_geo.buildings.mask_buildings`
+    when the LAS has been through the ALKIS building mask; it is carried into the
+    report's ``buildings`` block and the markdown's "Buildings" row.
+    """
+    from ff3d_geo.buildings import SEMANTIC_BUILDING
+
+    las = laspy.read(str(las_path))
+    tree_id = np.asarray(las.treeID, dtype=np.int64)
+    semantic = np.asarray(las.semantic, dtype=np.int64)
+    classification = np.asarray(las.classification, dtype=np.int64)
+
+    maxima = chm_local_maxima(las_path)
+    chm_heights = np.array([h for _, _, h in maxima], dtype=np.float64)
+    heights = gpd.read_file(str(gpkg_path), layer="trees")["height"].to_numpy(dtype=np.float64)
+
+    model_ground = semantic == 0
+    als_ground = classification == 2
+    # semantic == 255 means "no model vote" (nodata): exclude those points from
+    # both the agreement figure and the confusion counts so a tile with lots of
+    # unvoted points doesn't get counted as "model says vegetation".
+    # semantic == 3 (building, from ff3d_geo.buildings) is excluded for the same
+    # reason: it is not a model vote at all but an ALKIS footprint overriding one.
+    is_building = semantic == SEMANTIC_BUILDING
+    n_building_points = int(np.sum(is_building))
+    voted = (semantic != 255) & ~is_building
+    n_voted = int(np.sum(voted))
+    nodata_fraction = float(np.mean(semantic == 255)) if semantic.size else 0.0
+    agreement = float(np.mean(model_ground[voted] == als_ground[voted])) if n_voted > 0 else None
+    confusion = {
+        "model_ground_als_ground": int(np.sum(model_ground & als_ground & voted)),
+        "model_ground_als_other": int(np.sum(model_ground & ~als_ground & voted)),
+        "model_other_als_ground": int(np.sum(~model_ground & als_ground & voted)),
+        "model_other_als_other": int(np.sum(~model_ground & ~als_ground & voted)),
+    }
+    per_class = {
+        f"semantic_{s}": {
+            f"class_{c}": int(np.sum((semantic == s) & (classification == c)))
+            for c in np.unique(classification)
+        }
+        for s in np.unique(semantic)
+    }
+
+    report = {
+        "tile": Path(las_path).stem,
+        "n_points": int(tree_id.size),
+        "n_trees": int(np.unique(tree_id[tree_id >= 0]).size),
+        "chm_baseline_count": len(maxima),
+        "height_stats": _stats(heights),
+        "chm_height_stats": _stats(chm_heights),
+        "ground_vs_vegetation_agreement": agreement,
+        "nodata_fraction": nodata_fraction,
+        "n_voted": n_voted,
+        "confusion": confusion,
+        "per_class_counts": per_class,
+        "runtime_s": runtime_s,
+    }
+    if buildings is not None or n_building_points:
+        block = dict(buildings or {})
+        block["points_masked"] = block.get("points_masked", n_building_points)
+        block["building_points_in_las"] = n_building_points
+        report["buildings"] = block
+    report["recommendation"] = recommend(report)
+    return report
+
+
+def recommend(report: dict) -> dict:
+    """Apply the decision rule: usable as a first pass when the tree count is within
+    50 % of the CHM baseline and the median height within 3 m of the CHM median."""
+    baseline = report["chm_baseline_count"]
+    n_trees = report["n_trees"]
+    both_zero = baseline == 0 and n_trees == 0
+    count_ok = both_zero or (baseline > 0 and abs(n_trees - baseline) <= COUNT_TOLERANCE * baseline)
+    hs, cs = report["height_stats"], report["chm_height_stats"]
+    height_ok = hs is not None and cs is not None and abs(hs["median"] - cs["median"]) <= HEIGHT_TOLERANCE_M
+    usable = bool(count_ok and height_ok)
+    count_reason = (
+        f"tree count {n_trees} vs CHM baseline {baseline} (ok, both zero)"
+        if both_zero
+        else f"tree count {n_trees} vs CHM baseline {baseline} ({'ok' if count_ok else 'outside +-50 %'})"
+    )
+    reasons = [
+        count_reason,
+        (
+            f"median height {hs['median']:.1f} m vs CHM median {cs['median']:.1f} m "
+            f"({'ok' if height_ok else 'outside 3 m'})"
+            if hs is not None and cs is not None
+            else "no heights to compare"
+        ),
+    ]
+    return {
+        "first_pass_usable": usable,
+        "fine_tuning_recommended": not usable,
+        "reasons": reasons,
+    }
+
+
+def report_markdown(report: dict) -> str:
+    """Render the report as the per-tile markdown block used in docs/benchmarks/<date>-tegel-als.md."""
+    hs = report["height_stats"] or {"min": float("nan"), "median": float("nan"), "max": float("nan")}
+    cs = report["chm_height_stats"] or {"min": float("nan"), "median": float("nan"), "max": float("nan")}
+    runtime = "n/a" if report["runtime_s"] is None else f"{report['runtime_s']:.0f} s"
+    agreement = report["ground_vs_vegetation_agreement"]
+    agreement_str = "n/a (no voted points)" if agreement is None else f"{100 * agreement:.1f} %"
+    c = report["confusion"]
+    lines = [
+        f"### {report['tile']}",
+        "",
+        "| Metric | Value |",
+        "|---|---|",
+        f"| Points | {report['n_points']} |",
+        f"| Inference runtime | {runtime} |",
+        f"| Trees (model) | {report['n_trees']} |",
+        f"| Trees (CHM local maxima baseline) | {report['chm_baseline_count']} |",
+        f"| Height min / median / max (model, m) | {hs['min']:.1f} / {hs['median']:.1f} / {hs['max']:.1f} |",
+        f"| Height min / median / max (CHM, m) | {cs['min']:.1f} / {cs['median']:.1f} / {cs['max']:.1f} |",
+        f"| Ground vs non-ground agreement | {agreement_str} |",
+        f"| Nodata fraction (semantic 255, excluded above) | {100 * report['nodata_fraction']:.1f} % |",
+    ]
+    buildings = report.get("buildings")
+    if buildings:
+        removed = buildings.get("instances_removed")
+        removed_str = "n/a" if removed is None else str(removed)
+        partial = buildings.get("instances_partially_masked")
+        partial_str = "" if partial is None else f", {partial} partially masked"
+        lines.append(
+            f"| Buildings (ALKIS footprints) | {removed_str} instances removed, "
+            f"{buildings.get('points_masked', 0)} points masked (semantic 3){partial_str} |"
+        )
+    lines += [
+        "",
+        "| Model \\ ALS | class 2 (ground) | other |",
+        "|---|---|---|",
+        f"| semantic 0 (ground) | {c['model_ground_als_ground']} | {c['model_ground_als_other']} |",
+        f"| semantic 1/2 (wood/leaf) | {c['model_other_als_ground']} | {c['model_other_als_other']} |",
+        "",
+        "Semantic legend: 0 ground, 1 wood, 2 leaf, 3 building (ALKIS footprint, "
+        "`ff3d_geo.buildings`), 255 no model vote.",
+        "",
+        "The ALS column is the Berlin ALS 2021 classification, which has **no vegetation "
+        "and no building classes**: only class 2 (ground) is a real semantic class, the "
+        "rest (3, 4, 5, 7, 32) are height/echo bins, and class 6 (building) is absent -- "
+        "roof points sit in 3/4/5. The agreement row therefore only compares ground "
+        "against non-ground, and buildings come from the ALKIS footprints, not from the "
+        "point cloud.",
+        "",
+        f"First pass usable: **{'yes' if report['recommendation']['first_pass_usable'] else 'no'}** "
+        f"({'; '.join(report['recommendation']['reasons'])})",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_report(report: dict, json_path, md_path=None) -> None:
+    Path(json_path).write_text(json.dumps(report, indent=2))
+    if md_path is not None:
+        Path(md_path).write_text(report_markdown(report))

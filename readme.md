@@ -32,8 +32,97 @@ If you find this project helpful, please cite our paper:
 
 This version uses 2 inference iterations by default. If your trees are not extremely densely distributed, you can set the number of iterations to 1 instead.
 
-# ForestFormer3D environment setup
-This guide provides step-by-step instructions to build and configure the Docker environment for ForestFormer3D, set up debugging in Visual Studio Code, and resolve common issues.
+---
+
+## Environment (CUDA 11.8 image)
+
+`Dockerfile` builds `forestformer3d:cu118`: PyTorch 2.0.1 / CUDA 11.8 with MinkowskiEngine,
+spconv, torch-scatter, torch-cluster, torch-points-kernels and the segmentator extension
+compiled for compute 8.0, 8.6, 8.9 and 9.0 (A100, A10/A40, L4/L40, H100). The previous
+CUDA 11.6 image is kept as `Dockerfile.a100-cu116` for reference; the manual steps 2 to 4
+below belong to that old image. With the new image nothing is reinstalled or copied by
+hand: `docker/entrypoint.sh` installs the `transforms_3d.py` patch and checks the CUDA
+extensions on every container start.
+
+```bash
+# Build, from the checkout root (30-60 min the first time; four CUDA architectures)
+docker build -t forestformer3d:cu118 .
+
+# If MinkowskiEngine fails to compile for compute 9.0:
+docker build --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX" -t forestformer3d:cu118 .
+
+# Run a command with the checkout mounted at /workspace
+docker run --rm --gpus all --shm-size=64g -v "$PWD":/workspace forestformer3d:cu118 \
+    python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
+    work_dirs/clean_forestformer/epoch_3000_fix.pth --work-dir work_dirs/release_eval
+
+# Interactive shell
+docker run --rm -it --gpus all --shm-size=64g -v "$PWD":/workspace forestformer3d:cu118
+
+# Smoke test: one loss step and one full-plot inference on a synthetic plot
+docker/smoke.sh
+```
+
+Tests: `pytest` at the checkout root runs the CPU tests (pure-Python: tiling math, checkpoint
+converter, loader, config helpers). A few of them need optional packages (`plyfile`, `scipy`,
+`laspy`) that are not part of the base install; on a machine without CUDA, create a small venv
+for them once and skip the rest otherwise:
+
+```bash
+python3 -m venv .venv-cpu && .venv-cpu/bin/pip install -r tests/requirements-cpu.txt
+.venv-cpu/bin/python -m pytest -q tests            # tests skip cleanly if you don't do this
+```
+
+`pytest -m gpu tests/gpu` runs the GPU tests (model construction, tiling end to end, the
+smoke scenario below) and only works inside the image.
+
+### Bringing the image up on a GPU host
+
+```bash
+git clone -b fix/review-findings https://github.com/cwinkelmann/ForestFormer3D.git
+cd ForestFormer3D
+docker build -t forestformer3d:cu118 . 2>&1 | tee ../ff3d-cu118-build.log
+docker/smoke.sh          # expect "2 passed"
+```
+
+If the MinkowskiEngine layer fails with an nvcc error mentioning `sm_90`, rebuild with
+`--build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"`.
+
+### Geospatial inference on your own ALS tiles (`ff3d_geo`)
+
+`ff3d_geo/` runs ForestFormer3D on real georeferenced ALS tiles (LAS/LAZ) instead of the
+ForAINetV2 benchmark plots, and turns the result back into a georeferenced LAS 1.4 file plus
+a tree GeoPackage and a markdown/JSON report. It is a separate, pure-Python package (no
+torch/CUDA) that runs on the HOST, in a plain CPU venv, and only calls into the
+`forestformer3d:cu118` container (via `benchmark/common.sh`) for the two GPU steps.
+
+```bash
+python3 -m venv .venv-cpu && .venv-cpu/bin/pip install -e ".[geo]"   # or: pip install -r tests/requirements-cpu.txt
+
+.venv-cpu/bin/python -m ff3d_geo run --las <path/to/tile.las> \
+    --checkpoint work_dirs/clean_forestformer/epoch_3000_fix.pth \
+    --out work_dirs/<name> --gpu <N>          # add --dry-run to preview the 8 steps first
+```
+
+`--las` takes several tiles: they share one preprocess and one inference pass and each
+still gets its own `<out>/<stem>.las`, `<stem>_trees.gpkg` and report. Tiles larger than
+the ~100 m the model is trained on are handled by bracketing that batched run with
+`python -m ff3d_geo split` (km tile -> local-coordinate 100 m sub-tiles) and
+`python -m ff3d_geo merge` (sub-tile results -> one km tile with globally unique tree ids).
+
+`python -m ff3d_geo masks --las <result.las> --out <dir> [--cell 0.5]` is an optional
+last step for GIS work: it writes an int32 instance-mask GeoTIFF (the `treeID` of the
+highest point in each cell, nodata -1), a uint8 semantic-mask GeoTIFF (majority class
+per cell, 255 where no point voted) and a crown-polygon GeoPackage (one convex hull per
+tree, ids matching the tree GeoPackage). A 25 M point km tile takes about 15 seconds.
+
+See `docs/benchmarks/RUNBOOK-tegel.md` for a full worked example (copying tiles to a GPU
+host over SSH, running single tiles, and the split/batch/merge loop for km tiles).
+
+---
+
+# ForestFormer3D environment setup (legacy CUDA 11.6 image)
+This guide provides step-by-step instructions to build and configure the Docker environment for ForestFormer3D, set up debugging in Visual Studio Code, and resolve common issues. It describes `Dockerfile.a100-cu116`; see "Environment (CUDA 11.8 image)" above for the current image.
 
 At first, please download the dataset and pretrained model from Zenodo, and unzip and place them in the correct locations. Make sure the directory structure looks like:
 
@@ -104,15 +193,17 @@ pip install torch-cluster --no-cache-dir --no-deps
 
 ### **4. Replace required files**
 
-```bash
-# Find the mmengine package path
-pip show mmengine
+The Docker entrypoint (`docker/entrypoint.sh`) does this automatically. When running outside the image:
 
-# Replace the following files with updated versions:
-cp replace_mmdetection_files/loops.py /opt/conda/lib/python3.10/site-packages/mmengine/runner/
-cp replace_mmdetection_files/base_model.py /opt/conda/lib/python3.10/site-packages/mmengine/model/base_model/
+```bash
+# Find the mmdet3d package path
+pip show mmdet3d
+
+# The only file that must be replaced (adds vote_label handling to flip/rotate/scale):
 cp replace_mmdetection_files/transforms_3d.py /opt/conda/lib/python3.10/site-packages/mmdet3d/datasets/transforms/
 ```
+
+No mmengine files are patched any more: the model reads the current epoch from `mmengine.logging.MessageHub`, so `tools/dist_train.sh` works as well.
 
 ### **5. Run the program**
 
@@ -158,23 +249,26 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs/oneformer3d_qs_radius16_qp3
 #### **Run testing**
 ##### Use your own trained Checkpoint
 ```bash
-#1. Fix the checkpoint file:
+#1. Convert the checkpoint once (the script refuses an already converted file with exit code 2):
 python tools/fix_spconv_checkpoint.py \
   --in-path work_dirs/oneformer3d_1xb4_forainetv2/trained.pth \
   --out-path work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth
 
-#2. Modify the output_path in function "predict" in class ForAINetV2OneFormer3D_XAwarequery in file oneformer3d/oneformer3d.py
-
-#3. Run the test script:
+#2. Run the test script; result .ply files (one per scan in meta_data/test_list.txt) land in --work-dir:
 CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
-  work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth
+  work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth --work-dir work_dirs/my_results
 
+# Optional: a different output folder or instance score threshold without editing the config
+#   --cfg-options model.test_cfg.output_dir=work_dirs/other model.test_cfg.score_th=0.3
 ```
 ##### Load pre-trained model
 ```bash
-# If you want to use the official pre-trained model, run:
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py work_dirs/clean_forestformer/epoch_3000_fix.pth
+# If you want to use the official pre-trained model (already converted), run:
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
+  work_dirs/clean_forestformer/epoch_3000_fix.pth --work-dir work_dirs/release_results
 
+# Offline evaluation of a results folder (appends evaluation_total_test.txt there):
+python tools/final_eval.py work_dirs/release_results
 ```
 
 ---
@@ -232,7 +326,8 @@ python tools/create_data_forainetv2.py forainetv2
 Once preprocessing is complete, you can run:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py work_dirs/clean_forestformer/epoch_3000_fix.pth
+CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
+  work_dirs/clean_forestformer/epoch_3000_fix.pth --work-dir work_dirs/my_results
 ```
 
 
@@ -297,24 +392,18 @@ pcd = read_laz(ply_file)
 
 ### 3. If test files do not have ground truth labels
 
-Still in `load_forainetv2_data.py`, locate the following lines:
+No code change is needed. Run the loader with `--unlabeled`; scans whose PLY has no
+`semantic_seg`/`treeID` fields get constant labels (semantic 0 = ground, instance -1) and
+the evaluation numbers printed for them are meaningless:
 
-```python
-semantic_seg = pcd["semantic_seg"].astype(np.int64)
-treeID = pcd["treeID"].astype(np.int64)
+```bash
+cd data/ForAINetV2
+python batch_load_ForAINetV2_data.py --unlabeled
+cd ../..
+python tools/create_data_forainetv2.py forainetv2
 ```
 
-If the test file lacks these labels, replace them with:
-
-```python
-semantic_seg = np.ones((points.shape[0],), dtype=np.int64)
-treeID = np.zeros((points.shape[0],), dtype=np.int64)
-# semantic_seg = pcd["semantic_seg"].astype(np.int64)
-# treeID = pcd["treeID"].astype(np.int64)
-```
-
-This will prevent errors when labels are missing in test data.
-
+`create_data_forainetv2.py` also works when only `test_data/` exists (train/val splits are skipped).
 
 **Recommendation**: The **easiest solution** is to convert your test files to `.ply` format in advance. This avoids having to change the code and ensures full compatibility with the pipeline.
 
@@ -366,54 +455,25 @@ This script re-runs inference on remaining "blue points" after the first round.
 bash tools/inference_bluepoint.sh
 ```
 
-3. Make the following adjustments before running:
+3. Put all your test file names in `data/ForAINetV2/meta_data/test_list_initial.txt` instead of
+   the default `test_list.txt`.
 
-- Put all your test file names in:
-
-```
-data/ForAINetV2/meta_data/test_list_initial.txt
-```
-
-instead of the default `test_list.txt`.
-
-- Modify `BLUEPOINTS_DIR` in the script to match your output directory (the output_path in function "predict" in class ForAINetV2OneFormer3D_XAwarequery in file workspace/oneformer3d/oneformer3d.py), for example:
+4. Configure through environment variables instead of editing files, for example:
 
 ```bash
-BLUEPOINTS_DIR="$WORK_DIR/work_dirs/YOUROUTPUTPATH"
+BLUEPOINTS_DIR=work_dirs/my_bluepoints SCORE_TH=0.4 ITERATIONS=2 bash tools/inference_bluepoint.sh
+# DRY_RUN=1 prints every command without running it
 ```
 
-- In the file:
-```
-oneformer3d/oneformer3d.py
-```
-Inside the function `predict` of class `ForAINetV2OneFormer3D_XAwarequery`, change:
+Other variables the script reads: `WORK_DIR`, `CONFIG_FILE`, `MODEL_PATH`, `DATA_ROOT`,
+`TEST_LIST`, `TEST_DATA_DIR`, `CUDA_VISIBLE_DEVICES`. The script never edits tracked files (no
+`sed` on the config, no rewrite of `meta_data/test_list.txt`); it passes thresholds through
+`tools/test.py --cfg-options`.
 
-```python
-self.save_ply_withscore(...)
-# self.save_bluepoints(...)
-```
-
-to:
-
-```python
-# self.save_ply_withscore(...)
-self.save_bluepoints(...)
-```
-
-- Also replace:
-
-```python
-# is_test = True
-# if is_test:
-if 'test' in lidar_path:
-```
-with the appropriate logic to ensure test mode is active when needed:
-
-```python
-is_test = True
-if is_test:
-#if 'test' in lidar_path:
-```
+The second pass needs `predict()` to write the remaining, unsegmented points with
+`save_bluepoints` instead of `save_ply_withscore` so they can be fed back into `test_data/`;
+today nothing calls it (see `docs/known-issues.md`), so the bluepoint loop currently has no
+points to pick up on iteration 2+ until that call site is added.
 
 This two-step (or multiple-step) inference improves robustness in challenging, highly dense forests.
 
@@ -434,7 +494,7 @@ For inference, batch_size is not used, because each cylinder is processed sequen
 
 1. Lowering the chunk value in the config
 
-2. Reducing `num_points` in the code ([see this line](https://github.com/SmartForest-no/ForestFormer3D/blob/8ca0f45196ce0cc8a656d046b3f935cbf34f315b/oneformer3d/oneformer3d.py#L2273))
+2. Reducing `max_points` in `_predict_full_plot` (`oneformer3d/oneformer3d.py`)
 
 3. Reducing the cylinder radius, which is also configurable in the config file.
 

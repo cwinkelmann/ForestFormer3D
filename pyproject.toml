@@ -1,0 +1,25 @@
+[project]
+name = "forestformer3d"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+geo = [
+    "laspy[lazrs]>=2.5",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "geopandas>=1.0",
+    "pyogrio>=0.7",
+    "rasterio>=1.3",
+    "numpy>=1.24",
+    "plyfile>=1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["oneformer3d*", "ff3d_geo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs CUDA and the Docker image", "slow: minutes-long CPU tests on real tiles (tests/test_geo_ams3d.py)"]
+addopts = "-m 'not gpu'"

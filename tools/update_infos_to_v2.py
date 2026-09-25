@@ -388,7 +388,7 @@ def update_forainetv2_infos(pkl_path, out_dir):
         time.sleep(5)
     METAINFO = {
         'classes':
-        ('tree')
+        ('tree',)
     }
     print(f'Reading from input file: {pkl_path}.')
     data_list = mmengine.load(pkl_path)
@@ -446,6 +446,7 @@ def update_forainetv2_infos(pkl_path, out_dir):
 
     # dataset metainfo
     metainfo = dict()
+    metainfo['classes'] = METAINFO['classes']
     metainfo['categories'] = {k: i for i, k in enumerate(METAINFO['classes'])}
     if ignore_class_name:
         for ignore_class in ignore_class_name:
