@@ -22,6 +22,7 @@ from build_potree_site import (  # noqa: E402
     build_chm,
     tile_bounds_from_name,
     write_chm_png,
+    write_dtm_png,
 )
 from potree_convert_tile import patched_copy  # noqa: E402
 
@@ -50,7 +51,7 @@ def test_chm_reproduces_the_synthetic_cone_heights(tmp_path):
     las = tmp_path / "tile.las"
     write_two_cone_las(las, with_predictions=True)
     bounds = tile_bounds_from_name(laspy.open(str(las)).header)
-    chm, zmin, zmax, ground_z = build_chm(las, bounds, cell=0.5, dtm_cell=2.0)
+    chm, zmin, zmax, ground_z, _dtm = build_chm(las, bounds, cell=0.5, dtm_cell=2.0)
 
     assert chm.shape == (2000, 2000)
     assert ground_z == pytest.approx(0.0, abs=0.01)
@@ -69,7 +70,7 @@ def test_chm_png_is_north_up_and_carries_its_extent(tmp_path):
     las = tmp_path / "tile.las"
     write_two_cone_las(las, with_predictions=True)
     bounds = tile_bounds_from_name(laspy.open(str(las)).header)
-    chm, _, _, ground_z = build_chm(las, bounds, cell=0.5, dtm_cell=2.0)
+    chm, _, _, ground_z, _dtm = build_chm(las, bounds, cell=0.5, dtm_cell=2.0)
 
     png, meta = tmp_path / "t_chm.png", tmp_path / "t_chm.json"
     write_chm_png(chm, png, meta, bounds, 20.0, ground_z)
@@ -168,3 +169,40 @@ def test_attach_variant_keeps_the_base_record_and_refuses_unknown_tiles():
     assert rec["variants"]["sat"]["trees"]["count"] == 6
     with pytest.raises(KeyError):
         attach_variant(recs, "b", "sat", sub)
+
+
+def test_dtm_is_the_ground_surface_the_chm_was_measured_against(tmp_path):
+    """build_chm's fifth return value is the terrain, on the CHM's own cells."""
+    las = tmp_path / "tile.las"
+    write_two_cone_las(las, with_predictions=True)
+    bounds = tile_bounds_from_name(laspy.open(str(las)).header)
+    chm, _, _, ground_z, dtm = build_chm(las, bounds, cell=0.5, dtm_cell=2.0)
+
+    assert dtm.shape == chm.shape          # resampled to the CHM grid, not the DTM grid
+    assert np.nanmedian(dtm) == pytest.approx(ground_z, abs=0.01)
+    # the synthetic plot is flat ground with two cones on it
+    assert np.nanmax(dtm) - np.nanmin(dtm) < 1.0
+
+
+def test_dtm_png_is_opaque_north_up_and_records_absolute_elevation(tmp_path):
+    las = tmp_path / "tile.las"
+    write_two_cone_las(las, with_predictions=True)
+    bounds = tile_bounds_from_name(laspy.open(str(las)).header)
+    _chm, _, _, ground_z, dtm = build_chm(las, bounds, cell=0.5, dtm_cell=2.0)
+
+    png, meta = tmp_path / "t_dtm.png", tmp_path / "t_dtm.json"
+    write_dtm_png(dtm, png, meta, bounds, ground_z)
+
+    from PIL import Image
+
+    img = np.array(Image.open(png))
+    assert img.shape == (2000, 2000, 4)
+    # terrain covers the whole tile, so unlike the CHM even the corners are opaque
+    assert img[0, 0, 3] == 255
+    assert img[-1, -1, 3] == 255
+
+    doc = json.loads(meta.read_text())
+    assert doc["crs"] == "EPSG:25833"
+    assert doc["bounds"] == [float(v) for v in bounds]
+    assert doc["units"] == "m absolute (DHHN2016)"
+    assert doc["vmin"] <= doc["vmax"]
