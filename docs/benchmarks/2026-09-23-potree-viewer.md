@@ -117,6 +117,18 @@ tile's octree): manifest, `metadata.json`, a `206` byte range out of the 700 MB 
 `application/wasm` and `application/geo+json` all served correctly; the page initialises Potree
 1.8 and lists the 33 tiles with no console errors.
 
+**Production deployment: carrot, `http://10.188.1.1:8080/` over the VPN** (2026-09-25). The
+site root is `/raid/cwinkelmann/potree/berlin_potree_v2` (33 GB): the three octree sets are
+hard links (`cp -al`, no extra space) of `work_dirs/logs/potree/out_v2_33` (33 tiles),
+`out_sat` (11) and `out_ams3d` (3), which PotreeConverter had written on carrot in the first
+place; `index.html`, `build/`, `libs/` and `data/` were rsynced from the Mac with
+`--chmod=Da+rx,Fa+r`. `docker/potree/.env` on carrot binds to the VPN address
+(`POTREE_BIND=10.188.1.1`), not `0.0.0.0`, because a Docker-published port bypasses the host
+firewall. Rootless Docker on carrot serves the files fine (the octrees are 0664, owned by the
+user). Checked from carrot and from the Mac through the VPN: 33 tiles with `sat` and `ams3d`
+variants in the manifest, `metadata.json` from all three octree directories, a `206` range out
+of `octree.bin`, `wasm`/`geojson` MIME types, container healthy.
+
 Two fixes in `benchmark/potree_index.html`, both found by driving the page in a headless browser:
 
 - **proj4 has no EPSG:25833.** Potree's per-frame update passes the point cloud's CRS to proj4 for

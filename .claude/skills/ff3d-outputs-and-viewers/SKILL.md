@@ -241,14 +241,36 @@ docker compose down
 blobs); `benchmark/serve_potree.py --root <site> --port 8080` is the no-Docker fallback.
 **On the Mac, Docker Desktop cannot bind-mount `/Volumes/2TB` (exFAT via FSKit): the start
 hangs and wedges the daemon.** Either rsync the site onto the internal APFS disk and point
-`POTREE_SITE` there, or use `serve_potree.py`, which reads the volume directly. Sharing from
-carrot: copy the site folder with
-`rsync -r --size-only --chmod=Da+rx,Fa+r --exclude '._*' <site>/ carrot:/raid/cwinkelmann/potree/berlin_potree_v2/`
-(the exFAT tree is mode 0700 throughout and `rsync -a` keeps that; nginx's worker runs as
-uid 101 and would get 403 on everything), set `POTREE_SITE`
-to it and `POTREE_BIND=0.0.0.0` in `docker/potree/.env`, `docker compose up -d --build`, open
-`http://carrot:8080/` over the VPN (or keep the default bind and tunnel with
-`ssh -L 8080:localhost:8080 carrot`). Details and the verification record:
+`POTREE_SITE` there, or use `serve_potree.py`, which reads the volume directly.
+
+**The production viewer runs on carrot** (since 2026-09-25): `http://10.188.1.1:8080/` over
+the VPN. Site root `/raid/cwinkelmann/potree/berlin_potree_v2`; `docker/potree/.env` there
+has `POTREE_SITE=` that path, `POTREE_PORT=8080`, `POTREE_BIND=10.188.1.1` (the VPN
+address, not `0.0.0.0`: published ports bypass the host firewall). `pointclouds/`,
+`pointclouds_sat/` and `pointclouds_ams3d/` are **hard links** (`cp -al`) of the octrees
+PotreeConverter wrote into `work_dirs/logs/potree/out_v2_33`, `out_sat` and `out_ams3d`, so
+they cost no space; `index.html`, `build/`, `libs/` and `data/` (1.3 GB of overlays) were
+rsynced from the Mac. Operate it from the checkout:
+
+```bash
+ssh carrot
+cd /raid/cwinkelmann/ForestFormer3D/docker/potree
+docker compose ps                       # ff3d-potree ... (healthy) 10.188.1.1:8080->80/tcp
+docker compose up -d --build            # after a git pull that touched docker/potree/
+docker compose logs --tail 50           # nginx errors only (access log is off)
+```
+
+To refresh the overlays after a `build_potree_site.py` run on the Mac, rsync `data/` and
+`index.html` again (a new tile also needs `cp -al` of its octree into `pointclouds/`):
+
+```bash
+S=/Volumes/2TB/winmol/ALS_Data/berlin_potree_v2
+rsync -r --size-only --chmod=Da+rx,Fa+r --exclude '._*' $S/index.html $S/data \
+      carrot:/raid/cwinkelmann/potree/berlin_potree_v2/
+```
+
+`--chmod` matters: the exFAT tree is mode 0700 throughout, `rsync -a` keeps that, and
+nginx's worker (uid 101) would get 403 on everything. Details and the verification record:
 `docs/benchmarks/2026-09-23-potree-viewer.md`, "Serving".
 
 A `file://` open does **not** work — the octree loader uses `fetch` with range requests and
