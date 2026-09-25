@@ -96,6 +96,9 @@
 			<button id="ff3d_unload_all">unload all</button>
 		</div>
 
+		<h2>Point cloud</h2>
+		<div id="ff3d_points"></div>
+
 		<h2>Point colour</h2>
 		<div id="ff3d_colors"></div>
 
@@ -151,10 +154,11 @@
 			colorMode: "treeid",
 			method: "ff3d",                         // which segmentation the loaded tiles show
 			wanted: new Set(),                      // tiles the user checked (survive a method switch)
-			layers: { chm: false, instance: false, dop2021: false, dop2025: false },
-			opacity: { chm: 0.85, instance: 0.85, dop2021: 1.0, dop2025: 1.0 },
+			layers: { chm: false, instance: false, dtm: false, dop2021: false, dop2025: false },
+			opacity: { chm: 0.85, instance: 0.85, dtm: 1.0, dop2021: 1.0, dop2025: 1.0 },
 			vectors: { crowns: false, markers: false },
 			dz: 0,
+			showPoints: true,                       // the drapes sit under the cloud; see buildPointControls
 		};
 
 		// ------------------------------------------------------------------ methods
@@ -359,7 +363,9 @@
 			return mesh;
 		}
 
-		const LAYER_DZ = { dop2025: 0.0, dop2021: 0.15, instance: 0.30, chm: 0.45 };
+		// Draw order from the ground up. The gaps only have to beat z-fighting: the drapes
+		// are transparent and depth-sorted, so a layer enabled above another hides it.
+		const LAYER_DZ = { dtm: -0.15, dop2025: 0.0, dop2021: 0.15, instance: 0.30, chm: 0.45 };
 
 		function refreshDrapeZ() {
 			for (const [tile, L] of state.loaded) {
@@ -455,6 +461,7 @@
 					m.pointSizeType = Potree.PointSizeType.ADAPTIVE;
 					m.shape = Potree.PointShape.SQUARE;
 					normaliseExtraAttributes(e.pointcloud);
+					e.pointcloud.visible = state.showPoints;
 					viewer.scene.addPointCloud(e.pointcloud);
 					resolve();
 				});
@@ -582,10 +589,41 @@
 			}
 		}
 
+		// The draped rasters hang at ground level under a full-height point cloud, which
+		// depth-tests against them, so without a way to hide the points the CHM and the
+		// terrain are simply buried -- raising "drape height" lifts them but they stay
+		// behind whatever points are between the camera and the drape.
+		function setPointsVisible(on) {
+			state.showPoints = on;
+			for (const L of state.loaded.values()) if (L.pointcloud) L.pointcloud.visible = on;
+		}
+
+		function buildPointControls() {
+			const el = document.getElementById("ff3d_points");
+			const row = document.createElement("div");
+			row.className = "row";
+			const cb = document.createElement("input");
+			cb.type = "checkbox";
+			cb.checked = state.showPoints;
+			cb.onchange = () => setPointsVisible(cb.checked);
+			const nm = document.createElement("span");
+			nm.className = "nm"; nm.textContent = "show point cloud";
+			const sl = document.createElement("input");
+			sl.type = "range"; sl.min = 1; sl.max = 6; sl.step = 0.5; sl.value = 2;
+			sl.title = "point size";
+			sl.oninput = () => {
+				for (const L of state.loaded.values())
+					if (L.pointcloud) L.pointcloud.material.size = parseFloat(sl.value);
+			};
+			row.appendChild(cb); row.appendChild(nm); row.appendChild(sl);
+			el.appendChild(row);
+		}
+
 		function buildLayerControls() {
 			const el = document.getElementById("ff3d_layers");
 			const names = {
 				chm: "CHM (0.5 m, viridis)", instance: "instance mask",
+				dtm: "terrain / DTM (absolute z)",
 				dop2021: "DOP 2021 (leaf-off)", dop2025: "DOP 2025 (leaf-on)",
 			};
 			for (const key of Object.keys(names)) {
@@ -704,6 +742,7 @@
 		};
 
 		buildMethodButtons();
+		buildPointControls();
 		buildColorButtons();
 		buildLayerControls();
 		buildVectorControls();

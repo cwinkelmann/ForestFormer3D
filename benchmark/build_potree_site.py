@@ -8,6 +8,8 @@ light-weight overlays that the viewer drapes on top of them:
   data/<tile>_trees.geojson     tree tops   (EPSG:25833 coordinates kept as x/y/z)
   data/<tile>_crowns.geojson    crown hulls (EPSG:25833, simplified)
   data/<tile>_chm.png|.json     0.5 m canopy height model from the LAS, viridis
+  data/<tile>_dtm.png|.json     the terrain model the CHM was measured against,
+                                absolute elevation, gist_earth
   data/<tile>_instance.png|.json  instance raster, random colours, transparent nodata
   data/<tile>_dop2021.png|.json   leaf-off orthophoto  (downsampled)
   data/<tile>_dop2025.png|.json   leaf-on orthophoto   (downsampled)
@@ -97,7 +99,12 @@ def tile_bounds_from_name(las_header) -> tuple[float, float, float, float]:
 
 
 def build_chm(las_path: Path, bounds, cell: float, dtm_cell: float):
-    """0.5 m CHM over the fixed tile grid. Returns (chm, zmin, zmax) with row 0 = south."""
+    """0.5 m CHM over the fixed tile grid, row 0 = south.
+
+    Returns ``(chm, zmin, zmax, ground_z, dtm_fine)``. ``dtm_fine`` is the ground surface
+    the CHM was measured against, resampled to the CHM's own cells -- the terrain model,
+    which is worth drawing in its own right and costs nothing extra here.
+    """
     import laspy
 
     x0, y0, x1, y1 = bounds
@@ -135,7 +142,7 @@ def build_chm(las_path: Path, bounds, cell: float, dtm_cell: float):
     chm = dsm - dtm_fine
     chm[~np.isfinite(chm)] = 0.0
     np.clip(chm, 0.0, None, out=chm)
-    return chm, zmin, zmax, float(np.nanmedian(dtm))
+    return chm, zmin, zmax, float(np.nanmedian(dtm)), dtm_fine
 
 
 def write_chm_png(chm: np.ndarray, out_png: Path, out_json: Path, bounds, vmax, ground_z):
@@ -154,6 +161,39 @@ def write_chm_png(chm: np.ndarray, out_png: Path, out_json: Path, bounds, vmax, 
     _extent_json(out_json, bounds, {"vmin": 0.0, "vmax": round(float(vmax), 2),
                                     "cmap": "viridis", "z": round(ground_z, 2),
                                     "units": "m above ground"})
+
+
+def write_dtm_png(dtm: np.ndarray, out_png: Path, out_json: Path, bounds, ground_z):
+    """The terrain model as an opaque raster, coloured over its own elevation range.
+
+    Unlike the CHM this is absolute elevation (metres, DHHN2016), so the colour range is
+    the tile's own min..max rather than a height-above-ground scale; a fixed city-wide
+    range would leave most tiles a single flat colour, Berlin being as flat as it is.
+    """
+    import matplotlib
+
+    try:
+        cmap = matplotlib.colormaps["gist_earth"]
+    except AttributeError:  # matplotlib < 3.5
+        import matplotlib.cm as cm
+
+        cmap = cm.get_cmap("gist_earth")
+    finite = np.isfinite(dtm)
+    if finite.any():
+        lo = float(np.nanpercentile(dtm[finite], 1))
+        hi = float(np.nanpercentile(dtm[finite], 99))
+    else:
+        lo, hi = ground_z, ground_z + 1.0
+    if hi - lo < 1.0:                      # a flat tile still needs a usable ramp
+        lo, hi = lo - 0.5, hi + 0.5
+    v = np.clip((dtm - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+    v = np.where(finite, v, 0.0)
+    rgba = (cmap(np.flipud(v)) * 255).astype(np.uint8)
+    rgba[..., 3] = np.where(np.flipud(finite), 255, 0)
+    _png(out_png, rgba)
+    _extent_json(out_json, bounds, {"vmin": round(lo, 2), "vmax": round(hi, 2),
+                                    "cmap": "gist_earth", "z": round(ground_z, 2),
+                                    "units": "m absolute (DHHN2016)"})
 
 
 def write_instance_png(tif: Path, out_png: Path, out_json: Path, bounds, ground_z):
@@ -309,7 +349,7 @@ def build_tile(tile: str, args_dict: dict) -> dict:
         "layers": {},
     }
 
-    chm, zmin, zmax, ground_z = build_chm(las, bounds, a.chm_cell, a.dtm_cell)
+    chm, zmin, zmax, ground_z, dtm = build_chm(las, bounds, a.chm_cell, a.dtm_cell)
     rec["ground_z"] = round(ground_z, 2)
     vmax = float(np.percentile(chm[chm > 0.5], 99)) if (chm > 0.5).any() else 30.0
     vmax = max(10.0, min(45.0, vmax))
@@ -317,6 +357,10 @@ def build_tile(tile: str, args_dict: dict) -> dict:
                   bounds, vmax, ground_z)
     rec["layers"]["chm"] = {"png": f"data/{tile}_chm.png", "json": f"data/{tile}_chm.json",
                             "vmax": round(vmax, 1)}
+
+    write_dtm_png(dtm, data_dir / f"{tile}_dtm.png", data_dir / f"{tile}_dtm.json",
+                  bounds, ground_z)
+    rec["layers"]["dtm"] = {"png": f"data/{tile}_dtm.png", "json": f"data/{tile}_dtm.json"}
 
     inst = ff3d_dir / tile / f"{tile}_instance_50cm.tif"
     if inst.exists():
