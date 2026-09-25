@@ -7,9 +7,13 @@
 #   nohup bash benchmark/sat_run_gpu.sh 7 3dm_33_381_5828_1_be 3dm_33_381_5829_1_be \
 #     > work_dirs/logs/sat/sat-gpu7-$(date +%Y%m%d-%H%M%S).log 2>&1 &
 #
-# The sub-tiles must already exist under inputs/berlin/sub/<T>/ (see ff3d-inference-km-tiles).
+# The sub-tiles must already exist under inputs/<SAT_SUB>/<T>/ (see ff3d-inference-km-tiles),
+# where SAT_SUB defaults to berlin/sub. SegmentAnyTree has no cross-sub-tile stitching and
+# benchmark/sat_to_ff3d.py simply concatenates the per-sub-tile results, so point it at a
+# split made WITHOUT a halo: on haloed sub-tiles the shared halo points would be merged
+# several times over, silently inflating the km tile's point count and duplicating trees.
 # Environment: SAT_ROOT (SegmentAnyTree checkout with model_file/PointGroup-PAPER.pt),
-# SAT_IMAGE, FF3D_ROOT, GEO_VENV, SAT_KEEP=1 keeps the intermediate files.
+# SAT_IMAGE, FF3D_ROOT, GEO_VENV, SAT_SUB, SAT_KEEP=1 keeps the intermediate files.
 set -uo pipefail
 
 GPU="${1:?usage: sat_run_gpu.sh <gpu> <tile>...}"
@@ -18,13 +22,15 @@ FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
 SAT_ROOT="${SAT_ROOT:-/raid/cwinkelmann/SegmentAnyTree_infer}"
 SAT_IMAGE="${SAT_IMAGE:-segment-any-tree:cu118}"
 GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
+# Sub-tile set to read, relative to $FF3D_ROOT/inputs. Must be a split WITHOUT a halo.
+SAT_SUB="${SAT_SUB:-berlin/sub}"
 
 if [ "$(wc -c < "$SAT_ROOT/model_file/PointGroup-PAPER.pt")" -lt 1000000 ]; then
     echo "!!! $SAT_ROOT/model_file/PointGroup-PAPER.pt is an LFS pointer, not the model"; exit 1
 fi
 
 for T in "$@"; do
-    IN="$FF3D_ROOT/inputs/berlin/sub/$T"
+    IN="$FF3D_ROOT/inputs/$SAT_SUB/$T"
     OUT="$FF3D_ROOT/work_dirs/sat-$T"
     RAW="$OUT/sat_raw"
     if [ ! -d "$IN" ]; then echo "!!! $T: no sub-tiles under $IN"; continue; fi
@@ -38,7 +44,7 @@ for T in "$@"; do
         -e NUMBA_CACHE_DIR=/tmp/numba -e OMP_NUM_THREADS=16 --shm-size=64g \
         -v "$SAT_ROOT":/home/nibio/mutable-outside-world \
         -v "$FF3D_ROOT/inputs":/inputs -v "$FF3D_ROOT/work_dirs":/work_dirs \
-        --entrypoint bash "$SAT_IMAGE" run_inference.sh "/inputs/berlin/sub/$T" "/work_dirs/sat-$T/sat_raw"
+        --entrypoint bash "$SAT_IMAGE" run_inference.sh "/inputs/$SAT_SUB/$T" "/work_dirs/sat-$T/sat_raw"
     rc=$?
     R=$(( $(date +%s) - start ))
     M=$(ls "$RAW"/final_results/*_out.la? 2>/dev/null | wc -l)
