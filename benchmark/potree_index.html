@@ -357,7 +357,7 @@
 			});
 			const mesh = new THREE.Mesh(new THREE.PlaneBufferGeometry(maxx - minx, maxy - miny), mat);
 			mesh.position.set((minx + maxx) / 2, (miny + maxy) / 2, z);
-			mesh.renderOrder = { dop2025: 1, dop2021: 2, instance: 3, chm: 4 }[key];
+			mesh.renderOrder = LAYER_KEYS.indexOf(key) + 1;
 			mesh.visible = state.layers[key];
 			mesh.name = `${rec.tile}:${key}`;
 			return mesh;
@@ -366,6 +366,9 @@
 		// Draw order from the ground up. The gaps only have to beat z-fighting: the drapes
 		// are transparent and depth-sorted, so a layer enabled above another hides it.
 		const LAYER_DZ = { dtm: -0.15, dop2025: 0.0, dop2021: 0.15, instance: 0.30, chm: 0.45 };
+		// The one list of draped layers: key order here is bottom-to-top and drives both
+		// which meshes get built and their renderOrder. Adding a layer in one place only.
+		const LAYER_KEYS = Object.keys(LAYER_DZ);
 
 		function refreshDrapeZ() {
 			for (const [tile, L] of state.loaded) {
@@ -447,7 +450,7 @@
 			const L = { pointcloud: null, meshes: {}, crowns: null, markers: null, trees: [], method: state.method };
 			state.loaded.set(tile, L);
 
-			for (const key of ["chm", "instance", "dop2021", "dop2025"]) {
+			for (const key of LAYER_KEYS) {
 				const mesh = drapeMesh(rec, key, rec.ground_z + LAYER_DZ[key] + state.dz);
 				if (mesh) { L.meshes[key] = mesh; viewer.scene.scene.add(mesh); }
 			}
@@ -747,7 +750,11 @@
 		buildLayerControls();
 		buildVectorControls();
 
-		fetch("data/tiles.json").then(r => r.json()).then(async manifest => {
+		// no-store, not the default: the manifest changes every time the site is rebuilt
+		// (a new tile, a new method, a new draped layer) while its URL does not, so a cached
+		// copy silently pins the viewer to the old layer and tile set with nothing to show
+		// for it. The octrees and the overlay PNGs are content-stable and stay cacheable.
+		fetch("data/tiles.json", { cache: "no-store" }).then(r => r.json()).then(async manifest => {
 			for (const rec of manifest.tiles) state.tiles.set(rec.tile, rec);
 			const m = new URLSearchParams(location.search).get("method");
 			if (m && METHODS[m]) state.method = m;
