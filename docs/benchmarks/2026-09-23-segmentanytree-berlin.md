@@ -13,6 +13,14 @@ No ground truth exists for these tiles. Every number below is a plausibility fig
 (CHM baseline, ALS ground agreement) or an *agreement* between two methods, never an
 accuracy.
 
+> **Superseded for the method comparison (2026-09-25).** Sections 4-6 compare a
+> SegmentAnyTree run on bare 100 m sub-tiles against a ForestFormer3D run that later
+> gained a 20 m halo and a mosaic-wide stitch. That is not like-for-like: the gap was in
+> the harness, not the models. Section 8 has the rerun where both methods go through the
+> same split, the same halo, the same core ownership and the same stitch. The numbers in
+> sections 4-6 remain valid *for the no-halo basis*, whose results are preserved on carrot
+> at `work_dirs/sat-v1-nohalo/` and on the 2TB volume at `berlin_als_2021_sat_v1_nohalo/`.
+
 ## 1. What SegmentAnyTree is and how the published model is packaged
 
 **Method.** SegmentAnyTree (Wielgosz, Puliti, Xiang, Schindler, Astrup; *Remote Sensing
@@ -322,3 +330,69 @@ of the two is closer to the real trees cannot be decided from these files.
   tile list shows the SegmentAnyTree counts, and switching methods reloads the checked
   tiles from the other octree; not checked by eye: the SAT instance-mask drape and the
   SAT crown outlines / markers (the same code path as the ForestFormer3D ones).
+
+
+## 8. Like-for-like rerun on the seamless mosaic (2026-09-25)
+
+Sections 4-6 measured two methods that had not been given the same problem. By 2026-09-25
+ForestFormer3D ran on 100 m sub-tiles carrying a **20 m halo** and had its ids unified
+across the whole mosaic by `ff3d_geo stitch`; SegmentAnyTree still saw bare 100 m tiles and
+kept a per-sub-tile id space. Any difference in tree counts or seam behaviour was therefore
+partly an artefact of the harness.
+
+SegmentAnyTree preserves its input's point **count and order** (verified against a split
+sub-tile: 275,684 points, identical ordering), which is exactly what `stitch` requires of a
+results directory. So it can go through the same pipeline, not merely the same input.
+`SAT_STITCH=1` (commit 95b7904) keeps the per-sub-tile contract LAS under `<out>/sub/` for
+that; `SAT_SUB` (5aa03de) names the sub-tile set, because the default path now holds the
+haloed split and the offset-id merge must NOT be run on it -- it would merge each shared
+halo point once per sub-tile that saw it, roughly doubling the km tile's point count and
+duplicating trees, with nothing in the pipeline to notice.
+
+**The run.** All 33 km tiles, the same 3,094 haloed sub-tiles ForestFormer3D used, seven
+H100s with **two containers per GPU** (SegmentAnyTree uses ~3.2 GB of 80 GB and leaves the
+GPU at ~35 % on its own; the cycle is bound by `run_inference.sh`'s host-side work). 07:22
+to 12:34, 5 h 12, **zero failures**, per tile 928-9,974 s (median 6,843 s). Doubling the
+containers raised GPU utilisation to ~90 % but, normalised for the halo's 1.94x extra
+points, bought only **~1.2x** throughput over one container per GPU -- the host phases do
+not benefit. Then ONE `ff3d_geo stitch` over the whole mosaic: 22 min, zero failures.
+
+| | ForestFormer3D | SegmentAnyTree |
+|---|---|---|
+| trees (unique ids across the mosaic) | 832,130 | **861,795** |
+| sub-tiles / sources / pairs tested | 3,094 / 33 / 11,732 | 3,094 / 33 / 11,732 |
+| instances unified across the halo | 672,321 | 566,529 |
+| cross-km matches / trees | 62,203 / 7,466 | 53,184 / 5,454 |
+| seam strip excess (mean over 33) | +0.078 pp | -0.074 pp |
+| crowns touching a grid line | 11.12 % | 14.57 % |
+| crowns cut by a grid line | 21,837 | 34,805 |
+
+**Instance agreement** (`benchmark/instance_agreement.py`, one-to-one at IoU >= 0.5, over
+all 33 stitched tiles and 584,133,672 identical points):
+
+| | |
+|---|---|
+| instances, FF3D / SAT | 839,626 / 867,266 |
+| points carrying an instance, FF3D / SAT / both | 307.7 M / 290.3 M / 261.9 M |
+| matched pairs | 451,513 |
+| matched share, FF3D / SAT | 53.8 % / 52.1 % |
+| median IoU of matched pairs | 0.741 (0.703-0.784 per tile) |
+| SAT pieces per FF3D tree | 1.13 |
+| FF3D pieces per SAT tree | 0.885 |
+| FF3D instances split by SAT | 27.4 % (20.6-37.7) |
+| SAT instances split by FF3D | 10.9 % (6.7-14.8) |
+
+**Reading it.** The asymmetry is consistent and one-directional: SegmentAnyTree divides the
+same canopy more finely. Its 3.6 % higher tree count is therefore better read as
+over-segmentation relative to ForestFormer3D than as 30,000 extra trees found -- 27.4 % of
+ForestFormer3D instances are split by SegmentAnyTree against 10.9 % the other way, and SAT
+needed 106,000 fewer unifications over the *same* 11,732 halo pairs, meaning its instances
+agreed across the halo less often. On seams it is the reverse: SAT leaves marginally less
+unlabelled ground along the grid lines (-0.074 pp against +0.078 pp) while cutting 59 % more
+crowns across them.
+
+None of this says which method is right. There is still no ground truth for these tiles; a
+low agreement means the two disagree. The 2025 *Probekreis* crowns
+(`training_data/WINDWURF_Tegel/Revier_1{2,3}/202507_*.gpkg`, 974 delineated crowns with
+species over three sample circles) are the only species-labelled reference data available
+and have not yet been used as a referee.
