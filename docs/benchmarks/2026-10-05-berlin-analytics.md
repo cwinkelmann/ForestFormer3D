@@ -54,7 +54,7 @@ What we see: AMS3D has no short mode at all -- its height distribution starts at
 
 What we see: the matched fractions move together from tile to tile (0.35-0.68) and are lowest on the built-up tiles (380_5830, 383_5826/5827), where both methods segment small garden vegetation differently, and highest on closed forest; the median IoU of a match is flat at 0.71-0.78 everywhere, so when the two agree on a tree they agree on its extent. The bottom panel is the asymmetry the whole chapter turns on: the blue bars (ForestFormer3D trees split by SegmentAnyTree) are 2-4x the magenta ones on every tile, 0.32-0.38 on the R13 forest tiles.
 
-Pooled over 33 tiles and 584,133,672 identical points: 451,513 tree pairs overlap with IoU ≥ 0.5, i.e. 53.8 % of ForestFormer3D's 839,626 trees and 52.1 % of SegmentAnyTree's 867,266; the median IoU of a matched pair is 0.742. 26.8 % of ForestFormer3D trees are covered by two or more SegmentAnyTree instances against 11.0 % the other way round: where the two disagree, SegmentAnyTree has mostly cut one crown into several, which is also why it reports more trees.
+Pooled over 33 tiles and 584,133,672 identical points: 451,513 tree pairs overlap with IoU ≥ 0.5, i.e. 53.8 % of ForestFormer3D's 839,626 trees and 52.1 % of SegmentAnyTree's 867,266; the median IoU of a matched pair is 0.742 (the median of the per-tile medians; all pooled figures weight tiles by their tree count, so they differ in the last digit from the unweighted tile means quoted in the appendix). 26.8 % of ForestFormer3D trees are covered by two or more SegmentAnyTree instances against 11.0 % the other way round: where the two disagree, SegmentAnyTree has mostly cut one crown into several, which is also why it reports more trees.
 
 ## 5. Seams and the building mask
 
@@ -88,7 +88,7 @@ What we see: the cloud follows the diagonal -- taller stands in the inventory ar
 | Eiche | 6 | 25 | 2,695 | 107 | 24.0 | 20.9 | 24.9 | 26.6 |
 | Winterlinde | 6 | 16 | 6,278 | 403 | 23.9 | 22.1 | 27.7 | 26.4 |
 
-Every ForestFormer3D tree was joined to the stand it stands in (458 stands with at least 20 trees). The inventory height is the main canopy layer's height from the 2014 management inventory, a stand mean of dominant trees, so the 90th percentile of the predicted tree heights is the comparable statistic (seven years of growth separate the two; pine at this age adds roughly 2-3 m). Over all stands the predicted p90 is 4.4 m above the inventory height on average (correlation 0.60); the predicted median sits below it, as it should for a figure that includes the understory.
+Every ForestFormer3D tree was joined to the stand it stands in (458 stands with at least 20 trees). The inventory height is the main canopy layer's height from the 2014 management inventory, a stand mean of dominant trees, so the 90th percentile of the predicted tree heights is the comparable statistic (seven years of growth separate the two, worth a few metres of height). Over all stands the predicted p90 is 4.4 m above the inventory height on average (correlation 0.60); the predicted median sits below it, as it should for a figure that includes the understory.
 
 ## 7. Against the tree cadastre (street and park trees)
 

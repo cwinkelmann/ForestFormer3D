@@ -16,7 +16,7 @@ given; the fetch scripts named here are the record of exactly what was requested
 | Licence | Datenlizenz Deutschland – Zero – 2.0 (dl-de/zero-2-0) |
 | Flight | 24/25 February and 2 March 2021 -- **leaf-off** |
 | CRS | ETRS89 / UTM 33N (EPSG:25833), heights DHHN2016; the LAS headers carry no CRS, the code sets it |
-| Tiles | 1 km squares named `3dm_33_<E>_<N>_1_be.las`; 33 used here (Tegel and Spandau), 23-25 M points each |
+| Tiles | 1 km squares named `3dm_33_<E>_<N>_1_be.las`; 33 used here (Tegel and Spandau), 4-27 M points each (584 M in total, 18 M on average; forest tiles 20-27 M, the lake tile 381_5827 3.6 M) |
 | Density | ~10 pts/m² averaged over a km tile (much of it water, roofs, streets); 20-30 pts/m² over forested 100 m sub-tiles |
 | Classes present | 2 (ground), 3/4/5 (vegetation by height), 7 (noise), 32 -- **no class 6 (building)**: roof points sit in 3/4/5 |
 | Fetch | `benchmark/fetch_berlin_als.py` (skill `ff3d-als-download`); copies on the 2TB volume `ALS_Data/berlin_als_2021/` and on carrot `inputs/berlin/` |
@@ -60,7 +60,7 @@ data infrastructure.
 | Licence | Datenlizenz Deutschland – Zero – 2.0 (dl-de/zero-2-0), "keine Zugriffsbeschränkungen" -- stated in the capabilities document |
 | Catalogue | the same dataset is listed in the national catalogue geoportal.de (records there mirror the GDI Berlin metadata); the data itself was taken from the GDI Berlin service above, never from a catalogue download |
 | Fetch | `benchmark/fetch_berlin_buildings.py`, one request per km-tile bounding box, paged; result `ALS_Data/berlin_buildings/alkis_buildings.gpkg` with layers `buildings` and `tiles` (which km boxes were fetched) |
-| Coverage | **16,257 footprints over all 33 tiles** since 2026-10-05. The first fetch (2026-09-23) covered 23 tiles; the ten others were added on 2026-10-05 and the building mask re-run for them. Five tiles genuinely contain no building (376_5827, 376_5828, 377_5827, 377_5828, 381_5828). |
+| Coverage | **16,257 footprints over all 33 tiles** since 2026-10-05 (`alkis_buildings_44tiles.gpkg` adds the 2,014 of the eleven R13 tiles now in processing, 18,271 rows). The first fetch (2026-09-23) covered 23 tiles; the ten others were added on 2026-10-05 and the building mask re-run for them. Five tiles genuinely contain no building (376_5827, 376_5828, 377_5827, 377_5828, 381_5828). |
 | Use | `ff3d_geo buildings`: every predicted point inside a buffered footprint becomes class "building", an instance mostly inside footprints is dropped (`--min-roof-fraction`), surviving ids are not renumbered |
 
 With all 33 tiles covered, the mask removes **35,480 of the 832,130 ForestFormer3D trees
@@ -132,7 +132,7 @@ as is on data 5-100x sparser than its training plots (see the density study).
 from a spike in the `GEE_animation` repository; CPU only, no learned weights. It is the
 classical baseline, not a published method.
 
-## 5. Reference data that exists but is NOT used in this report
+## 5. Reference data: what is used as a check, and what is not yet
 
 **Is there a source listing every individual tree? No.** Berlin's tree cadastre
 (*Baumbestand Berlin*, WFS `https://gdi.berlin.de/services/wfs/baumbestand`, feature types
@@ -144,8 +144,9 @@ tree, and no per-tree forest inventory is published. On the Tegel and Spandau ti
 cadastre would therefore give species-labelled reference trees along streets and in parks
 at the forest edge, and nothing inside it. It was fetched for the mosaic extent on
 2026-10-05 (`benchmark/fetch_berlin_trees.py` -> `ALS_Data/berlin_trees/baumbestand_berlin.gpkg`:
-9,103 street and 12,349 park trees) and is a layer group of the QGIS project; no comparison
-in this report uses it yet. QGIS 3.44 reported the same feature types as live WFS layers
+9,103 street and 12,349 park trees) and is a layer group of the QGIS project. The analytics
+chapter uses it as the one per-tree check available: detection rate of cadastre trees by a
+predicted tree top within 3 m, and the height residual against the cadastre height. QGIS 3.44 reported the same feature types as live WFS layers
 unavailable on load although the service answers every request, so the project reads the
 GeoPackage.
 

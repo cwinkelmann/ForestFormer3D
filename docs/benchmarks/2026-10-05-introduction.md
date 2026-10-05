@@ -2,11 +2,11 @@
 
 ## The question
 
-Berlin publishes a city-wide airborne laser scan every few years as open data. If a
+Berlin published its 2021 city-wide airborne laser scan as open data. If a
 published tree-segmentation model can turn such a scan into a map of individual trees
 without site-specific training, the city's forest and street trees could be inventoried
 from data that already exists. This report asks three things of ForestFormer3D (Xiang et
-al., ICCV 2025), the current state of the art for individual tree segmentation in forest
+al., ICCV 2025), a recent state-of-the-art model for individual tree segmentation in forest
 point clouds:
 
 1. Does it run at km-tile scale on ALS that is 5-100 times sparser than the plots it was

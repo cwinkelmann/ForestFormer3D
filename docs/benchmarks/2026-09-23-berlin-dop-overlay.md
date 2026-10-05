@@ -164,6 +164,6 @@ being processed.
   gap as segmentation error.
 - The RGBI GeoTIFFs are a WMS reconstruction, not the original 4-band product. For
   anything quantitative use Berlin's download service instead.
-- Figure (d) mixes tiles whose results live on `/Volumes/2TB/.../berlin_als_2021_ff3d`
-  with tiles whose results only exist in `~/work/hnee/ForestFormer3D_runs/berlin_out`;
-  the plotting script looks in both.
+- Since 2026-10-05 every figure reads the seamless mosaic (`berlin_als_2021_ff3d_v2`); the
+  plotting script falls back to the older per-tile result directories only where that set
+  has no tile.

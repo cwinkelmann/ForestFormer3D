@@ -536,7 +536,9 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
                   f"Pooled over {a['tiles']} tiles and {fmt(a['n_points'])} identical points: {fmt(a['matched'])} tree pairs "
                   f"overlap with IoU ≥ 0.5, i.e. {pct(a['matched_frac_a'])} of ForestFormer3D's {fmt(a['n_a'])} trees and "
                   f"{pct(a['matched_frac_b'])} of SegmentAnyTree's {fmt(a['n_b'])}; the median IoU of a matched pair is "
-                  f"{fmt(a['iou_median'], 3)}. {pct(a['split_a_frac'])} of ForestFormer3D trees are covered by two or more "
+                  f"{fmt(a['iou_median'], 3)} (the median of the per-tile medians; all pooled figures weight tiles by their tree "
+                  f"count, so they differ in the last digit from the unweighted tile means quoted in the appendix). "
+                  f"{pct(a['split_a_frac'])} of ForestFormer3D trees are covered by two or more "
                   f"SegmentAnyTree instances against {pct(a['split_b_frac'])} the other way round: where the two disagree, "
                   "SegmentAnyTree has mostly cut one crown into several, which is also why it reports more trees.", ""]
         if S["agreement"].get("ams3d"):
@@ -593,8 +595,8 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
                   f"Every ForestFormer3D tree was joined to the stand it stands in ({fmt(S['stands_n'])} stands with at least 20 trees). "
                   "The inventory height is the main canopy layer's height from the 2014 management inventory, a "
                   "stand mean of dominant trees, so the 90th percentile of the predicted tree heights is the "
-                  "comparable statistic (seven years of growth separate the two; pine at this age adds roughly "
-                  f"2-3 m). Over all stands the predicted p90 is {fmt(S['stands_bias_p90'])} m above the inventory "
+                  "comparable statistic (seven years of growth separate the two, worth a few metres of height). "
+                  f"Over all stands the predicted p90 is {fmt(S['stands_bias_p90'])} m above the inventory "
                   f"height on average (correlation {fmt(S['stands_r'], 2)}); the predicted median sits below it, as it should "
                   "for a figure that includes the understory.", ""]
 

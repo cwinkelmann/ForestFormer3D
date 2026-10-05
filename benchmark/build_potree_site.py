@@ -373,10 +373,14 @@ def build_tile(tile: str, args_dict: dict) -> dict:
         if not src_dir:
             continue
         tif = Path(src_dir) / f"{tile}.tif"
+        png, js = data_dir / f"{tile}_{key}.png", data_dir / f"{tile}_{key}.json"
         if not tif.exists():
+            # no orthophoto here (carrot holds only the newest tiles' GeoTIFFs): keep the
+            # overlay a previous build wrote, so a rebuild for new ids does not lose it
+            if png.exists() and js.exists():
+                rec["layers"][key] = {"png": f"data/{png.name}", "json": f"data/{js.name}"}
             continue
-        write_dop_png(tif, data_dir / f"{tile}_{key}.png", data_dir / f"{tile}_{key}.json",
-                      bounds, a.texture_px, ground_z)
+        write_dop_png(tif, png, js, bounds, a.texture_px, ground_z)
         rec["layers"][key] = {"png": f"data/{tile}_{key}.png",
                               "json": f"data/{tile}_{key}.json"}
 

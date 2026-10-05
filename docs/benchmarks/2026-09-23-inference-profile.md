@@ -376,7 +376,7 @@ is whether the accuracy paid for that is distinguishable from run-to-run noise.
 
 Released checkpoint `work_dirs/clean_forestformer/epoch_3000_converted.pth` over the 28
 labelled test plots (`forainetv2_oneformer3d_infos_test.pkl`), the same setup as
-`benchmark/run_release_eval.sh`, on one idle A100 (carrot GPU 2), one run at a time.
+`benchmark/run_release_eval.sh`, on one idle H100 (carrot GPU 2), one run at a time.
 Because full-plot inference is nondeterministic (see "Equality" above), 0.25 was run at two
 seeds to measure the noise floor before comparing anything to it.
 
