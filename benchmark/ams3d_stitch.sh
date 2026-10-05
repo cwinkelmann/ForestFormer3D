@@ -16,7 +16,7 @@ GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
 cd "$FF3D_ROOT" || exit 1
 source "$GEO_VENV/bin/activate"
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/ams3d_stitch.sh <tile stem>..." >&2; exit 2; }
-OUT=work_dirs/ams3d-mosaic
+OUT="${AMS3D_MOSAIC_OUT:-work_dirs/ams3d-mosaic}"   # override to keep an earlier mosaic intact
 MANIFESTS=(); RESULTS=(); TOTAL=0
 for T in "$@"; do
   MANIFESTS+=("inputs/berlin/sub/$T/split_manifest.json")

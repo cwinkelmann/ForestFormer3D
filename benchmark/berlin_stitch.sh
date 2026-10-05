@@ -19,7 +19,7 @@ set -uo pipefail
 cd /raid/cwinkelmann/ForestFormer3D || exit 1
 source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/berlin_stitch.sh <tile stem>..." >&2; exit 2; }
-OUT=work_dirs/berlin-mosaic
+OUT="${FF3D_MOSAIC_OUT:-work_dirs/berlin-mosaic}"   # override to keep an earlier mosaic intact
 
 MANIFESTS=()
 RESULTS=()

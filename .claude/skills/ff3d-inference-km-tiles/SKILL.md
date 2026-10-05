@@ -114,6 +114,26 @@ split_manifest.json> --results <every split's run --out dir> --out work_dirs/ber
 `work_dirs/berlin-mosaic/<T>_border.json`), `masks`, and — only when `FF3D_BUILDINGS` is
 set — `buildings`.
 
+### Adding tiles to an existing mosaic
+
+Ids are dense across the whole mosaic, so a new tile means re-stitching everything: all
+ids change, every downstream product (viewer octrees, QGIS derived layers, agreement, PDF
+figures) is regenerated. `benchmark/berlin_extend_mosaic.sh <new stems>...` is the one
+detached driver for that: it waits for the uploaded LAS (plus `EXTEND_MARKER`, the
+uploader's "all complete" flag, and for any process matching `EXTEND_WAIT_FOR`, by default
+the previous AMS3D CPU run), stitches and scores the previous mosaic's AMS3D results in the
+background, runs ForestFormer3D on every free GPU in `EXTEND_GPUS` (round-robin, one queue
+per GPU), then SegmentAnyTree (`SAT_STITCH=1`, two queues per GPU) and AMS3D (four CPU
+queues) concurrently, then the three mosaic-wide stitches into
+`work_dirs/{berlin,sat,ams3d}-mosaic-$EXTEND_TAG` (the earlier mosaics stay; `FF3D_BUILDINGS`
+must cover ALL tiles -- fetch the new footprints first and merge), then the three pairwise
+agreements. Stage markers under `work_dirs/logs/extend/` make it resumable. First use
+2026-10-05: the eleven R13 Spandau tiles (`EXTEND_TAG=44`); estimate ~2.5 h FF3D on 5
+GPUs + ~2 h SAT/AMS3D + ~2 h stitches. The border sub-tiles of the EXISTING neighbours were
+split before the new tiles existed, so their halo into the new tile is empty (one-sided
+matching, like the mosaic edge); re-splitting and re-running those neighbours would make
+the seam two-sided at ~1 GPU-h per tile.
+
 ## 3. Watch it
 
 ```bash
