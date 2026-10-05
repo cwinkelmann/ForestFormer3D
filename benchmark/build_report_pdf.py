@@ -48,6 +48,7 @@ DEFAULT_ORDER = [
     "seamless-ids",            # halo + mosaic-wide stitch
     "segmentanytree-berlin",   # comparison method 1
     "ams3d-berlin",            # comparison method 2
+    "berlin-analytics",        # comparisons and analytics across the mosaic (generated)
     "potree-viewer",           # how to look at it
 ]
 

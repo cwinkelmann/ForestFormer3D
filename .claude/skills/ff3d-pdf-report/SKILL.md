@@ -40,7 +40,12 @@ aborts xelatex with an error naming only a temp file.
 5. `berlin-visual-report`, `berlin-dop-overlay` -- figures and orthophoto overlays
 6. `seamless-ids` -- halo + mosaic-wide stitch
 7. `segmentanytree-berlin`, `ams3d-berlin` -- the two comparison methods
-8. `potree-viewer`
+8. `berlin-analytics` -- the GENERATED comparisons chapter: `benchmark/berlin_analytics.py`
+   writes `docs/benchmarks/2026-10-05-berlin-analytics.md` and `assets/analytics/*.png` from the
+   stitched tree tables, border/stitch/mask JSONs, the agreement JSONs under
+   `ALS_Data/berlin_agreement/`, the forest stand map and the tree cadastre. Never edit that
+   markdown by hand -- change the script's `write_doc` and re-run it (a minute), then rebuild.
+9. `potree-viewer`
 
 `RUNBOOK-*.md` and the session log are deliberately NOT in it: a reader-facing report is
 not an operations manual. To add a study, write it as `docs/benchmarks/<date>-<key>.md`

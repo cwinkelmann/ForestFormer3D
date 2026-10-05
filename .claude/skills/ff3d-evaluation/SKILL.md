@@ -193,3 +193,19 @@ For Berlin tiles the mmengine evaluator runs against constant labels, so its num
 meaningless (harmless, but ignore them). The only per-tile quality signal there is the
 report's CHM local-maxima baseline and its decision rule - see `ff3d-inference-km-tiles`
 section 10 and `ff3d-outputs-and-viewers`.
+
+## 8. Mosaic-wide comparisons and analytics (`benchmark/berlin_analytics.py`)
+
+One script, no LAS reads, ~1 minute: per-method tree counts per km tile (grid heatmaps and
+the SAT/FF3D ratio, also per survey footprint -- R12 0.96 vs R13 1.21 on 2026-10-05),
+height / crown / points-per-tree distributions (bimodal heights: canopy ~26 m, understory
+4-7 m), quality flags (flat blobs < 2 m & > 50 m2 = ground labelled leaf; noise-sized < 20
+points), the pooled FF3D-vs-SAT agreement from the per-tile `instance_agreement.py` JSONs
+(copy them from carrot `work_dirs/logs/sat/agreement33/` to `ALS_Data/berlin_agreement/
+ff3d_vs_sat_33/`), seam metrics and stitch counts per method, the building mask per tile,
+predicted p90 height per stand against the 2014 inventory height by dominant species, and
+detection rate + height residual against the tree cadastre (nearest predicted top within
+3 m: ~82 % FF3D, ~86 % SAT, bias ~0, MAE ~4 m, r ~0.5). Output is the report chapter
+`berlin-analytics` (see `ff3d-pdf-report`) plus `assets/analytics/analytics.json`. Agreement
+needs identical points in identical order: the 3-tile AMS3D set from the old un-haloed run
+cannot be compared that way (the 44-tile run computes all three pairs on carrot).
