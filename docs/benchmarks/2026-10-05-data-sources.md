@@ -99,7 +99,12 @@ words, "einen Teil der Bäume in Grünanlagen" -- with species, address, plantin
 height. It does not cover the forest: Berlin's forests are inventoried by stand, not by
 tree, and no per-tree forest inventory is published. On the Tegel and Spandau tiles the
 cadastre would therefore give species-labelled reference trees along streets and in parks
-at the forest edge, and nothing inside it. It has not been fetched or used here.
+at the forest edge, and nothing inside it. It was fetched for the mosaic extent on
+2026-10-05 (`benchmark/fetch_berlin_trees.py` -> `ALS_Data/berlin_trees/baumbestand_berlin.gpkg`:
+9,103 street and 12,349 park trees) and is a layer group of the QGIS project; no comparison
+in this report uses it yet. QGIS 3.44 reported the same feature types as live WFS layers
+unavailable on load although the service answers every request, so the project reads the
+GeoPackage.
 
 The WINMOL 2025 field campaign delineated 974 crowns with species labels inside three
 sample circles (*Probekreise*) in Revier 12 Tegelsee and Revier 13 Spandau

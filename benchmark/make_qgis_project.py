@@ -408,7 +408,7 @@ def write_qgz(path: Path, xml: str) -> None:
 
 
 # ---------------------------------------------------------------------------- project
-def phase_project(als: Path, out: Path, manifest: dict) -> list[Path]:
+def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False) -> list[Path]:
     from pyproj import CRS
 
     wkt = CRS.from_epsg(EPSG).to_wkt()
@@ -497,32 +497,48 @@ def phase_project(als: Path, out: Path, manifest: dict) -> list[Path]:
                                  symbol_fill("214,58,58,255", "0.4", "214,58,58,60", "solid"), bounds, ll, wkt),
                 lid, "ALKIS building footprints", src, "ogr", True)
 
-    def tree_cadastre_group():
-        """Berlin's tree cadastre as LIVE WFS layers: street trees and (part of) the park
-        trees with species, planting year and height -- a species-labelled reference
-        outside the forest. Nothing is downloaded; restrictToRequestBBOX keeps each
-        request to the current view, and the group starts unchecked because it needs
-        the network (checked 2026-10-05: 9,103 + 12,349 trees inside this mosaic)."""
-        url = "https://gdi.berlin.de/services/wfs/baumbestand"
+    def tree_cadastre_group(live_wfs: bool):
+        """Berlin's tree cadastre: street trees and (part of) the park trees with species,
+        planting year and height -- a species-labelled reference outside the forest
+        (9,103 + 12,349 trees inside this mosaic, checked 2026-10-05).
+
+        Read from the GeoPackage benchmark/fetch_berlin_trees.py writes, through the OGR
+        provider like every other layer. QGIS 3.44 reported the same feature types as
+        LIVE WFS layers "unavailable" on project load although the service answers every
+        request QGIS makes; its namespace is the bare word ``baumbestand`` rather than a
+        URL, a known trigger for the WFS provider's typename resolution, and that could
+        not be verified headless on this Mac. ``--live-wfs`` keeps the live form for a
+        QGIS build where it works."""
+        rows = (("cadastre_street", "strassenbaeume", "baumbestand:strassenbaeume",
+                 "street trees (Strassenbaeume)", "255,170,0,230"),
+                ("cadastre_park", "anlagenbaeume", "baumbestand:anlagenbaeume",
+                 "park trees (Anlagenbaeume)", "60,200,90,230"))
+        gpkg = als / "berlin_trees" / "baumbestand_berlin.gpkg"
 
         def body():
-            for key, typename, label, colour in (
-                    ("cadastre_street", "baumbestand:strassenbaeume", "street trees (Strassenbaeume)", "255,170,0,230"),
-                    ("cadastre_park", "baumbestand:anlagenbaeume", "park trees (Anlagenbaeume)", "60,200,90,230")):
-                # The conservative spelling QGIS itself writes for a WFS layer: let it negotiate
-                # the version, no paging hint (the service pages anyway, QGIS detects it).
-                src = (f"restrictToRequestBBOX='1' srsname='EPSG:{EPSG}' typename='{typename}' "
-                       f"url='{url}' version='auto'")
+            for key, layer, typename, label, colour in rows:
+                nm = f"{label}, size = height"
+                sym = symbol_marker(colour, 'coalesce("baumhoehe", 10) / 5')
                 lid = layer_id(key)
-                T.layer(vector_layer_xml(lid, f"{label}, size = height", src, "Point",
-                                         symbol_marker(colour, 'coalesce("baumhoehe", 10) / 5'),
-                                         bounds, ll, wkt, provider="WFS"),
-                        lid, f"{label}, size = height", src, "WFS", False)
+                if live_wfs:
+                    src = (f"restrictToRequestBBOX='1' srsname='EPSG:{EPSG}' typename='{typename}' "
+                           f"url='https://gdi.berlin.de/services/wfs/baumbestand' version='auto'")
+                    T.layer(vector_layer_xml(lid, nm, src, "Point", sym, bounds, ll, wkt, provider="WFS"),
+                            lid, nm, src, "WFS", False)
+                else:
+                    src = f"{rel(gpkg)}|layername={layer}"
+                    T.layer(vector_layer_xml(lid, nm, src, "Point", sym, bounds, ll, wkt),
+                            lid, nm, src, "ogr", True)
 
-        T.group("Berlin tree cadastre (live WFS, dl-de/zero-2-0)", False, False, body)
+        if live_wfs:
+            T.group("Berlin tree cadastre (live WFS, dl-de/zero-2-0)", False, False, body)
+        elif gpkg.exists():
+            T.group("Berlin tree cadastre (Baumbestand, dl-de/zero-2-0)", True, False, body)
+        else:
+            print(f"  tree cadastre: {gpkg} missing (benchmark/fetch_berlin_trees.py), group skipped")
 
     # tree order = draw order top-down: vectors over rasters over orthophotos over basemap
-    tree_cadastre_group()
+    tree_cadastre_group(live_wfs)
     buildings_layer()
     for key in ("ff3d", "sat", "ams3d", "ff3d_masked"):
         if key in manifest["methods"]:
@@ -562,6 +578,10 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, default=None, help="default <als-data>/berlin_qgis")
     ap.add_argument("--gdal-bin", type=Path, default=Path("/opt/local/bin"))
     ap.add_argument("--phase", choices=["derived", "project", "all"], default="all")
+    ap.add_argument("--live-wfs", action="store_true",
+                    help="reference the Berlin tree cadastre as live WFS layers instead of the "
+                         "GeoPackage from benchmark/fetch_berlin_trees.py (QGIS 3.44 on this Mac "
+                         "reports the WFS form unavailable on load)")
     a = ap.parse_args(argv)
     out = a.out or a.als_data / "berlin_qgis"
     if not a.als_data.is_dir():
@@ -583,7 +603,7 @@ def main(argv=None) -> int:
         manifest = json.loads(mp.read_text())
     if a.phase in ("project", "all"):
         print("== project")
-        for p in phase_project(a.als_data, out, manifest):
+        for p in phase_project(a.als_data, out, manifest, live_wfs=a.live_wfs):
             print(f"  wrote {p}")
     return 0
 
