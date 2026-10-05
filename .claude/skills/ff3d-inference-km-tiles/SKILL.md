@@ -106,6 +106,13 @@ bash benchmark/berlin_stitch.sh 3dm_33_381_5829_1_be 3dm_33_381_5830_1_be 3dm_33
 FF3D_BUILDINGS=/path/to/alkis_buildings.gpkg bash benchmark/berlin_stitch.sh ...
 ```
 
+Both stitch scripts pass `--min-height "${FF3D_MIN_HEIGHT:-2}"`: instances shorter than 2 m
+(grass on meadows labelled leaf -- 1.6 % of the 33-tile instances, the flat blobs of the
+viewer) are unassigned mosaic-wide before the tables are written (`ff3d_geo.filter`;
+`stitch.json` records `min_height`/`n_short_removed`, each report a `height_filter` block).
+`FF3D_MIN_HEIGHT=0` keeps everything; `python -m ff3d_geo filter --las <T>.las --out <dir>`
+applies the rule to an existing result and regenerates its products.
+
 Give it **every** tile that was split/run for this mosaic (not a subset — the manifest and
 results dir of each one feeds the same `stitch` call, so a tile left out simply never gets
 matched against its neighbours). It runs `python -m ff3d_geo stitch --manifest <every split's

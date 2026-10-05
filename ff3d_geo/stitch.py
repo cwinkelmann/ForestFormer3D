@@ -774,7 +774,7 @@ def _write_tree_table(rows: list[dict], crs, gpkg_path: Path) -> int:
 
 def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
            min_shared: int = 20, runtime_s: float | None = None,
-           epsg: int = EPSG) -> dict:
+           epsg: int = EPSG, min_height: float = 0.0) -> dict:
     """Unify sub-tile instances over their halo overlaps and rewrite the km tiles.
 
     ``manifests`` are ``split_manifest.json`` paths, ``results_dirs`` the directories
@@ -912,12 +912,34 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
     rows_by_tile, n_cross_km_trees = _mosaic_tree_rows(
         parts_by_tile, ground_by_tile, extent_by_tile)
 
+    # Instances shorter than min_height (grass on meadows labelled leaf, see
+    # ff3d_geo.filter) are dropped mosaic-wide on the rows the tables are about to
+    # report, then unassigned in every km LAS they reach into, so LAS, tables, rasters
+    # and reports agree. Ids are not renumbered: n_trees counts what is left.
+    filter_by_tile: dict[str, dict] = {}
+    if min_height > 0:
+        from ff3d_geo.filter import drop_instances, short_instance_ids
+
+        short = set()
+        for rows in rows_by_tile.values():
+            short.update(short_instance_ids(rows, min_height))
+        for source_stem, tile in tiles.items():
+            in_tile = [gid for gid in short if gid in parts_by_tile[source_stem]]
+            filter_by_tile[source_stem] = drop_instances(tile["las"], tile["las"], in_tile,
+                                                         min_height=min_height)
+            filter_by_tile[source_stem]["instances_removed_owned"] = sum(
+                1 for r in rows_by_tile[source_stem] if r["tree_id"] in short)
+            rows_by_tile[source_stem] = [r for r in rows_by_tile[source_stem]
+                                         if r["tree_id"] not in short]
+        n_trees -= len(short)
+
     for source_stem, tile in tiles.items():
         out_las = Path(tile["las"])
         out_gpkg = Path(tile["gpkg"])
         tile["n_trees_in_tile"] = _write_tree_table(
             rows_by_tile[source_stem], crs_by_tile[source_stem], out_gpkg)
-        report = build_report(out_las, out_gpkg, runtime_s=runtime_s)
+        report = build_report(out_las, out_gpkg, runtime_s=runtime_s,
+                              height_filter=filter_by_tile.get(source_stem))
         # build_report counts the distinct treeIDs in the LAS, which counts a km-border
         # tree in BOTH of the tiles it reaches into. The tree table is the authority
         # here, so the report reports the trees this tile OWNS (the mosaic's per-tile
@@ -934,6 +956,8 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
         "n_unified": int(n_unified),
         "n_cross_km": int(n_cross_km),
         "n_cross_km_trees": int(n_cross_km_trees),
+        "min_height": float(min_height),
+        "n_short_removed": int(sum(f["instances_removed_owned"] for f in filter_by_tile.values())),
         "tiles": tiles,
     }
     (out_dir / "stitch.json").write_text(json.dumps({

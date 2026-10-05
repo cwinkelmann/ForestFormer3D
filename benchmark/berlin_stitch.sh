@@ -20,6 +20,7 @@ cd /raid/cwinkelmann/ForestFormer3D || exit 1
 source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/berlin_stitch.sh <tile stem>..." >&2; exit 2; }
 OUT="${FF3D_MOSAIC_OUT:-work_dirs/berlin-mosaic}"   # override to keep an earlier mosaic intact
+MIN_H="${FF3D_MIN_HEIGHT:-2}"                       # drop instances shorter than this (m); 0 keeps all
 
 MANIFESTS=()
 RESULTS=()
@@ -43,7 +44,7 @@ for T in "$@"; do
 done
 
 echo "=== $(date +%FT%T) mosaic: stitch ($# tiles) ==="
-python -m ff3d_geo stitch --manifest "${MANIFESTS[@]}" --results "${RESULTS[@]}" --out "$OUT" \
+python -m ff3d_geo stitch --manifest "${MANIFESTS[@]}" --results "${RESULTS[@]}" --out "$OUT" --min-height "$MIN_H" \
   --runtime-s "$TOTAL_RUNTIME" \
   || { echo "!!! mosaic stitch failed"; exit 1; }
 echo "=== $(date +%FT%T) mosaic: stitch done ==="

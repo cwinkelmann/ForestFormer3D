@@ -9,6 +9,8 @@
 # Steps, each skipped when its marker work_dirs/logs/potree/rebuild-<TAG>.<step>.done exists:
 #   wait      until benchmark/berlin_extend_mosaic.sh is gone and its agree.done marker is set
 #   bytile    work_dirs/<m>-mosaic-<TAG>-by-tile/<T>/ symlink layouts (build_potree_site wants <dir>/<T>/<T>.las)
+#   filter    drop instances under FF3D_MIN_HEIGHT (2 m) from any mosaic stitched without
+#             --min-height, recompute border metrics and the agreements (ff3d_geo.filter)
 #   octrees   PotreeConverter per tile and method into work_dirs/logs/potree/out_<m><TAG>/, three methods in parallel
 #   site      a fresh site dir next to the served one: viewer files copied from it, the
 #             orthophoto overlays of tiles whose GeoTIFF is not on carrot carried over,
@@ -16,7 +18,7 @@
 #   swap      served dir -> <served>_<old tiles>tiles, fresh dir -> served, nginx restarted,
 #             a few HTTP checks against the container
 #
-# Environment: TAG (arg 1), FF3D_ROOT, GEO_VENV, POTREE_SITE (/raid/cwinkelmann/potree/berlin_potree_v2),
+# Environment: TAG (arg 1), FF3D_MIN_HEIGHT (2), FF3D_ROOT, GEO_VENV, POTREE_SITE (/raid/cwinkelmann/potree/berlin_potree_v2),
 # POTREE_DOP21 / POTREE_DOP25 (inputs/berlin_dop/dop_2021_rgb, dop_2025_sommer), POTREE_URL
 # (http://10.188.1.1:8080), POTREE_CONTAINER (ff3d-potree).
 set -uo pipefail
@@ -62,6 +64,52 @@ if ! done_marker bytile; then
     done
   done
   mark bytile
+fi
+
+# ------------------------------------------------------------------------------ filter
+# Instances shorter than $FF3D_MIN_HEIGHT (default 2 m; grass on meadows labelled leaf,
+# ff3d_geo.filter) must be gone from every mosaic before octrees and overlays are built.
+# A stitch run with --min-height already did it (stitch.json records min_height); a
+# mosaic stitched without it is filtered here in place, tile by tile, and its border
+# metrics and the three agreements are recomputed since the ids changed.
+MIN_H="${FF3D_MIN_HEIGHT:-2}"
+if ! done_marker filter && [ "$MIN_H" != "0" ]; then
+  refiltered=0
+  for M in berlin sat ams3d; do
+    D="work_dirs/$M-mosaic-$TAG"
+    have=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('min_height', 0))" "$D/stitch.json" 2>/dev/null || echo 0)
+    if [ "$have" != "0" ] && [ "$have" != "0.0" ]; then log "filter: $M-mosaic-$TAG already stitched with min_height $have"; continue; fi
+    log "filter: $M-mosaic-$TAG, < $MIN_H m, ${#TILES[@]} tiles"
+    printf '%s\n' "${TILES[@]}" | xargs -P 8 -I{} sh -c \
+      "python -m ff3d_geo filter --las $D/{}.las --out $D --min-height $MIN_H > $LOG/filter-$TAG-$M-{}.log 2>&1 || echo '!!! filter $M {} failed'; \
+       python -m ff3d_geo border-check --las $D/{}.las --json $D/{}_border.json > /dev/null 2>&1 || echo '!!! border-check $M {} failed'"
+    python3 - "$D/stitch.json" "$MIN_H" <<'EOF2'
+import json, sys
+p, mh = sys.argv[1], float(sys.argv[2])
+d = json.load(open(p)); d["min_height"] = mh; d["filtered_after_stitch"] = True
+json.dump(d, open(p, "w"), indent=2)
+EOF2
+    refiltered=$((refiltered + 1))
+  done
+  if [ "$refiltered" -gt 0 ]; then
+    log "filter: recomputing the agreements on the filtered mosaics"
+    rm -f "work_dirs/logs/extend/agreement-$TAG-"*/*.json
+    PIDS=()
+    for pair in "berlin:ForestFormer3D:sat:SegmentAnyTree" "berlin:ForestFormer3D:ams3d:AMS3D" "sat:SegmentAnyTree:ams3d:AMS3D"; do
+      (
+        IFS=: read -r A LA B LB <<< "$pair"
+        OUTD="work_dirs/logs/extend/agreement-$TAG-$A-$B"; mkdir -p "$OUTD"
+        for T in "${TILES[@]}"; do
+          python3 benchmark/instance_agreement.py --a "work_dirs/$A-mosaic-$TAG/$T.las" --label-a "$LA" \
+            --b "work_dirs/$B-mosaic-$TAG/$T.las" --label-b "$LB" --json "$OUTD/$T.json" > "$OUTD/$T.txt" 2>&1 \
+            || echo "!!! agreement $A vs $B $T failed"
+        done
+      ) &
+      PIDS+=($!)
+    done
+    wait "${PIDS[@]}"
+  fi
+  mark filter
 fi
 
 # ---------------------------------------------------------------------------- octrees

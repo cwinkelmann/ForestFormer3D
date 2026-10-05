@@ -177,7 +177,7 @@ if ! done_marker stitch; then
     for T in "${ALL[@]}"; do MAN+=("inputs/berlin/sub/$T/split_manifest.json"); RES+=("work_dirs/sat-$T/sub"); done
     TOTAL=$(grep -h "tile done" work_dirs/logs/sat/sat-gpu*.log 2>/dev/null | sed "s/.*run //;s/s).*//" | grep -E '^[0-9]+$' | paste -sd+ | bc)
     echo "=== $(date +%FT%T) SAT stitch (${#ALL[@]} tiles, runtime ${TOTAL:-0}s) ==="
-    python -m ff3d_geo stitch --manifest "${MAN[@]}" --results "${RES[@]}" --out "$SOUT" --runtime-s "${TOTAL:-0}" \
+    python -m ff3d_geo stitch --manifest "${MAN[@]}" --results "${RES[@]}" --out "$SOUT" --runtime-s "${TOTAL:-0}" --min-height "${FF3D_MIN_HEIGHT:-2}" \
       || { echo "!!! SAT stitch failed"; exit 1; }
     for T in "${ALL[@]}"; do
       python -m ff3d_geo border-check --las "$SOUT/$T.las" --json "$SOUT/${T}_border.json" || echo "!!! $T SAT border-check failed"

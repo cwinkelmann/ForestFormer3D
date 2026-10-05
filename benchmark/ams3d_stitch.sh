@@ -17,6 +17,7 @@ cd "$FF3D_ROOT" || exit 1
 source "$GEO_VENV/bin/activate"
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/ams3d_stitch.sh <tile stem>..." >&2; exit 2; }
 OUT="${AMS3D_MOSAIC_OUT:-work_dirs/ams3d-mosaic}"   # override to keep an earlier mosaic intact
+MIN_H="${FF3D_MIN_HEIGHT:-2}"                       # drop instances shorter than this (m); 0 keeps all
 MANIFESTS=(); RESULTS=(); TOTAL=0
 for T in "$@"; do
   MANIFESTS+=("inputs/berlin/sub/$T/split_manifest.json")
@@ -26,7 +27,7 @@ for T in "$@"; do
   TOTAL=$((TOTAL + R))
 done
 echo "=== $(date +%FT%T) ams3d mosaic: stitch ($# tiles, runtime ${TOTAL}s) ==="
-python -m ff3d_geo stitch --manifest "${MANIFESTS[@]}" --results "${RESULTS[@]}" --out "$OUT" --runtime-s "$TOTAL" \
+python -m ff3d_geo stitch --manifest "${MANIFESTS[@]}" --results "${RESULTS[@]}" --out "$OUT" --runtime-s "$TOTAL" --min-height "$MIN_H" \
   || { echo "!!! ams3d stitch failed"; exit 1; }
 echo "=== $(date +%FT%T) stitch done ==="
 for T in "$@"; do

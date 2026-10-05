@@ -639,6 +639,21 @@ def build_parser() -> argparse.ArgumentParser:
     sti.add_argument("--epsg", type=int, default=DEFAULT_EPSG,
                      help="CRS of the written km tiles; must be the one las_to_ply used "
                           "(default: %(default)s)")
+    sti.add_argument("--min-height", type=float, default=0.0, metavar="M",
+                     help="drop instances shorter than M metres (top minus ground at the "
+                          "stem) mosaic-wide before the tables are written; 0 = keep all "
+                          "(default: %(default)s). Production uses 2: see ff3d_geo.filter")
+
+    flt = sub.add_parser("filter", help="drop instances shorter than a minimum height "
+                                        "from a result LAS and regenerate its products")
+    flt.add_argument("--las", required=True, type=Path, help="result LAS (<T>.las)")
+    flt.add_argument("--out", required=True, type=Path,
+                     help="directory for the filtered <T>.las, _trees.gpkg, masks and report "
+                          "(may be the LAS's own directory: the rewrite is atomic)")
+    flt.add_argument("--min-height", type=float, default=2.0, metavar="M",
+                     help="instances with height < M m are unassigned (default: %(default)s)")
+    flt.add_argument("--cell", type=float, default=0.5, help="raster cell size in metres (default: %(default)s)")
+    flt.add_argument("--no-masks", action="store_true", help="skip the GeoTIFF masks and crowns")
 
     mrg = sub.add_parser("merge", help="sub-tile result LAS + GeoPackages -> one km tile")
     mrg.add_argument("--las", required=True, type=Path, nargs="+",
@@ -813,7 +828,9 @@ def main(argv: list[str] | None = None) -> int:
 
         info = stitch(args.manifest, args.results, args.out, iou_threshold=args.iou,
                       min_shared=args.min_shared, runtime_s=args.runtime_s,
-                      epsg=args.epsg)
+                      epsg=args.epsg, min_height=args.min_height)
+        if args.min_height > 0:
+            print(f"height filter < {args.min_height} m: {info['n_short_removed']} instances dropped")
         for stem, tile in info["tiles"].items():
             print(f"wrote {tile['las']} ({tile['n_points']} points, "
                   f"{tile['n_trees_in_tile']} trees in tile)")
@@ -910,6 +927,32 @@ def main(argv: list[str] | None = None) -> int:
         report_json = out_dir / f"{stem}_report.json"
         rep = build_report(out_las, gpkg, buildings=info)
         write_report(rep, report_json, report_json.with_suffix(".md"))
+        print(f"wrote {report_json}")
+        return 0
+
+    if args.command == "filter":
+        from ff3d_geo.filter import filter_short_instances
+        from ff3d_geo.report import build_report, write_report
+        from ff3d_geo.trees import trees_to_gpkg
+
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(args.las).stem
+        out_las = out_dir / f"{stem}.las"
+        info = filter_short_instances(args.las, out_las, min_height=args.min_height)
+        print(f"wrote {out_las} ({info['instances_removed']}/{info['instances_before']} instances "
+              f"under {args.min_height} m removed, {info['points_unassigned']} points unassigned)")
+        gpkg = out_dir / f"{stem}_trees.gpkg"
+        print(f"wrote {gpkg} ({trees_to_gpkg(out_las, gpkg)} trees)")
+        if not args.no_masks:
+            from ff3d_geo.raster import las_to_masks
+
+            masks = las_to_masks(out_las, out_dir, cell_m=args.cell, prefix=stem)
+            print(f"wrote {masks['instance']}")
+            print(f"wrote {masks['crowns']} ({masks['n_trees']} trees)")
+        report_json = out_dir / f"{stem}_report.json"
+        rep_ = build_report(out_las, gpkg, height_filter=info)
+        write_report(rep_, report_json, report_json.with_suffix(".md"))
         print(f"wrote {report_json}")
         return 0
 

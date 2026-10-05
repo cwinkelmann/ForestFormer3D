@@ -502,8 +502,14 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
               "cuts more of them (section 4).", "",
               "The flat-blob flag is the artefact seen in the viewer: an instance with almost no height but a "
               "large footprint is bare ground (ALS class 2) that the model labelled as leaf, not a tree. The "
-              "noise-sized flag counts instances too small to be a crown at 20-30 pts/m². Both are candidates "
-              "for a post-filter; neither is applied anywhere in this report.", ""]
+              "noise-sized flag counts instances too small to be a crown at 20-30 pts/m². "
+              + (f"The products of this chapter went through the stitch's minimum-height rule ({S['min_height']} m), "
+                 f"which removed {fmt(S['n_short_removed'])} instances mosaic-wide before any table was written; "
+                 "the counts above are after it, and the flat-blob row is what the 2 m rule does not reach "
+                 "(instances taller than 2 m with a wide, flat hull)."
+                 if S.get("min_height") else
+                 "Both are candidates for a post-filter; neither is applied to the products this chapter "
+                 "describes (the minimum-height rule of the methods chapter applies from the 44-tile stitch on)."), ""]
     if S.get("three_way_tiles"):
         lines += [f"On the {len(S['three_way_tiles'])} tiles all three methods cover "
                   f"({', '.join(tile_key(t) for t in S['three_way_tiles'])}):", "",
@@ -750,6 +756,8 @@ def main(argv=None) -> int:
         sj = als / METHODS[k][1] / "stitch.json"
         if sj.exists():
             s = json.loads(sj.read_text())
+            if k == "ff3d" and s.get("min_height"):
+                S["min_height"] = float(s["min_height"]); S["n_short_removed"] = int(s.get("n_short_removed", 0))
             S["stitch"][k] = {"n_trees": s["n_trees"], "n_unified": s["n_unified"], "n_cross_km": s["n_cross_km"],
                               "touching_mean": float(np.mean([b["touching_frac"] for b in border[k].values()])),
                               "strip_mean": float(np.mean([b["strip_excess_pp"] for b in border[k].values()]))}

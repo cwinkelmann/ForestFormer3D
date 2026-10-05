@@ -34,29 +34,11 @@ def ground_surface(x, y, z, semantic, classification, cell: float) -> tuple[np.n
     return ground, extent
 
 
-def trees_to_gpkg(las_path, gpkg_path, ground_grid_m: float = 1.0) -> int:
-    """Write one point row per ``treeID >= 0`` into layer ``trees``; return the row count.
-
-    Columns: tree_id, x, y (stem = median of the tree's lowest 1 m of points),
-    top_z, height (top_z minus ground z at the stem cell), crown_area_m2
-    (2D convex hull; 0.0 when fewer than 3 distinct points), n_points, mean_score.
-    CRS = the LAS CRS.
-    """
-    las = laspy.read(str(las_path))
-    x = np.asarray(las.x, dtype=np.float64)
-    y = np.asarray(las.y, dtype=np.float64)
-    z = np.asarray(las.z, dtype=np.float64)
-    tree_id = np.asarray(las.treeID, dtype=np.int64)
-    semantic = np.asarray(las.semantic, dtype=np.int64)
-    classification = np.asarray(las.classification, dtype=np.int64)
-    score = np.asarray(las.score, dtype=np.float64)
-    crs = las.header.parse_crs()
-
-    ground, extent = ground_surface(x, y, z, semantic, classification, ground_grid_m)
-
-    # Group the points by tree with ONE sort rather than a `tree_id == tid` pass per
-    # tree: a km tile has ~31 k instances and ~23 M points, so the naive loop costs
-    # ~31 k x 23 M comparisons (measured: 14 minutes of CPU for a single km tile).
+def instance_rows(x, y, z, tree_id, score, ground, extent) -> list[dict]:
+    """One row per ``treeID >= 0``: stem (median of the lowest 1 m of points), top_z,
+    height against ``ground`` at the stem cell, crown area, n_points, mean_score.
+    Shared by :func:`trees_to_gpkg` and :mod:`ff3d_geo.filter`, so the height a filter
+    decides on is the height the table reports."""
     order = np.argsort(tree_id, kind="stable")
     sorted_ids = tree_id[order]
     first_real = int(np.searchsorted(sorted_ids, 0, side="left"))
@@ -65,7 +47,6 @@ def trees_to_gpkg(las_path, gpkg_path, ground_grid_m: float = 1.0) -> int:
     stops = np.append(starts[1:], sorted_ids.size)
 
     rows: list[dict] = []
-    geoms: list[Point] = []
     for tid, start, stop in zip(ids, starts, stops):
         member = order[start:stop]
         tx, ty, tz = x[member], y[member], z[member]
@@ -93,8 +74,35 @@ def trees_to_gpkg(las_path, gpkg_path, ground_grid_m: float = 1.0) -> int:
                 "mean_score": float(score[member].mean()),
             }
         )
-        geoms.append(Point(stem_x, stem_y))
 
+    return rows
+
+
+def trees_to_gpkg(las_path, gpkg_path, ground_grid_m: float = 1.0) -> int:
+    """Write one point row per ``treeID >= 0`` into layer ``trees``; return the row count.
+
+    Columns: tree_id, x, y (stem = median of the tree's lowest 1 m of points),
+    top_z, height (top_z minus ground z at the stem cell), crown_area_m2
+    (2D convex hull; 0.0 when fewer than 3 distinct points), n_points, mean_score.
+    CRS = the LAS CRS.
+    """
+    las = laspy.read(str(las_path))
+    x = np.asarray(las.x, dtype=np.float64)
+    y = np.asarray(las.y, dtype=np.float64)
+    z = np.asarray(las.z, dtype=np.float64)
+    tree_id = np.asarray(las.treeID, dtype=np.int64)
+    semantic = np.asarray(las.semantic, dtype=np.int64)
+    classification = np.asarray(las.classification, dtype=np.int64)
+    score = np.asarray(las.score, dtype=np.float64)
+    crs = las.header.parse_crs()
+
+    ground, extent = ground_surface(x, y, z, semantic, classification, ground_grid_m)
+
+    # Group the points by tree with ONE sort rather than a `tree_id == tid` pass per
+    # tree: a km tile has ~31 k instances and ~23 M points, so the naive loop costs
+    # ~31 k x 23 M comparisons (measured: 14 minutes of CPU for a single km tile).
+    rows = instance_rows(x, y, z, tree_id, score, ground, extent)
+    geoms = [Point(row["x"], row["y"]) for row in rows]
     frame = {col: [row[col] for row in rows] for col in TREE_COLUMNS}
     gdf = gpd.GeoDataFrame(frame, geometry=gpd.GeoSeries(geoms, crs=crs), crs=crs)
     if not rows:

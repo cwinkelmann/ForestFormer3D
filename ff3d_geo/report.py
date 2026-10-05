@@ -27,12 +27,14 @@ def _stats(values: np.ndarray) -> dict | None:
 
 
 def build_report(las_path, gpkg_path, runtime_s: float | None = None,
-                 buildings: dict | None = None) -> dict:
+                 buildings: dict | None = None, height_filter: dict | None = None) -> dict:
     """Build the ``<stem>_report.json`` content from a result LAS and its GeoPackage.
 
     ``buildings`` is the dict returned by :func:`ff3d_geo.buildings.mask_buildings`
     when the LAS has been through the ALKIS building mask; it is carried into the
-    report's ``buildings`` block and the markdown's "Buildings" row.
+    report's ``buildings`` block and the markdown's "Buildings" row. ``height_filter``
+    is the dict :mod:`ff3d_geo.filter` returns when instances below a minimum height
+    were dropped; it becomes the ``height_filter`` block and a "Height filter" row.
     """
     from ff3d_geo.buildings import SEMANTIC_BUILDING
 
@@ -91,6 +93,8 @@ def build_report(las_path, gpkg_path, runtime_s: float | None = None,
         block["points_masked"] = block.get("points_masked", n_building_points)
         block["building_points_in_las"] = n_building_points
         report["buildings"] = block
+    if height_filter is not None:
+        report["height_filter"] = dict(height_filter)
     report["recommendation"] = recommend(report)
     return report
 
@@ -157,6 +161,12 @@ def report_markdown(report: dict) -> str:
         lines.append(
             f"| Buildings (ALKIS footprints) | {removed_str} instances removed, "
             f"{buildings.get('points_masked', 0)} points masked (semantic 3){partial_str} |"
+        )
+    hf = report.get("height_filter")
+    if hf:
+        lines.append(
+            f"| Height filter (< {hf.get('min_height')} m) | {hf.get('instances_removed_owned', hf.get('instances_removed'))} "
+            f"instances removed, {hf.get('points_unassigned', 0)} points unassigned |"
         )
     lines += [
         "",
