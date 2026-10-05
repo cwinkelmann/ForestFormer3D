@@ -90,6 +90,11 @@ def test_layers_parse_and_carry_source_and_extent():
     v = _parse(vector_layer_xml("v1", "crowns", "./derived/c.gpkg|layername=crowns", "Polygon",
                                 symbol_fill("0,0,0,255"), b, ll, FAKE_WKT))
     assert v.get("geometry") == "Polygon" and v.findtext("provider") == "ogr"
+    # a live WFS layer (the Berlin tree cadastre) carries its request string as the datasource
+    src = "restrictToRequestBBOX='1' srsname='EPSG:25833' typename='baumbestand:strassenbaeume' url='https://gdi.berlin.de/services/wfs/baumbestand' version='2.0.0'"
+    w = _parse(vector_layer_xml("w1", "street trees", src, "Point", symbol_marker("0,0,0,255"), b, ll, FAKE_WKT,
+                                provider="WFS"))
+    assert w.findtext("provider") == "WFS" and w.findtext("datasource") == src
 
 
 def test_project_references_only_layers_it_defines(tmp_path):

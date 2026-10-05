@@ -330,7 +330,8 @@ def symbol_marker(color: str, size_expr: str | None = None) -> str:
             f"</Option>{dd}</layer></symbol>")
 
 
-def vector_layer_xml(lid: str, name: str, source: str, geometry: str, symbol: str, bounds, ll, wkt: str) -> str:
+def vector_layer_xml(lid: str, name: str, source: str, geometry: str, symbol: str, bounds, ll, wkt: str,
+                     provider: str = "ogr") -> str:
     return (f"<maplayer type=\"vector\" geometry=\"{geometry}\" autoRefreshTime=\"0\" autoRefreshMode=\"Disabled\" "
             f"hasScaleBasedVisibilityFlag=\"0\" maxScale=\"0\" minScale=\"1e+08\" simplifyDrawingHints=\"1\" "
             f"simplifyDrawingTol=\"1\" simplifyMaxScale=\"1\" simplifyLocal=\"1\" simplifyAlgorithm=\"0\" "
@@ -338,7 +339,7 @@ def vector_layer_xml(lid: str, name: str, source: str, geometry: str, symbol: st
             f"refreshOnNotifyEnabled=\"0\" refreshOnNotifyMessage=\"\" legendPlaceholderImage=\"\">"
             f"{extent_xml(bounds, ll)}<id>{lid}</id><datasource>{esc(source)}</datasource>"
             f"<layername>{esc(name)}</layername><srs>{srs_xml(wkt)}</srs>"
-            f"<provider encoding=\"UTF-8\">ogr</provider>"
+            f"<provider encoding=\"UTF-8\">{provider}</provider>"
             f"<map-layer-style-manager current=\"default\"><map-layer-style name=\"default\"/></map-layer-style-manager>"
             f"<renderer-v2 type=\"singleSymbol\" forceraster=\"0\" symbollevels=\"0\" enableorderby=\"0\" referencescale=\"-1\">"
             f"<symbols>{symbol}</symbols><rotation/><sizescale/></renderer-v2>"
@@ -496,7 +497,30 @@ def phase_project(als: Path, out: Path, manifest: dict) -> list[Path]:
                                  symbol_fill("214,58,58,255", "0.4", "214,58,58,60", "solid"), bounds, ll, wkt),
                 lid, "ALKIS building footprints", src, "ogr", True)
 
+    def tree_cadastre_group():
+        """Berlin's tree cadastre as LIVE WFS layers: street trees and (part of) the park
+        trees with species, planting year and height -- a species-labelled reference
+        outside the forest. Nothing is downloaded; restrictToRequestBBOX keeps each
+        request to the current view, and the group starts unchecked because it needs
+        the network (checked 2026-10-05: 9,103 + 12,349 trees inside this mosaic)."""
+        url = "https://gdi.berlin.de/services/wfs/baumbestand"
+
+        def body():
+            for key, typename, label, colour in (
+                    ("cadastre_street", "baumbestand:strassenbaeume", "street trees (Strassenbaeume)", "255,170,0,230"),
+                    ("cadastre_park", "baumbestand:anlagenbaeume", "park trees (Anlagenbaeume)", "60,200,90,230")):
+                src = (f"restrictToRequestBBOX='1' srsname='EPSG:{EPSG}' typename='{typename}' "
+                       f"url='{url}' version='2.0.0' pagingEnabled='true'")
+                lid = layer_id(key)
+                T.layer(vector_layer_xml(lid, f"{label}, size = height", src, "Point",
+                                         symbol_marker(colour, 'coalesce("baumhoehe", 10) / 5'),
+                                         bounds, ll, wkt, provider="WFS"),
+                        lid, f"{label}, size = height", src, "WFS", False)
+
+        T.group("Berlin tree cadastre (live WFS, dl-de/zero-2-0)", False, False, body)
+
     # tree order = draw order top-down: vectors over rasters over orthophotos over basemap
+    tree_cadastre_group()
     buildings_layer()
     for key in ("ff3d", "sat", "ams3d", "ff3d_masked"):
         if key in manifest["methods"]:
