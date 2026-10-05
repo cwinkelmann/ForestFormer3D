@@ -63,8 +63,14 @@ data infrastructure.
 | Coverage | **16,257 footprints over all 33 tiles** since 2026-10-05. The first fetch (2026-09-23) covered 23 tiles; the ten others were added on 2026-10-05 and the building mask re-run for them. Five tiles genuinely contain no building (376_5827, 376_5828, 377_5827, 377_5828, 381_5828). |
 | Use | `ff3d_geo buildings`: every predicted point inside a buffered footprint becomes class "building", an instance mostly inside footprints is dropped (`--min-roof-fraction`), surviving ids are not renumbered |
 
-Any "buildings masked" figure quoted before 2026-10-05 was computed with ten tiles
-unmasked and should be read accordingly.
+With all 33 tiles covered, the mask removes **35,480 of the 832,130 ForestFormer3D trees
+(4.26 %)**, leaving 796,650 -- counted as distinct tree ids across the mosaic. Count ids,
+not table rows: the stitched per-tile tree tables list a tree straddling a km border once,
+in the tile holding most of it, whereas the mask step regenerates each tile's table from
+that tile's own LAS and lists such a tree on both sides (7,134 double-listed rows). The
+densest built-up tiles lose the most: 383_5827 40 % of its "trees" (5,330 instances),
+383_5826 3,982, 380_5830 3,800. Any "buildings masked" figure quoted before 2026-10-05
+was computed with ten tiles unmasked and is superseded by these numbers.
 
 ## 4. Models
 

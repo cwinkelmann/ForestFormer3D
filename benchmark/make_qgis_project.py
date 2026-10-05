@@ -509,8 +509,10 @@ def phase_project(als: Path, out: Path, manifest: dict) -> list[Path]:
             for key, typename, label, colour in (
                     ("cadastre_street", "baumbestand:strassenbaeume", "street trees (Strassenbaeume)", "255,170,0,230"),
                     ("cadastre_park", "baumbestand:anlagenbaeume", "park trees (Anlagenbaeume)", "60,200,90,230")):
+                # The conservative spelling QGIS itself writes for a WFS layer: let it negotiate
+                # the version, no paging hint (the service pages anyway, QGIS detects it).
                 src = (f"restrictToRequestBBOX='1' srsname='EPSG:{EPSG}' typename='{typename}' "
-                       f"url='{url}' version='2.0.0' pagingEnabled='true'")
+                       f"url='{url}' version='auto'")
                 lid = layer_id(key)
                 T.layer(vector_layer_xml(lid, f"{label}, size = height", src, "Point",
                                          symbol_marker(colour, 'coalesce("baumhoehe", 10) / 5'),
