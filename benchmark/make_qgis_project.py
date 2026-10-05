@@ -669,22 +669,32 @@ def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False,
                 # answer to "are tiles missing" at a glance
                 csrc = f"{rel(reviere)}|layername=coverage"
                 clid = layer_id("reviere_coverage")
-                cnm = "km tiles with Revier forest: processed / downloaded only / not downloaded"
+                cnm = "km tiles the footprints and Reviere need: processed / downloaded only / not downloaded"
                 T.layer(vector_layer_xml(clid, cnm, csrc, "Polygon", "", bounds, ll, wkt,
                                          renderer=renderer_categorized("status", [
                                              ("processed", "46,139,87,50"), ("downloaded", "255,165,0,110"),
                                              ("missing", "220,20,60,110")], outline="90,90,90,160")),
                         clid, cnm, csrc, "ogr", True)
+                # the WINMOL survey footprints (what the 2025 campaign flew) in bold, the
+                # administrative Reviere dissolved from the stand ids thinner behind them
+                fsrc = f"{rel(reviere)}|layername=footprints"
+                flid = layer_id("winmol_footprints")
+                fnm = "WINMOL survey footprints R12 Tegelsee / R13 Spandau (WINDWURF_Tegel)"
+                T.layer(vector_layer_xml(flid, fnm, fsrc, "Polygon", "", bounds, ll, wkt,
+                                         renderer=renderer_categorized("key", [
+                                             ("R12", "0,0,0,0", "0,70,180,255"),
+                                             ("R13", "0,0,0,0", "170,0,120,255")], width="1.2")),
+                        flid, fnm, fsrc, "ogr", True)
                 rsrc = f"{rel(reviere)}|layername=reviere"
                 rlid = layer_id("reviere")
-                rnm = "forest districts (Reviere, dissolved from the stand ids)"
+                rnm = "forest districts (Reviere, dissolved from the stand ids; forest only)"
                 T.layer(vector_layer_xml(rlid, rnm, rsrc, "Polygon", "", bounds, ll, wkt,
                                          renderer=renderer_categorized("name", [
-                                             ("Revier 12 Tegelsee", "0,0,0,0", "0,70,180,255"),
-                                             ("Revier 13 Spandau", "0,0,0,0", "170,0,120,255"),
-                                             ("Revier 11", "0,0,0,0", "20,20,20,255"),
-                                             ("Revier 15", "0,0,0,0", "20,20,20,255")], width="0.9")),
-                        rlid, rnm, rsrc, "ogr", True)
+                                             ("Revier 12 Tegelsee", "0,0,0,0", "0,70,180,160"),
+                                             ("Revier 13 Spandau", "0,0,0,0", "170,0,120,160"),
+                                             ("Revier 11", "0,0,0,0", "20,20,20,160"),
+                                             ("Revier 15", "0,0,0,0", "20,20,20,160")], width="0.5")),
+                        rlid, rnm, rsrc, "ogr", False)
             else:
                 print(f"  reviere: {reviere} missing (benchmark/derive_berlin_reviere.py), layers skipped")
             T.layer(vector_layer_xml(lid, nm, src, "Polygon", "", bounds, ll, wkt,

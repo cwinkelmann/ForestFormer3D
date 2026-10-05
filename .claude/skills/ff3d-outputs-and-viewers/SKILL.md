@@ -227,10 +227,12 @@ COPC index per file on first load. Re-run after a copy completes: a tile missing
 skipped with a warning, never silently. Why no PyQGIS: the QGIS 3.44 bundle's python refuses
 its own numpy on this Mac (code-signing Team-ID check) and the app's `--code` route does not
 run headless, so the project XML is written directly. Reference groups: the Berlin tree
-cadastre (`berlin_trees/`), the forest stand map with its Reviere and a km-tile coverage
-layer (`berlin_forest/`; `benchmark/derive_berlin_reviere.py` dissolves the stands on the
+cadastre (`berlin_trees/`), the forest stand map with the WINMOL survey footprints
+(`WINDWURF_Tegel/Revier_12/ortho/R12_footprint.gpkg`, `Revier_13/Ortho/R13_footprint.gpkg`),
+the Reviere and a km-tile coverage layer (`berlin_forest/reviere.gpkg`;
+`benchmark/derive_berlin_reviere.py` reprojects the footprints, dissolves the stands on the
 Revier number inside the stand id, `best_dist[4:6]`, and colours each km tile by whether the
-mosaic processed it, only downloaded it, or never fetched it). `--import-project <qgz>`
+mosaic processed it, only downloaded it, or never fetched it -- R13 Spandau is 56 % covered). `--import-project <qgz>`
 (repeatable) embeds another project's layers verbatim -- styling, nested groups, CRS -- as
 one unchecked top-level group, resolving relative datasources against that project's
 directory; this is how the WINMOL retraining project

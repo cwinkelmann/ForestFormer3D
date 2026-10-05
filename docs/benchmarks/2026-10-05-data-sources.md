@@ -93,17 +93,22 @@ oak and small-leaved lime below 1 % each. So the canopy ForestFormer3D segments 
 predominantly pine with oak, which matters for reading the results: the model was trained
 on mixed temperate plots, and pine crowns are the sparse, high-crowned case.
 
-No source publishes the forest district (Revier) boundaries, but the stand id encodes the
-district (`00101301-0062-a-H010`: characters 4-5 are the Revier, 12 = Tegelsee, 13 =
-Spandau), so `benchmark/derive_berlin_reviere.py` dissolves the stands per Revier
-(`berlin_forest/reviere.gpkg`) and lists the km tiles each one reaches into. That shows
-what the 33-tile mosaic covers of the two WINMOL districts: Revier 12 Tegelsee is complete
-(702 ha, one 0.9 ha sliver in a tile never downloaded), while **Revier 13 Spandau is only
-57 % covered** -- 458 of its 1,053 ha lie in twelve km tiles that were downloaded but never
-processed (375_5826 and 376_5826 are entirely forest, 378_5827 79 ha, 378_5826 58 ha,
-377_5826 53 ha, the rest 4-16 ha each) plus 0.7 ha in a tile not fetched. Reviere 11 and 15
-(north and south of the mosaic) are outside the download extent. The project's coverage
-layer draws those tiles in orange (downloaded only) and red (not downloaded).
+The WINMOL survey footprints -- the areas the 2025 drone campaign flew, where the
+Probekreise sit -- are `WINDWURF_Tegel/Revier_12/ortho/R12_footprint.gpkg` (515 ha) and
+`Revier_13/Ortho/R13_footprint.gpkg` (1,034 ha), EPSG:32633. The administrative district as
+a whole is not published, but the stand id encodes it (`00101301-0062-a-H010`: characters
+4-5 are the Revier, 12 = Tegelsee, 13 = Spandau), so `benchmark/derive_berlin_reviere.py`
+also dissolves the stands per Revier. Both go into `berlin_forest/reviere.gpkg` together
+with a coverage layer: the km tiles each area needs and whether the mosaic processed them.
+That shows what the 33-tile mosaic covers of the two WINMOL areas: **R12 Tegelsee is
+complete** (all 515 ha in processed tiles), while **R13 Spandau is 56 % covered** -- 454 of
+its 1,034 ha lie in eleven km tiles that were downloaded but never processed (375_5826 and
+376_5826 are entirely inside the footprint, 376_5825 56 ha, 377_5826 46 ha, 378_5827 41 ha,
+378_5826 36 ha, 377_5825 33 ha, 374_5826 15 ha, 375_5825 13 ha, 375_5829 11 ha, 374_5825
+5 ha). The dissolved district tells the same story (458 ha of 1,053 ha in the same tiles
+plus a 0.7 ha sliver never fetched). Reviere 11 and 15, north and south of the mosaic, are
+outside the download extent. The project's coverage layer draws the unprocessed tiles in
+orange (downloaded only) and red (not downloaded).
 
 The 974 Probekreis crowns of section 5 tell the opposite story -- beech 70 %, pine 12 %,
 birch 7 % -- and their median polygon is under 1 m²: they are the regeneration layer under
