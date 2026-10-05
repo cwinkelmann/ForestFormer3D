@@ -226,7 +226,16 @@ The LAS point clouds are a separate `berlin_als_2021_pointclouds.qgz`, because Q
 COPC index per file on first load. Re-run after a copy completes: a tile missing a product is
 skipped with a warning, never silently. Why no PyQGIS: the QGIS 3.44 bundle's python refuses
 its own numpy on this Mac (code-signing Team-ID check) and the app's `--code` route does not
-run headless, so the project XML is written directly.
+run headless, so the project XML is written directly. Reference groups: the Berlin tree
+cadastre (`berlin_trees/`), the forest stand map with its Reviere and a km-tile coverage
+layer (`berlin_forest/`; `benchmark/derive_berlin_reviere.py` dissolves the stands on the
+Revier number inside the stand id, `best_dist[4:6]`, and colours each km tile by whether the
+mosaic processed it, only downloaded it, or never fetched it). `--import-project <qgz>`
+(repeatable) embeds another project's layers verbatim -- styling, nested groups, CRS -- as
+one unchecked top-level group, resolving relative datasources against that project's
+directory; this is how the WINMOL retraining project
+(`~/work/hnee/WINMOL/Winmol_retraining_Tegel.qgz`, 108 layers) lives inside the Berlin
+project. After a regeneration, QGIS shows the old tree until Project ▸ Revert.
 
 Building one by hand instead:
 

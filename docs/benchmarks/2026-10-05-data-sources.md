@@ -93,6 +93,18 @@ oak and small-leaved lime below 1 % each. So the canopy ForestFormer3D segments 
 predominantly pine with oak, which matters for reading the results: the model was trained
 on mixed temperate plots, and pine crowns are the sparse, high-crowned case.
 
+No source publishes the forest district (Revier) boundaries, but the stand id encodes the
+district (`00101301-0062-a-H010`: characters 4-5 are the Revier, 12 = Tegelsee, 13 =
+Spandau), so `benchmark/derive_berlin_reviere.py` dissolves the stands per Revier
+(`berlin_forest/reviere.gpkg`) and lists the km tiles each one reaches into. That shows
+what the 33-tile mosaic covers of the two WINMOL districts: Revier 12 Tegelsee is complete
+(702 ha, one 0.9 ha sliver in a tile never downloaded), while **Revier 13 Spandau is only
+57 % covered** -- 458 of its 1,053 ha lie in twelve km tiles that were downloaded but never
+processed (375_5826 and 376_5826 are entirely forest, 378_5827 79 ha, 378_5826 58 ha,
+377_5826 53 ha, the rest 4-16 ha each) plus 0.7 ha in a tile not fetched. Reviere 11 and 15
+(north and south of the mosaic) are outside the download extent. The project's coverage
+layer draws those tiles in orange (downloaded only) and red (not downloaded).
+
 The 974 Probekreis crowns of section 5 tell the opposite story -- beech 70 %, pine 12 %,
 birch 7 % -- and their median polygon is under 1 m²: they are the regeneration layer under
 that pine canopy, not the canopy. The two sources describe different strata of the same

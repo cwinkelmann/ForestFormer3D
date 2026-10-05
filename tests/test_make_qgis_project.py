@@ -20,10 +20,13 @@ from make_qgis_project import (  # noqa: E402
     CYCLIC,
     SEMANTIC,
     Tree,
+    absolute_source,
     esc,
+    import_project,
     km_bounds,
     layer_id,
     raster_layer_xml,
+    renderer_categorized,
     renderer_multiband,
     renderer_paletted,
     renderer_pseudocolor,
@@ -124,3 +127,80 @@ def test_project_references_only_layers_it_defines(tmp_path):
     with zipfile.ZipFile(out) as z:
         assert z.namelist() == ["p.qgs"]
         assert z.read("p.qgs").decode() == xml
+
+
+def _foreign_project(tmp_path: Path) -> Path:
+    """A small .qgz the way QGIS writes one: relative and absolute file datasources, a WMS
+    layer, nested groups, one loose layer, and a layerorder."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "a.gpkg").write_bytes(b"")
+    qgs = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.44.10"><homePath path=""/>
+<layer-tree-group><customproperties><Option/></customproperties>
+  <layer-tree-group name="R13" checked="Qt::Checked" expanded="1">
+    <layer-tree-layer id="rel_1" name="a" source="data/a.gpkg|layername=x" providerKey="ogr" checked="Qt::Checked"/>
+    <layer-tree-layer id="lid_b" name="gone" source="{tmp_path}/gone.tif" providerKey="gdal" checked="Qt::Checked"/>
+  </layer-tree-group>
+  <layer-tree-layer id="osm_1" name="osm" source="type=xyz&amp;url=https://x/{{z}}" providerKey="wms" checked="Qt::Unchecked"/>
+</layer-tree-group>
+<projectlayers>
+  <maplayer type="vector" geometry="Polygon"><id>rel_1</id><datasource>data/a.gpkg|layername=x</datasource><provider>ogr</provider><layername>a</layername><renderer-v2 type="singleSymbol"/></maplayer>
+  <maplayer type="raster"><id>lid_b</id><datasource>{tmp_path}/gone.tif</datasource><provider>gdal</provider><layername>gone</layername></maplayer>
+  <maplayer type="raster"><id>osm_1</id><datasource>type=xyz&amp;url=https://x/{{z}}</datasource><provider>wms</provider><layername>osm</layername></maplayer>
+</projectlayers>
+<layerorder><layer id="osm_1"/><layer id="lid_b"/><layer id="rel_1"/></layerorder>
+</qgis>"""
+    out = tmp_path / "foreign.qgz"
+    write_qgz(out, qgs)
+    return out
+
+
+def test_absolute_source_resolves_relative_file_paths_only():
+    base = Path("/base/proj")
+    assert absolute_source("data/a.gpkg|layername=x", "ogr", base) == ("/base/proj/data/a.gpkg|layername=x", Path("/base/proj/data/a.gpkg"))
+    assert absolute_source("/abs/b.tif", "gdal", base)[0] == "/abs/b.tif"
+    assert absolute_source("type=xyz&url=https://x", "wms", base) == ("type=xyz&url=https://x", None)
+    assert absolute_source("/vsicurl/https://x/y.tif", "gdal", base) == ("/vsicurl/https://x/y.tif", None)
+
+
+def test_import_project_embeds_layers_verbatim_under_one_group(tmp_path):
+    foreign = _foreign_project(tmp_path)
+    t = Tree("host", FAKE_WKT)
+    b = km_bounds("3dm_33_380_5828_1_be")
+    ll = (13.2, 52.6, 13.3, 52.7)
+    # the host already owns the id lid_b, so the imported one must be renamed everywhere
+    t.group("host", True, True, lambda: t.layer(
+        raster_layer_xml("lid_b", "mine", "./mine.vrt", renderer_multiband(), b, ll, FAKE_WKT),
+        "lid_b", "mine", "./mine.vrt", "gdal", True))
+    warnings = []
+    n = import_project(t, foreign, "WINMOL (imported)", warn=warnings.append)
+    assert n == {"layers": 3, "groups": 1, "missing": 1, "renamed": 1}
+    assert len(warnings) == 1 and "gone.tif" in warnings[0]
+
+    root = ET.fromstring(t.render(b, ll).split("\n", 1)[1])
+    defined = {m.findtext("id") for m in root.iter("maplayer")}
+    referenced = {x.get("id") for x in root.iter("layer-tree-layer")}
+    ordered = [x.get("id") for x in root.find("layerorder")]
+    assert defined == referenced == set(ordered) == {"lid_b", "rel_1", "lid_b_imp", "osm_1"}
+    assert ordered == ["lid_b", "osm_1", "lid_b_imp", "rel_1"]       # host first, then the foreign layerorder
+    groups = root.find("layer-tree-group").findall("layer-tree-group")
+    assert [g.get("name") for g in groups] == ["host", "WINMOL (imported)"]
+    imp = groups[1]
+    assert imp.get("checked") == "Qt::Unchecked" and imp.get("expanded") == "0"
+    assert [c.tag for c in imp][1:] == ["layer-tree-group", "layer-tree-layer"]   # nested group + loose layer kept
+    assert imp.find("layer-tree-group").get("name") == "R13"
+    by_id = {m.findtext("id"): m for m in root.iter("maplayer")}
+    assert by_id["rel_1"].findtext("datasource") == f"{tmp_path}/data/a.gpkg|layername=x"
+    assert by_id["rel_1"].find("renderer-v2") is not None                      # styling travels verbatim
+    tree_src = {x.get("id"): x.get("source") for x in root.iter("layer-tree-layer")}
+    assert tree_src["rel_1"] == f"{tmp_path}/data/a.gpkg|layername=x"
+    assert tree_src["lid_b_imp"].endswith("gone.tif")
+
+
+def test_renderer_categorized_takes_per_category_outlines():
+    xml = renderer_categorized("name", [("A", "1,1,1,1", "9,9,9,9"), ("B", "2,2,2,2")], outline="5,5,5,5", width="0.9")
+    root = ET.fromstring(xml)
+    outlines = [o.get("value") for o in root.iter("Option") if o.get("name") == "outline_color"]
+    widths = {o.get("value") for o in root.iter("Option") if o.get("name") == "outline_width"}
+    assert outlines == ["9,9,9,9", "5,5,5,5", "5,5,5,5"] and widths == {"0.9"}
+    assert [c.get("label") for c in root.iter("category")] == ["A", "B", "other"]

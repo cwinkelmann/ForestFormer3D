@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -298,14 +299,16 @@ def raster_layer_xml(lid: str, name: str, source: str, renderer: str, bounds, ll
             f"<blendMode>0</blendMode></maplayer>")
 
 
-def renderer_categorized(attr: str, categories: list[tuple[str, str]], outline="60,60,60,120") -> str:
-    """``<renderer-v2 type="categorizedSymbol">`` over ``attr``: one (value, fill colour) per
-    category plus a final grey catch-all (an empty value matches everything else)."""
+def renderer_categorized(attr: str, categories: list[tuple], outline="60,60,60,120", width="0.15") -> str:
+    """``<renderer-v2 type="categorizedSymbol">`` over ``attr``: one (value, fill colour) or
+    (value, fill colour, outline colour) per category plus a final grey catch-all (an empty
+    value matches everything else)."""
     cats, syms = [], []
-    for i, (value, colour) in enumerate(categories + [("", "158,158,158,90")]):
+    for i, cat in enumerate(list(categories) + [("", "158,158,158,90")]):
+        value, colour = cat[0], cat[1]
         label = value or "other"
         cats.append(f"<category value=\"{esc(value)}\" symbol=\"{i}\" label=\"{esc(label)}\" render=\"true\" type=\"string\"/>")
-        syms.append(symbol_fill(outline, "0.15", colour, "solid", name=str(i)))
+        syms.append(symbol_fill(cat[2] if len(cat) > 2 else outline, width, colour, "solid", name=str(i)))
     return (f"<renderer-v2 type=\"categorizedSymbol\" attr=\"{esc(attr)}\" forceraster=\"0\" symbollevels=\"0\" "
             f"enableorderby=\"0\" referencescale=\"-1\"><categories>{''.join(cats)}</categories>"
             f"<symbols>{''.join(syms)}</symbols><rotation/><sizescale/></renderer-v2>")
@@ -419,13 +422,96 @@ class Tree:
                 f"</properties></qgis>\n")
 
 
+FILE_PROVIDERS = {"ogr", "gdal", "pdal", "delimitedtext", "mdal", "copc", "ept"}
+
+
+def read_qgs(project: Path) -> ET.Element:
+    """The ``<qgis>`` root of a ``.qgs`` file or of the ``.qgs`` inside a ``.qgz``."""
+    if project.suffix.lower() == ".qgz":
+        with zipfile.ZipFile(project) as z:
+            qgs = next(n for n in z.namelist() if n.lower().endswith(".qgs"))
+            return ET.fromstring(z.read(qgs))
+    return ET.fromstring(project.read_bytes())
+
+
+def absolute_source(source: str, provider: str, base: Path) -> tuple[str, Path | None]:
+    """Resolve a datasource string against the directory of the project it came from.
+
+    File providers store ``<path>|layername=...`` and a path may be relative to that project
+    (QGIS writes relative paths when ``Paths/Absolute`` is false); the embedded copy lives
+    elsewhere, so it must carry the absolute path. Returns the rewritten source and the file
+    it names (None for a URL-style source such as a WMS/XYZ layer)."""
+    if provider not in FILE_PROVIDERS or "://" in source.split("|", 1)[0]:
+        return source, None
+    path, sep, rest = source.partition("|")
+    p = Path(path)
+    if not p.is_absolute():
+        p = (base / p).resolve()
+    return f"{p}{sep}{rest}", p
+
+
+def import_project(T: "Tree", project: Path, group: str, warn=print) -> dict:
+    """Embed every layer of another QGIS project verbatim under one top-level group.
+
+    The ``<maplayer>`` elements are copied as they are (styling, labels, joins and the
+    layer's own CRS travel with them), the other project's layer tree is copied beneath a
+    new group so its grouping survives, and the layers are appended to the draw order in
+    the other project's ``<layerorder>``. Relative datasources are resolved against the
+    other project's directory; a layer whose file is gone is still embedded (QGIS marks it
+    unavailable on load) but counted. An id already present in ``T`` gets a ``_imp`` suffix
+    everywhere it occurs. Returns counts: layers, groups, missing, renamed."""
+    root = read_qgs(project)
+    base = project.resolve().parent
+    taken = set(T.order)
+    renamed, missing, sources = {}, [], {}
+    for ml in root.iter("maplayer"):
+        lid = ml.findtext("id") or ""
+        if lid in taken:
+            renamed[lid] = lid + "_imp"
+        taken.add(renamed.get(lid, lid))
+        ds = ml.find("datasource")
+        if ds is not None and ds.text:
+            ds.text, file = absolute_source(ds.text, ml.findtext("provider") or "", base)
+            sources[lid] = ds.text
+            if file is not None and not file.exists():
+                missing.append(ds.text)
+    for ml in root.iter("maplayer"):
+        idel = ml.find("id")
+        if idel is not None and idel.text in renamed:
+            idel.text = renamed[idel.text]
+    tree = root.find("layer-tree-group")
+    for tl in tree.iter("layer-tree-layer"):
+        lid = tl.get("id", "")
+        if lid in sources:
+            tl.set("source", sources[lid])
+        if lid in renamed:
+            tl.set("id", renamed[lid])
+    for ml in root.iter("maplayer"):
+        T.layers.append(ET.tostring(ml, encoding="unicode"))
+    ordered = [renamed.get(l.get("id"), l.get("id")) for l in root.find("layerorder")] if root.find("layerorder") is not None else []
+    ids = [ml.findtext("id") for ml in root.iter("maplayer")]
+    T.order.extend([i for i in ordered if i in ids] + [i for i in ids if i not in ordered])
+    n_groups = sum(1 for _ in tree.iter("layer-tree-group")) - 1   # iter() yields the root too
+
+    def body():
+        for child in tree:
+            if child.tag in ("layer-tree-group", "layer-tree-layer"):
+                T.tree.append(ET.tostring(child, encoding="unicode"))
+
+    T.group(group, False, False, body)
+    for m in missing:
+        warn(f"  import {project.name}: file missing for {m}")
+    return {"layers": len(ids), "groups": n_groups, "missing": len(missing), "renamed": len(renamed)}
+
+
 def write_qgz(path: Path, xml: str) -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(path.with_suffix(".qgs").name, xml)
 
 
 # ---------------------------------------------------------------------------- project
-def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False) -> list[Path]:
+def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False,
+                  imports: list[Path] = ()) -> list[Path]:
     from pyproj import CRS
 
     wkt = CRS.from_epsg(EPSG).to_wkt()
@@ -575,14 +661,44 @@ def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False) 
         lid = layer_id("forest_stands_2014")
         nm = "stands by dominant species of the main canopy layer (2014 inventory)"
 
+        reviere = als / "berlin_forest" / "reviere.gpkg"   # benchmark/derive_berlin_reviere.py
+
         def body():
+            if reviere.exists():
+                # km tiles the Reviere reach into, by whether the mosaic processed them: the
+                # answer to "are tiles missing" at a glance
+                csrc = f"{rel(reviere)}|layername=coverage"
+                clid = layer_id("reviere_coverage")
+                cnm = "km tiles with Revier forest: processed / downloaded only / not downloaded"
+                T.layer(vector_layer_xml(clid, cnm, csrc, "Polygon", "", bounds, ll, wkt,
+                                         renderer=renderer_categorized("status", [
+                                             ("processed", "46,139,87,50"), ("downloaded", "255,165,0,110"),
+                                             ("missing", "220,20,60,110")], outline="90,90,90,160")),
+                        clid, cnm, csrc, "ogr", True)
+                rsrc = f"{rel(reviere)}|layername=reviere"
+                rlid = layer_id("reviere")
+                rnm = "forest districts (Reviere, dissolved from the stand ids)"
+                T.layer(vector_layer_xml(rlid, rnm, rsrc, "Polygon", "", bounds, ll, wkt,
+                                         renderer=renderer_categorized("name", [
+                                             ("Revier 12 Tegelsee", "0,0,0,0", "0,70,180,255"),
+                                             ("Revier 13 Spandau", "0,0,0,0", "170,0,120,255"),
+                                             ("Revier 11", "0,0,0,0", "20,20,20,255"),
+                                             ("Revier 15", "0,0,0,0", "20,20,20,255")], width="0.9")),
+                        rlid, rnm, rsrc, "ogr", True)
+            else:
+                print(f"  reviere: {reviere} missing (benchmark/derive_berlin_reviere.py), layers skipped")
             T.layer(vector_layer_xml(lid, nm, src, "Polygon", "", bounds, ll, wkt,
                                      renderer=renderer_categorized("s1_1_deuts", cats)),
                     lid, nm, src, "ogr", True)
 
         T.group("Berlin forest stand map (Forstbetriebskarte 2014, dl-de/zero-2-0)", True, True, body)
 
-    # tree order = draw order top-down: vectors over rasters over orthophotos over basemap
+    # tree order = draw order top-down: vectors over rasters over orthophotos over basemap;
+    # other projects' layers come first (unchecked), so they draw over everything when turned on
+    for proj in imports:
+        n = import_project(T, proj, f"{proj.stem} (imported project, {proj})")
+        print(f"  imported {proj}: {n['layers']} layers in {n['groups']} groups, "
+              f"{n['missing']} files missing, {n['renamed']} ids renamed")
     tree_cadastre_group(live_wfs)
     forest_stands_group()
     buildings_layer()
@@ -628,7 +744,15 @@ def main(argv=None) -> int:
                     help="reference the Berlin tree cadastre as live WFS layers instead of the "
                          "GeoPackage from benchmark/fetch_berlin_trees.py (QGIS 3.44 on this Mac "
                          "reports the WFS form unavailable on load)")
+    ap.add_argument("--import-project", type=Path, action="append", default=[], metavar="QGZ",
+                    help="embed every layer of this QGIS project (.qgz/.qgs) verbatim as one unchecked "
+                         "top-level group; repeatable. Relative datasources are resolved against "
+                         "that project's directory")
     a = ap.parse_args(argv)
+    for proj in a.import_project:
+        if not proj.exists():
+            print(f"!!! --import-project {proj} does not exist", file=sys.stderr)
+            return 2
     out = a.out or a.als_data / "berlin_qgis"
     if not a.als_data.is_dir():
         print(f"!!! {a.als_data} is not a directory (is the 2TB mounted?)", file=sys.stderr)
@@ -649,7 +773,7 @@ def main(argv=None) -> int:
         manifest = json.loads(mp.read_text())
     if a.phase in ("project", "all"):
         print("== project")
-        for p in phase_project(a.als_data, out, manifest, live_wfs=a.live_wfs):
+        for p in phase_project(a.als_data, out, manifest, live_wfs=a.live_wfs, imports=a.import_project):
             print(f"  wrote {p}")
     return 0
 
