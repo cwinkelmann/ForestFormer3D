@@ -7,6 +7,8 @@ Produces four figures into ``docs/benchmarks/assets/berlin-dop``:
   b) berlin-dop-381-5829-zoom.png     150 m zoom, DOP + ALS instance raster
   c) berlin-dop-381-5829-drone2025.png same 150 m window on the 2025 drone ortho
   d) berlin-dop-mosaic-density.png    mosaic of every tile with results + crown density
+Panels b and d are stacked vertically at full page width (2026-10-05); the crowns and
+instance rasters come from the seamless mosaic (berlin_als_2021_ff3d_v2) when present.
 
 Run with the repo's CPU venv::
 
@@ -39,7 +41,10 @@ DOP_DIRS = [
     "/Volumes/2TB/winmol/ALS_Data/berlin_dop_2021/dop_2021_rgbi",
 ]
 DOP_DIR = DOP_DIRS[0]
+# The seamless 33-tile mosaic first (ids unique across sub-tile and km-tile borders since
+# the 2026-09-24 stitch); the earlier per-tile merges only as fallbacks.
 ALS_DIRS = [
+    "/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d_v2",
     "/Users/christian/work/hnee/ForestFormer3D_runs/berlin_out/berlin-2021",
     "/Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d",
 ]
@@ -236,7 +241,9 @@ def fig_b(zoom_bounds):
     lut[0] = 0.08
     rgbi = lut[np.clip(inst + 1, 0, len(lut) - 1)]
     rgbi[inst <= 0] = 0.08
-    fig, ax = plt.subplots(1, 2, figsize=(12.5, 6.6))
+    # two panels stacked, each the full page width: at half width the 150 m window
+    # was too small to see a single crown
+    fig, ax = plt.subplots(2, 1, figsize=(11, 22.6), constrained_layout=True)
     ax[0].imshow(stretch(img), extent=ext)
     ax[0].add_collection(LineCollection(segs, linewidths=0.9, colors="#ff2bd6"))
     ax[0].set_title("DOP20 RGB 2021 + crown outlines")
@@ -245,8 +252,11 @@ def fig_b(zoom_bounds):
     ax[1].set_title("ALS instance raster (50 cm), one colour per tree")
     for a in ax:
         a.set_xlim(ext[0], ext[1]); a.set_ylim(ext[2], ext[3])
-        a.set_xlabel("E (EPSG:25833)")
-    ax[0].set_ylabel("N (EPSG:25833)")
+        a.set_xlabel("E (EPSG:25833)"); a.set_ylabel("N (EPSG:25833)")
+        for x in np.arange(np.ceil(ext[0] / 100) * 100, ext[1], 100):
+            a.axvline(x, color="w", lw=0.7, ls="--", alpha=0.7)
+        for y in np.arange(np.ceil(ext[2] / 100) * 100, ext[3], 100):
+            a.axhline(y, color="w", lw=0.7, ls="--", alpha=0.7)
     fig.suptitle(f"{tname(MAIN)} — {int(ZOOM_SIZE)} m x {int(ZOOM_SIZE)} m zoom "
                  f"at E{int(zoom_bounds[0])} N{int(zoom_bounds[1])}, "
                  f"{len(g)} crowns")
@@ -287,8 +297,11 @@ def fig_d():
     import geopandas as gpd
     present = [t for t in TILES
                if dop_path(t)]
-    es = sorted({int(t.split("_")[0]) for t in present})
-    ns = sorted({int(t.split("_")[1]) for t in present}, reverse=True)
+    # every km column/row between the extremes, not only those with a tile: a gap in the
+    # middle (column 378 of the 33-tile L) otherwise collapses and shifts the image west
+    e_all = [int(t.split("_")[0]) for t in present]; n_all = [int(t.split("_")[1]) for t in present]
+    es = list(range(min(e_all), max(e_all) + 1))
+    ns = list(range(max(n_all), min(n_all) - 1, -1))
     cell = 420
     mosaic = np.full((len(ns) * cell, len(es) * cell, 3), 55, dtype=np.uint8)
     minx, maxx = min(es) * 1000.0, (max(es) + 1) * 1000.0
@@ -308,7 +321,8 @@ def fig_d():
     xs = np.concatenate(xs) if xs else np.array([])
     ys = np.concatenate(ys) if ys else np.array([])
     ext = (minx, maxx, miny, maxy)
-    fig, ax = plt.subplots(1, 2, figsize=(13, 6.4), constrained_layout=True)
+    # stacked: the mosaic is twice as wide as high, so side by side each panel was unreadable
+    fig, ax = plt.subplots(2, 1, figsize=(14, 7.2 * 2 * (maxy - miny) / (maxx - minx) + 3.5), constrained_layout=True)
     ax[0].imshow(mosaic, extent=ext)
     ax[0].set_title(f"DOP20 RGB 2021 mosaic — {len(present)} km tiles\n(grey = no ForestFormer3D result for that km square)", fontsize=11)
     ax[1].imshow(mosaic, extent=ext, alpha=0.55)
@@ -319,7 +333,8 @@ def fig_d():
         h = np.ma.masked_where(h == 0, h)
         im = ax[1].imshow(h.T[::-1], extent=ext, cmap="inferno", alpha=0.75,
                           vmax=np.percentile(h.compressed(), 99))
-        cb = fig.colorbar(im, ax=ax[1], fraction=0.04, pad=0.02)
+        # horizontal, below the panel: a vertical bar would narrow this panel against the top one
+        cb = fig.colorbar(im, ax=ax[1], orientation="horizontal", fraction=0.05, pad=0.04, aspect=50)
         cb.set_label("crowns per 50 m x 50 m cell")
     ax[1].set_title(f"Crown centroid density — {len(xs):,} trees\n"
                     f"over the {len(have_trees)} tiles with ForestFormer3D results",
@@ -331,7 +346,7 @@ def fig_d():
         for n in ns:
             a.axhline(n * 1000, color="w", lw=0.5, alpha=0.5)
         a.set_xlim(minx, maxx); a.set_ylim(miny, maxy)
-    ax[0].set_ylabel("N (EPSG:25833)")
+        a.set_ylabel("N (EPSG:25833)")
     return save(fig, os.path.join(OUT_DIR, "berlin-dop-mosaic-density.png"))
 
 

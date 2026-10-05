@@ -18,7 +18,9 @@ point clouds:
 
 ## The study area
 
-![The study area: km tiles by status, forest stands, survey footprints](assets/analytics/analytics_study_area.png)
+![The study area in EPSG:25833. Green: the forest stands of the Berlin Forstbetriebskarte 2014; grey: ALKIS building footprints; squares: the 1 km ALS tiles, labelled easting_northing of their south-west corner in km -- solid blue = processed by all methods and in the mosaic, dashed orange = downloaded and being processed, dashed red = not fetched; thick outlines: the WINMOL 2025 survey footprints of Revier 12 Tegelsee (blue, east) and Revier 13 Spandau (purple, west).](assets/analytics/analytics_study_area.png)
+
+The map explains the shape of the mosaic: the processed block is an L around the Tegel forest and the northern half of R13; the orange tiles are the southern half of R13 (375_5826 and 376_5826 are entirely forest) that the first batch did not include; the red tiles north and south hold forest of Reviere 11 and 15 outside both survey footprints. Buildings crowd the eastern tiles (Tegel, Heiligensee) and are absent from the forest tiles, which is why the building mask matters on some tiles and not at all on others.
 
 The area is the Tegel and Spandau forest complex in north-western Berlin, chosen because
 the WINMOL project surveyed two districts there in 2025 with drones and field circles:

@@ -458,7 +458,16 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
     # 2 per tile
     if "ff3d" in keys and "sat" in keys:
         lines += ["## 2. Trees per km tile", "",
-                  f"![Trees per km tile]({assets_rel}/analytics_tile_grid.png)", "",
+                  f"![Trees per km tile. Left and middle: the number of tree instances each method reports per "
+                  f"1 km tile (the label is the count in thousands; the grid is the easting and northing of the "
+                  f"tile's south-west corner in km, EPSG:25833; white cells are tiles outside the mosaic). Right: the "
+                  f"SegmentAnyTree count divided by the ForestFormer3D count, red where SegmentAnyTree finds more "
+                  f"trees, blue where it finds fewer; 1.00 would mean identical totals.]({assets_rel}/analytics_tile_grid.png)", "",
+                  "What we see: both methods agree on where the trees are -- the darkest cells are the closed forest "
+                  "in the west (R13) and north-east (the Tegel forest north of 5829), the palest are the lake tile "
+                  "381_5827 (Tegeler See, 2-3 thousand trees) and the housing to the east. The ratio map is not noise: "
+                  "it is a block of red over the R13 forest tiles and a block of blue-to-white over R12 and the "
+                  "built-up tiles, i.e. the two methods differ systematically by forest, not tile by tile.", "",
                   f"SegmentAnyTree finds {fmt(S['sat_over_ff3d'], 3)}x the ForestFormer3D tree count over the mosaic "
                   f"(per tile from {fmt(S['sat_over_ff3d_range'][0], 2)} to {fmt(S['sat_over_ff3d_range'][1], 2)}). "
                   + (f"On the {S['forest_tiles_n']} tiles that are more than half forest by the stand map the ratio averages "
@@ -471,7 +480,18 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
 
     # 3 distributions
     lines += ["## 3. Size distributions and quality flags", "",
-              f"![Per-tree size distributions]({assets_rel}/analytics_distributions.png)", "",
+              f"![Per-tree size distributions over the whole mosaic. Each panel is a normalised histogram (area 1) "
+              f"of one attribute of the tree table, one curve per method, so curves of methods with different tree "
+              f"counts are comparable in shape: height above ground in 1 m bins; crown area (convex hull of the "
+              f"instance's points) in 4 m² bins; points per instance on a logarithmic axis. "
+              f"n is the number of trees behind each curve.]({assets_rel}/analytics_distributions.png)", "",
+              "What we see: the height panel has two modes for both methods, a tall one at 24-28 m (the pine and oak "
+              "canopy) and a short one at 4-7 m (understory, hedges, young trees in gardens), with a trough at "
+              "12-18 m; ForestFormer3D puts more mass under 8 m and SegmentAnyTree more at 20-30 m. The crown-area "
+              "panel shows SegmentAnyTree's crowns shifted to smaller areas (mode 8-12 m² against 20-30 m²) -- the "
+              "signature of cutting crowns into pieces. The points-per-tree panel has a spike at the smallest sizes "
+              "for ForestFormer3D (instances of 10-20 points, the noise-sized class of the table below) and otherwise "
+              "the same log-linear decline for both.", "",
               md_table(["method", "trees", f"flat blobs (< {FLAT_H:.0f} m, > {FLAT_AREA:.0f} m²)", f"noise-sized (< {SMALL_POINTS} points)", "taller than 40 m"],
                        [[L[k], fmt(S["methods"][k]["trees"]), f"{fmt(S['methods'][k]['flat'])} ({pct(S['methods'][k]['flat_frac'])})",
                          f"{fmt(S['methods'][k]['small'])} ({pct(S['methods'][k]['small_frac'])})",
@@ -487,7 +507,12 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
     if S.get("three_way_tiles"):
         lines += [f"On the {len(S['three_way_tiles'])} tiles all three methods cover "
                   f"({', '.join(tile_key(t) for t in S['three_way_tiles'])}):", "",
-                  f"![Three methods on the shared tiles]({assets_rel}/analytics_distributions_3way.png)", "",
+                  f"![The same three distributions restricted to the tiles all three methods cover, now with AMS3D. "
+                  f"Same axes and binning as the previous figure.]({assets_rel}/analytics_distributions_3way.png)", "",
+                  "What we see: AMS3D has no short mode at all -- its height distribution starts at about 10 m -- and "
+                  "its crowns are the largest of the three. Mean shift with a height-dependent bandwidth merges the "
+                  "understory into the canopy tree above it, which is why it reports the fewest trees and the tallest "
+                  "ones; the two learned methods separate that layer.", "",
                   md_table(["method", "trees on these tiles", "height p10 / p50 / p90 (m)", "crown p50 (m²)"],
                            [[L[k], fmt(v["trees"]), " / ".join(fmt(x) for x in v["height_q"]), fmt(v["crown_q"][1])]
                             for k, v in S["three_way"].items()]), ""]
@@ -496,7 +521,18 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
     if S.get("agreement"):
         a = S["agreement"]["ff3d_sat"]
         lines += ["## 4. Instance agreement: ForestFormer3D vs SegmentAnyTree", "",
-                  f"![Agreement per tile]({assets_rel}/analytics_agreement.png)", "",
+                  f"![Instance agreement per km tile between ForestFormer3D (blue) and SegmentAnyTree (magenta), "
+                  f"computed on identical points. Top: the fraction of each method's trees that have a counterpart in "
+                  f"the other method overlapping with IoU ≥ 0.5 (bars), and the median IoU of those matched pairs "
+                  f"(black line, right-hand reading on the same 0-1 axis). Bottom: the fraction of each method's "
+                  f"trees whose points are covered by two or more instances of the other method -- a tree the other "
+                  f"method has split. Tiles are ordered by easting, then northing.]({assets_rel}/analytics_agreement.png)", "",
+                  "What we see: the matched fractions move together from tile to tile (0.35-0.68) and are lowest on the "
+                  "built-up tiles (380_5830, 383_5826/5827), where both methods segment small garden vegetation "
+                  "differently, and highest on closed forest; the median IoU of a match is flat at 0.71-0.78 "
+                  "everywhere, so when the two agree on a tree they agree on its extent. The bottom panel is the "
+                  "asymmetry the whole chapter turns on: the blue bars (ForestFormer3D trees split by SegmentAnyTree) "
+                  "are 2-4x the magenta ones on every tile, 0.32-0.38 on the R13 forest tiles.", "",
                   f"Pooled over {a['tiles']} tiles and {fmt(a['n_points'])} identical points: {fmt(a['matched'])} tree pairs "
                   f"overlap with IoU ≥ 0.5, i.e. {pct(a['matched_frac_a'])} of ForestFormer3D's {fmt(a['n_a'])} trees and "
                   f"{pct(a['matched_frac_b'])} of SegmentAnyTree's {fmt(a['n_b'])}; the median IoU of a matched pair is "
@@ -511,7 +547,17 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
 
     # 5 seams + buildings
     lines += ["## 5. Seams and the building mask", "",
-              f"![Seams and building mask]({assets_rel}/analytics_seams_buildings.png)", ""]
+              f"![Left: seam residue per km tile after the mosaic-wide stitch -- the percentage of crowns that a "
+              f"100 m grid line (the sub-tile borders used for inference) still intersects, per method; the control "
+              f"value for an arbitrary line through the same crowns is about 8 %. Right: the percentage of "
+              f"ForestFormer3D instances on each tile that the ALKIS building mask removes because at least half of "
+              f"their points lie on a roof.]({assets_rel}/analytics_seams_buildings.png)", "",
+              "What we see, left: ForestFormer3D sits at 10-12 % on every tile, i.e. 2-4 points above the control "
+              "floor, and SegmentAnyTree at 13-16 % with outliers to 20 % -- its smaller, more numerous instances "
+              "touch lines more often, and some of its matches across sub-tiles fail the IoU threshold. Neither shows "
+              "the 30-40 % that an un-haloed split produced. Right: the forest tiles lose nothing (no buildings), the "
+              "lakeside and housing tiles 5-20 %, and 383_5827 -- the densest housing -- 40 % of its instances were "
+              "roofs or roof vegetation.", ""]
     if S.get("stitch"):
         lines += [md_table(["method", "trees after stitch", "instances unified over halos", "cross-km matches", "crowns touching a grid line (mean)", "strip excess (mean pp)"],
                            [[L[k], fmt(v["n_trees"]), fmt(v["n_unified"]), fmt(v["n_cross_km"]), pct(v["touching_mean"]), fmt(v["strip_mean"], 3)]
@@ -531,7 +577,18 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
         rows = [[sp, v["stands"], fmt(v["area_ha"], 0), fmt(v["trees"]), fmt(v["density_ha"], 0), fmt(v["inv_height"]), fmt(v["pred_median"]), fmt(v["pred_p90"]), fmt(v["crown_median"])]
                 for sp, v in sorted(S["stands"].items(), key=lambda kv: -kv[1]["area_ha"])[:8]]
         lines += ["## 6. Against the forest inventory (Forstbetriebskarte 2014)", "",
-                  f"![Predicted vs inventory height per stand]({assets_rel}/analytics_stand_heights.png)", "",
+                  f"![Predicted canopy height against the forest inventory, one marker per stand (only stands with "
+                  f"at least 20 predicted trees and an inventory height). Horizontal axis: the height of the main "
+                  f"canopy layer from the 2014 Forstbetriebskarte, a stand mean of dominant trees. Vertical axis: "
+                  f"the 90th percentile of ForestFormer3D tree heights inside that stand. Marker size scales with "
+                  f"the number of predicted trees in the stand, colour is the stand's dominant species (six most "
+                  f"frequent by area; grey = other). The dashed line is equality.]({assets_rel}/analytics_stand_heights.png)", "",
+                  f"What we see: the cloud follows the diagonal -- taller stands in the inventory are taller in the "
+                  f"predictions -- and sits {fmt(S['stands_bias_p90'])} m above it, consistently for pine, oak and larch; "
+                  "beech (green, the 30-36 m stands) lies on the line. The offset is expected: the ALS is seven growing "
+                  "seasons younger than the inventory, and a 90th percentile of tree tops exceeds a mean of dominant "
+                  "heights. The few stands far above the line at low inventory height (10-15 m) are young stands "
+                  "where tall remnant trees dominate the predicted percentile.", "",
                   md_table(["dominant species", "stands", "ha", "FF3D trees", "trees / ha", "inventory height (m)", "pred. median (m)", "pred. p90 (m)", "crown p50 (m²)"], rows), "",
                   f"Every ForestFormer3D tree was joined to the stand it stands in ({fmt(S['stands_n'])} stands with at least 20 trees). "
                   "The inventory height is the main canopy layer's height from the 2014 management inventory, a "
@@ -547,7 +604,20 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
         rows = [[L[k], fmt(v["n_cadastre"]), pct(v["detected_frac"]), pct(v["detected_frac_street"]), pct(v["detected_frac_park"]),
                  fmt(v["n_height_pairs"]), fmt(v["height_bias"], 2), fmt(v["height_mae"], 2), fmt(v["height_r"], 2)] for k, v in c.items()]
         lines += ["## 7. Against the tree cadastre (street and park trees)", "",
-                  f"![Cadastre heights]({assets_rel}/analytics_cadastre.png)", "",
+                  f"![Street and park trees of the Berlin tree cadastre against the predictions. Left: for every "
+                  f"cadastre tree with a predicted tree top within {CADASTRE_MATCH_M:.0f} m, the cadastre's height "
+                  f"(horizontal, whole metres as recorded at inspection, hence the vertical stripes) against the "
+                  f"height of that predicted tree (vertical), one dot per tree, blue ForestFormer3D and magenta "
+                  f"SegmentAnyTree, dashed line = equality. Right: histogram of predicted minus cadastre height "
+                  f"for the same pairs, 1 m bins.]({assets_rel}/analytics_cadastre.png)", "",
+                  f"What we see: the stripes are the cadastre's integer heights, which stop at 30 m. Within each stripe "
+                  f"the predicted heights spread widely, but their centre rises with the cadastre value and the "
+                  f"residual histogram is symmetric about zero with a sharp peak (bias {fmt(S['cadastre']['ff3d']['height_bias'], 2)} m, "
+                  f"MAE {fmt(S['cadastre']['ff3d']['height_mae'])} m): most matched pairs agree to within a few metres. "
+                  "The dots far above the diagonal at cadastre heights of 4-8 m are young street trees whose nearest "
+                  "predicted top belongs to a taller neighbour's crown (the nearest-top rule assigns it anyway); the "
+                  "dots far below are large cadastre trees for which only a fragment was predicted. The two methods "
+                  "overlay almost exactly, so the scatter is the reference's and the matching rule's, not the model's.", "",
                   md_table(["method", "cadastre trees in the mosaic", "with a predicted top ≤ 3 m away", "street", "park", "height pairs", "bias (m)", "MAE (m)", "r"], rows), "",
                   "The cadastre lists managed trees with a surveyed position and a height that is updated at "
                   "inspection, so a predicted tree top within 3 m of a cadastre position is counted as a detection "

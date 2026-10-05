@@ -105,7 +105,7 @@ Regenerate with `.venv-cpu/bin/python benchmark/plot_berlin_dop_overlays.py`
 
 ![full tile](assets/berlin-dop/berlin-dop-381-5829-crowns.png)
 
-All 31,385 ForestFormer3D crown polygons of `3dm_33_381_5829_1_be` on the DOP20 RGB,
+All 32,843 ForestFormer3D crown polygons of `3dm_33_381_5829_1_be` (seamless mosaic) on the DOP20 RGB,
 outlines coloured by tree height. Look for: outlines stopping cleanly at the forest
 edge against the allotment settlement in the west, the tall (yellow) outlines
 following the mature stands along the eastern and southern margins, and the fact that
@@ -118,13 +118,17 @@ the next two figures.
 
 ![zoom](assets/berlin-dop/berlin-dop-381-5829-zoom.png)
 
-`E381600 N5829225`, 150 m x 150 m, 1,161 crowns. Left: crown outlines in magenta on
-the DOP. Right: the same window of the 50 cm instance raster, one random colour per
-tree, with the outlines repeated in white. Look for: each magenta ring sitting on one
-bright canopy blob in the leaf-off imagery; the sub-tile seams at E381700 and
-N5829300, where the tile-merge leaves a one-pixel gap and occasionally splits a crown
-that straddles the border; and the black unassigned gaps between crowns, which are
-understorey and ground rather than missed trees.
+`E381600 N5829225`, 150 m x 150 m, 1,186 crowns, from the seamless 33-tile mosaic
+(figures regenerated 2026-10-05; the first version of this figure predated the
+mosaic-wide stitch and showed the per-tile merge's seams). Top: crown outlines in magenta
+on the DOP. Bottom: the same window of the 50 cm instance raster, one random colour per
+tree, with the outlines repeated in white; the dashed white lines are the 100 m sub-tile
+borders the inference ran on (E381700 and N5829300). Look for: each magenta ring sitting
+on one bright canopy blob in the leaf-off imagery; crowns that straddle a dashed line
+keeping one colour on both sides -- the halo plus stitch gives a tree on a sub-tile
+border one id, where the earlier per-tile merge left a one-pixel gap and two ids; and
+the black unassigned gaps between crowns, which are understorey and ground rather than
+missed trees.
 
 ### c) Same window, 2021 DOP vs 2025 drone ortho
 
@@ -137,18 +141,21 @@ the 2025 canopy in the closed pine matrix, versus the bare patches in the north-
 of the window where crowns have gone — windthrow and salvage between the two dates —
 and the generally larger 2025 crowns where the stand simply grew into its outlines.
 
-### d) Eleven-tile mosaic and crown density
+### d) The mosaic and its crown density
 
 ![mosaic](assets/berlin-dop/berlin-dop-mosaic-density.png)
 
-Left: the eleven fetched DOP tiles laid out on their real EPSG:25833 grid (grey =
-no tile at that grid cell in the benchmark set — only `381_5830` exists in the
-northern row). Right: the same mosaic behind a 50 m crown-centroid density map built
-from the `<tile>_trees.gpkg` files of all eleven tiles (all have ForestFormer3D results)
-(156,230 trees). Look for: density tracking the forest exactly, dropping to zero over
-the lake in the south-west, the sports field at `E380400 N5829400` and the road
-corridors, and peaking above 120 crowns per 50 m cell in the dense young pine
-regeneration — which is where the per-tree segmentation is hardest to verify by eye.
+Top: the DOP tiles of every km square with a ForestFormer3D result, laid out on their
+real EPSG:25833 grid (33 tiles since 2026-09-24; grey = no result at that grid cell --
+the L shape is the processed block, see the study-area map of the introduction).
+Bottom: the same mosaic behind a 50 m crown-centroid density map built from the
+`<tile>_trees.gpkg` files of all 33 tiles (832,130 trees). Look for: density tracking
+the forest exactly, dropping to zero over the Tegeler See, the sports field at
+`E380400 N5829400`, the airfield in the north-west of the eastern block and the road
+corridors, and peaking above 120 crowns per 50 m cell in dense young pine regeneration
+-- which is where the per-tree segmentation is hardest to verify by eye. The western
+block (R13) is as dense as the Tegel forest; its southern half is the eleven tiles now
+being processed.
 
 ## Caveats
 

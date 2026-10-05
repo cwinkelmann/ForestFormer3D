@@ -14,13 +14,17 @@ All three methods ran on the same 20 m-halo split of each km tile and went throu
 
 ## 2. Trees per km tile
 
-![Trees per km tile](assets/analytics/analytics_tile_grid.png)
+![Trees per km tile. Left and middle: the number of tree instances each method reports per 1 km tile (the label is the count in thousands; the grid is the easting and northing of the tile's south-west corner in km, EPSG:25833; white cells are tiles outside the mosaic). Right: the SegmentAnyTree count divided by the ForestFormer3D count, red where SegmentAnyTree finds more trees, blue where it finds fewer; 1.00 would mean identical totals.](assets/analytics/analytics_tile_grid.png)
+
+What we see: both methods agree on where the trees are -- the darkest cells are the closed forest in the west (R13) and north-east (the Tegel forest north of 5829), the palest are the lake tile 381_5827 (Tegeler See, 2-3 thousand trees) and the housing to the east. The ratio map is not noise: it is a block of red over the R13 forest tiles and a block of blue-to-white over R12 and the built-up tiles, i.e. the two methods differ systematically by forest, not tile by tile.
 
 SegmentAnyTree finds 1.036x the ForestFormer3D tree count over the mosaic (per tile from 0.80 to 1.33). On the 16 tiles that are more than half forest by the stand map the ratio averages 1.06, on the other 17 tiles 1.01. The two surveyed forests differ: R12 0.96 (8 tiles with at least a quarter of the tile inside the footprint), R13 1.21 (8 tiles with at least a quarter of the tile inside the footprint). Where SegmentAnyTree reports more trees it has cut crowns into more pieces (section 4); where it reports fewer, ForestFormer3D's extra instances are mostly the small and flat ones of section 3.
 
 ## 3. Size distributions and quality flags
 
-![Per-tree size distributions](assets/analytics/analytics_distributions.png)
+![Per-tree size distributions over the whole mosaic. Each panel is a normalised histogram (area 1) of one attribute of the tree table, one curve per method, so curves of methods with different tree counts are comparable in shape: height above ground in 1 m bins; crown area (convex hull of the instance's points) in 4 m² bins; points per instance on a logarithmic axis. n is the number of trees behind each curve.](assets/analytics/analytics_distributions.png)
+
+What we see: the height panel has two modes for both methods, a tall one at 24-28 m (the pine and oak canopy) and a short one at 4-7 m (understory, hedges, young trees in gardens), with a trough at 12-18 m; ForestFormer3D puts more mass under 8 m and SegmentAnyTree more at 20-30 m. The crown-area panel shows SegmentAnyTree's crowns shifted to smaller areas (mode 8-12 m² against 20-30 m²) -- the signature of cutting crowns into pieces. The points-per-tree panel has a spike at the smallest sizes for ForestFormer3D (instances of 10-20 points, the noise-sized class of the table below) and otherwise the same log-linear decline for both.
 
 | method | trees | flat blobs (< 2 m, > 50 m²) | noise-sized (< 20 points) | taller than 40 m |
 | :--- | ---: | ---: | ---: | ---: |
@@ -34,7 +38,9 @@ The flat-blob flag is the artefact seen in the viewer: an instance with almost n
 
 On the 3 tiles all three methods cover (380_5828, 381_5828, 381_5829):
 
-![Three methods on the shared tiles](assets/analytics/analytics_distributions_3way.png)
+![The same three distributions restricted to the tiles all three methods cover, now with AMS3D. Same axes and binning as the previous figure.](assets/analytics/analytics_distributions_3way.png)
+
+What we see: AMS3D has no short mode at all -- its height distribution starts at about 10 m -- and its crowns are the largest of the three. Mean shift with a height-dependent bandwidth merges the understory into the canopy tree above it, which is why it reports the fewest trees and the tallest ones; the two learned methods separate that layer.
 
 | method | trees on these tiles | height p10 / p50 / p90 (m) | crown p50 (m²) |
 | :--- | ---: | ---: | ---: |
@@ -44,13 +50,17 @@ On the 3 tiles all three methods cover (380_5828, 381_5828, 381_5829):
 
 ## 4. Instance agreement: ForestFormer3D vs SegmentAnyTree
 
-![Agreement per tile](assets/analytics/analytics_agreement.png)
+![Instance agreement per km tile between ForestFormer3D (blue) and SegmentAnyTree (magenta), computed on identical points. Top: the fraction of each method's trees that have a counterpart in the other method overlapping with IoU ≥ 0.5 (bars), and the median IoU of those matched pairs (black line, right-hand reading on the same 0-1 axis). Bottom: the fraction of each method's trees whose points are covered by two or more instances of the other method -- a tree the other method has split. Tiles are ordered by easting, then northing.](assets/analytics/analytics_agreement.png)
+
+What we see: the matched fractions move together from tile to tile (0.35-0.68) and are lowest on the built-up tiles (380_5830, 383_5826/5827), where both methods segment small garden vegetation differently, and highest on closed forest; the median IoU of a match is flat at 0.71-0.78 everywhere, so when the two agree on a tree they agree on its extent. The bottom panel is the asymmetry the whole chapter turns on: the blue bars (ForestFormer3D trees split by SegmentAnyTree) are 2-4x the magenta ones on every tile, 0.32-0.38 on the R13 forest tiles.
 
 Pooled over 33 tiles and 584,133,672 identical points: 451,513 tree pairs overlap with IoU ≥ 0.5, i.e. 53.8 % of ForestFormer3D's 839,626 trees and 52.1 % of SegmentAnyTree's 867,266; the median IoU of a matched pair is 0.742. 26.8 % of ForestFormer3D trees are covered by two or more SegmentAnyTree instances against 11.0 % the other way round: where the two disagree, SegmentAnyTree has mostly cut one crown into several, which is also why it reports more trees.
 
 ## 5. Seams and the building mask
 
-![Seams and building mask](assets/analytics/analytics_seams_buildings.png)
+![Left: seam residue per km tile after the mosaic-wide stitch -- the percentage of crowns that a 100 m grid line (the sub-tile borders used for inference) still intersects, per method; the control value for an arbitrary line through the same crowns is about 8 %. Right: the percentage of ForestFormer3D instances on each tile that the ALKIS building mask removes because at least half of their points lie on a roof.](assets/analytics/analytics_seams_buildings.png)
+
+What we see, left: ForestFormer3D sits at 10-12 % on every tile, i.e. 2-4 points above the control floor, and SegmentAnyTree at 13-16 % with outliers to 20 % -- its smaller, more numerous instances touch lines more often, and some of its matches across sub-tiles fail the IoU threshold. Neither shows the 30-40 % that an un-haloed split produced. Right: the forest tiles lose nothing (no buildings), the lakeside and housing tiles 5-20 %, and 383_5827 -- the densest housing -- 40 % of its instances were roofs or roof vegetation.
 
 | method | trees after stitch | instances unified over halos | cross-km matches | crowns touching a grid line (mean) | strip excess (mean pp) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
@@ -63,7 +73,9 @@ The ALKIS footprints cover every tile; the mask removes 35,842 of 839,626 Forest
 
 ## 6. Against the forest inventory (Forstbetriebskarte 2014)
 
-![Predicted vs inventory height per stand](assets/analytics/analytics_stand_heights.png)
+![Predicted canopy height against the forest inventory, one marker per stand (only stands with at least 20 predicted trees and an inventory height). Horizontal axis: the height of the main canopy layer from the 2014 Forstbetriebskarte, a stand mean of dominant trees. Vertical axis: the 90th percentile of ForestFormer3D tree heights inside that stand. Marker size scales with the number of predicted trees in the stand, colour is the stand's dominant species (six most frequent by area; grey = other). The dashed line is equality.](assets/analytics/analytics_stand_heights.png)
+
+What we see: the cloud follows the diagonal -- taller stands in the inventory are taller in the predictions -- and sits 4.4 m above it, consistently for pine, oak and larch; beech (green, the 30-36 m stands) lies on the line. The offset is expected: the ALS is seven growing seasons younger than the inventory, and a 90th percentile of tree tops exceeds a mean of dominant heights. The few stands far above the line at low inventory height (10-15 m) are young stands where tall remnant trees dominate the predicted percentile.
 
 | dominant species | stands | ha | FF3D trees | trees / ha | inventory height (m) | pred. median (m) | pred. p90 (m) | crown p50 (m²) |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -80,7 +92,9 @@ Every ForestFormer3D tree was joined to the stand it stands in (458 stands with 
 
 ## 7. Against the tree cadastre (street and park trees)
 
-![Cadastre heights](assets/analytics/analytics_cadastre.png)
+![Street and park trees of the Berlin tree cadastre against the predictions. Left: for every cadastre tree with a predicted tree top within 3 m, the cadastre's height (horizontal, whole metres as recorded at inspection, hence the vertical stripes) against the height of that predicted tree (vertical), one dot per tree, blue ForestFormer3D and magenta SegmentAnyTree, dashed line = equality. Right: histogram of predicted minus cadastre height for the same pairs, 1 m bins.](assets/analytics/analytics_cadastre.png)
+
+What we see: the stripes are the cadastre's integer heights, which stop at 30 m. Within each stripe the predicted heights spread widely, but their centre rises with the cadastre value and the residual histogram is symmetric about zero with a sharp peak (bias 0.09 m, MAE 4.3 m): most matched pairs agree to within a few metres. The dots far above the diagonal at cadastre heights of 4-8 m are young street trees whose nearest predicted top belongs to a taller neighbour's crown (the nearest-top rule assigns it anyway); the dots far below are large cadastre trees for which only a fragment was predicted. The two methods overlay almost exactly, so the scatter is the reference's and the matching rule's, not the model's.
 
 | method | cadastre trees in the mosaic | with a predicted top ≤ 3 m away | street | park | height pairs | bias (m) | MAE (m) | r |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
