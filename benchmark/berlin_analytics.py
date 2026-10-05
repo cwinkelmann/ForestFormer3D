@@ -290,6 +290,56 @@ def fig_cadastre(matched, out: Path):
     fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
 
 
+def fig_study_area(als: Path, trees: dict, out: Path):
+    """The study area: km tiles by processing status, the forest stands, the two survey
+    footprints and the building footprints, for the introduction."""
+    import geopandas as gpd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch, Rectangle
+
+    fig, ax = plt.subplots(figsize=(11, 7.2))
+    stands = als / "berlin_forest" / "forstbetriebskarte_2014.gpkg"
+    if stands.exists():
+        gpd.read_file(stands, layer="hauptbaumarten", columns=["geometry"]).to_crs(EPSG).plot(ax=ax, color="#b9dca6", edgecolor="none")
+    bld = als / "berlin_buildings" / "alkis_buildings.gpkg"
+    if bld.exists():
+        gpd.read_file(bld, layer="buildings", columns=["geometry"]).to_crs(EPSG).plot(ax=ax, color="#9a9a9a", edgecolor="none", linewidth=0)
+    processed = set(trees["ff3d"].tile.unique()) if "ff3d" in trees else set()
+    rev = als / "berlin_forest" / "reviere.gpkg"
+    status = {}
+    if rev.exists():
+        cov = gpd.read_file(rev, layer="coverage")
+        for _, r in cov.iterrows():
+            status.setdefault(r.tile, r.status)
+    tiles = processed | set(status)
+    colours = {"processed": "#1f5fbf", "downloaded": "#e08a1e", "missing": "#d63a3a"}
+    for t in sorted(tiles):
+        e, n = int(t.split("_")[2]) * 1000, int(t.split("_")[3]) * 1000
+        st = "processed" if t in processed else status.get(t, "missing")
+        ax.add_patch(Rectangle((e, n), 1000, 1000, fill=False, edgecolor=colours[st], linewidth=1.6 if st == "processed" else 1.2,
+                               linestyle="-" if st == "processed" else "--"))
+        ax.text(e + 500, n + 500, t[7:15], ha="center", va="center", fontsize=6.5, color=colours[st])
+    if rev.exists():
+        fp = gpd.read_file(rev, layer="footprints").to_crs(EPSG)
+        for _, f in fp.iterrows():
+            gpd.GeoSeries([f.geometry], crs=EPSG).boundary.plot(ax=ax, color="#5a0a3a" if f.key == "R13" else "#0a2a6a", linewidth=2.2)
+            c = f.geometry.representative_point()
+            ax.text(c.x, c.y, f.key, fontsize=12, fontweight="bold", color="#5a0a3a" if f.key == "R13" else "#0a2a6a", ha="center")
+    ax.set_aspect("equal"); ax.set_xlabel("easting (m, EPSG:25833)"); ax.set_ylabel("northing (m)")
+    ax.ticklabel_format(style="plain", useOffset=False)
+    ax.legend(handles=[Patch(facecolor="#b9dca6", label="forest stands (Forstbetriebskarte 2014)"),
+                       Patch(facecolor="#9a9a9a", label="buildings (ALKIS)"),
+                       Patch(facecolor="none", edgecolor=colours["processed"], label=f"km tile processed ({len(processed)})"),
+                       Patch(facecolor="none", edgecolor=colours["downloaded"], linestyle="--", label="downloaded, not processed"),
+                       Patch(facecolor="none", edgecolor=colours["missing"], linestyle="--", label="not downloaded"),
+                       Patch(facecolor="none", edgecolor="#0a2a6a", linewidth=2, label="WINMOL survey footprints R12 / R13")],
+              loc="lower right", fontsize=8, frameon=True)
+    ax.set_title("Study area: Berlin ALS 2021 km tiles around the Tegel and Spandau forests", fontsize=11)
+    fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
+
+
 # ---------------------------------------------------------------------------- analyses
 def stand_analysis(trees_ff3d, stands_path: Path):
     """Join every ForestFormer3D tree to the 2014 stand it stands in."""
@@ -659,8 +709,9 @@ def main(argv=None) -> int:
         if "ff3d" in matched and "sat" in matched:
             fig_cadastre(matched, a.assets / "analytics_cadastre.png")
 
-    print("== footprints")
+    print("== footprints, study area")
     S["footprints"] = footprint_analysis(trees, als / "berlin_forest" / "reviere.gpkg")
+    fig_study_area(als, trees, a.assets / "analytics_study_area.png")
 
     (a.assets / "analytics.json").write_text(json.dumps(S, indent=1, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)))
     write_doc(a.doc, assets_rel, S, labels)

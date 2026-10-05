@@ -129,11 +129,31 @@ def max_tree_id(gdal_bin: Path, gpkg: Path, layer: str) -> int:
 
 
 # --------------------------------------------------------------------------- derived
-def build_vrt(gdal_bin: Path, out: Path, files: list[Path], nodata=None) -> None:
+def band_count(gdal_bin: Path, f: Path) -> int:
+    return len(re.findall(r"^Band \d+ ", run([str(gdal_bin / "gdalinfo"), str(f)]), re.M))
+
+
+def build_vrt(gdal_bin: Path, out: Path, files: list[Path], nodata=None, bands: int | None = None, warn=print) -> None:
+    """One VRT over ``files``. gdalbuildvrt silently DROPS a source whose band count differs
+    from the first file's (exit 0, a warning on stderr), which is how a 4-band (RGB+alpha)
+    and a 3-band delivery of the same orthophoto once produced a layer of eleven tiles out
+    of forty-four. ``bands`` selects the first N bands of every source so mixed deliveries
+    mosaic; any warning gdalbuildvrt prints is surfaced, and so is a short VRT."""
     cmd = [str(gdal_bin / "gdalbuildvrt"), "-overwrite", "-q"]
     if nodata is not None:
         cmd += ["-srcnodata", str(nodata), "-vrtnodata", str(nodata)]
-    run(cmd + [str(out)] + [str(f) for f in files])
+    if bands:
+        for b in range(1, bands + 1):
+            cmd += ["-b", str(b)]
+    r = subprocess.run(cmd + [str(out)] + [str(f) for f in files], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"gdalbuildvrt failed ({r.returncode}): {r.stderr.strip()[:400]}")
+    for line in r.stderr.splitlines():
+        if "Warning" in line or "Skipping" in line:
+            warn(f"  gdalbuildvrt {out.name}: {line.strip()[:160]}")
+    n = len(set(vrt_sources(out)))
+    if n != len(files):
+        warn(f"  !!! {out.name}: {n} of {len(files)} source files made it into the VRT")
 
 
 def merge_gpkg(gdal_bin: Path, out: Path, inputs: list[tuple[str, Path]], layer: str) -> None:
@@ -189,7 +209,15 @@ def phase_derived(als: Path, out: Path, gdal_bin: Path) -> dict:
         files = sorted(p for p in d.glob("3dm_33_*.tif") if not p.name.startswith("._")) if d.is_dir() else []
         if files:
             v = derived / f"{key}.vrt"
-            build_vrt(gdal_bin, v, files)
+            # a WMS delivery can change between fetches (RGB+alpha one month, RGB the next);
+            # mosaic the bands every file has, or gdalbuildvrt drops the odd ones out silently
+            counts = {f: band_count(gdal_bin, f) for f in files}
+            nb = min(counts.values())
+            if len(set(counts.values())) > 1:
+                odd = [f.stem[7:15] for f, c in counts.items() if c != nb]
+                print(f"  {label}: mixed band counts {sorted(set(counts.values()))}, using the first {nb} of every file "
+                      f"({len(odd)} files differ: {', '.join(odd[:6])}{', ...' if len(odd) > 6 else ''})")
+            build_vrt(gdal_bin, v, files, bands=nb)
             # Read the band count rather than trusting the directory name: the 2025 summer
             # set is delivered as RGBI although nothing in its name says so.
             bands = len(re.findall(r"^Band \d+ ", run([str(gdal_bin / "gdalinfo"), str(v)]), re.M))
@@ -743,13 +771,104 @@ def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False,
     return written
 
 
+# ------------------------------------------------------------------------------- check
+def vrt_sources(vrt: Path) -> list[Path]:
+    """The source files a GDAL VRT mosaics (relative ones resolved against the VRT)."""
+    root = ET.parse(vrt).getroot()
+    out = []
+    for el in root.iter("SourceFilename"):
+        p = Path(el.text or "")
+        if el.get("relativeToVRT") == "1" and not p.is_absolute():
+            p = (vrt.parent / p).resolve()
+        out.append(p)
+    return out
+
+
+def gpkg_tiles(gdal_bin: Path, gpkg: Path, layer: str) -> int:
+    """Distinct ``tile`` values in a merged GeoPackage layer (0 when there is no such column)."""
+    try:
+        out = run([str(gdal_bin / "ogrinfo"), "-q", "-ro", str(gpkg), "-sql", f"SELECT COUNT(DISTINCT tile) AS n FROM {layer}"])
+    except RuntimeError:
+        return 0
+    m = re.search(r"n \(\w+\) = (\d+)", out)
+    return int(m.group(1)) if m else 0
+
+
+def phase_check(als: Path, out: Path, gdal_bin: Path, project: Path | None = None) -> int:
+    """Is the written project complete? Every layer's datasource must exist, and every
+    mosaicked layer must carry every tile that exists on disk for its product. Prints one
+    line per layer and a summary; returns the number of problems (0 = complete)."""
+    project = project or out / "berlin_als_2021.qgz"
+    root = read_qgs(project)
+    on_disk = {}
+    for key, (name, rel, _) in METHODS.items():
+        r = als / rel
+        on_disk[key] = set(tiles_of(r, warn=lambda m: None)) if r.is_dir() else set()
+    for key, d in (("dop2021_rgb", "berlin_dop_2021/dop_2021_rgb"), ("dop2021_rgbi", "berlin_dop_2021/dop_2021_rgbi"), ("dop2025", "berlin_dop_2025_sommer")):
+        p = als / d
+        on_disk[key] = {f.stem for f in p.glob("3dm_33_*.tif") if not f.name.startswith("._")} if p.is_dir() else set()
+    terr = als / "berlin_terrain"
+    for key, suffix in (("dtm", "_dtm_1m.tif"), ("dsm", "_dsm_50cm.tif"), ("chm", "_chm_50cm.tif")):
+        on_disk[key] = {t.name for t in terr.iterdir() if t.is_dir() and (t / f"{t.name}{suffix}").exists()} if terr.is_dir() else set()
+    problems = 0
+    rows = []
+    for ml in root.iter("maplayer"):
+        name = ml.findtext("layername") or ""
+        provider = ml.findtext("provider") or ""
+        src = ml.findtext("datasource") or ""
+        path_s = src.split("|")[0]
+        note = ""
+        if provider in ("ogr", "gdal", "pdal"):
+            p = Path(path_s)
+            if not p.is_absolute():
+                p = (out / p).resolve()
+            if not p.exists():
+                note = "MISSING FILE"; problems += 1
+            elif p.suffix == ".vrt":
+                srcs = vrt_sources(p)
+                gone = [s for s in srcs if not s.exists()]
+                stems = {s.stem.split("_dtm")[0].split("_dsm")[0].split("_chm")[0].split("_instance")[0].split("_semantic")[0] for s in srcs}
+                prod = max((k for k in on_disk if p.stem.startswith(k) or p.stem == f"terrain_{k}"), key=len, default=None)
+                exp = on_disk.get(prod, set())
+                lacking = sorted(exp - stems)
+                note = f"{len(stems)} tiles"          # a 3-band VRT lists each file once per band
+                if gone:
+                    note += f", {len(gone)} source files MISSING"; problems += 1
+                if lacking:
+                    note += f", {len(lacking)} on disk but not in the layer: {', '.join(t[7:15] for t in lacking)}"; problems += 1
+            elif p.suffix == ".gpkg" and "layername=" in src and p.parent.name == "derived":
+                layer = src.split("layername=")[1].split("|")[0]
+                prod = p.stem.rsplit("_", 1)[0]
+                n = gpkg_tiles(gdal_bin, p, layer)
+                exp = len(on_disk.get(prod, set()))
+                note = f"{n} tiles"
+                if exp and n != exp:
+                    note += f", {exp} on disk"; problems += 1
+            else:
+                note = "ok"
+        else:
+            note = provider
+        rows.append((name[:70], note))
+    for name, note in rows:
+        flag = "!!" if ("MISSING" in note or "not in the layer" in note or "on disk" in note) else "  "
+        print(f"  {flag} {name:<70} {note}")
+    tree_ids = {x.get("id") for x in root.iter("layer-tree-layer")}
+    ids = {m.findtext("id") for m in root.iter("maplayer")}
+    if tree_ids != ids:
+        print(f"  !! layer tree and projectlayers disagree ({len(tree_ids)} vs {len(ids)} ids)"); problems += 1
+    print(f"  on disk: " + ", ".join(f"{k} {len(v)}" for k, v in on_disk.items()))
+    print(f"  {len(rows)} layers, {problems} problem(s)")
+    return problems
+
+
 # ------------------------------------------------------------------------------- main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--als-data", type=Path, default=Path("/Volumes/2TB/winmol/ALS_Data"))
     ap.add_argument("--out", type=Path, default=None, help="default <als-data>/berlin_qgis")
     ap.add_argument("--gdal-bin", type=Path, default=Path("/opt/local/bin"))
-    ap.add_argument("--phase", choices=["derived", "project", "all"], default="all")
+    ap.add_argument("--phase", choices=["derived", "project", "all", "check"], default="all",
+                    help="check = verify the written project is complete against what is on disk")
     ap.add_argument("--live-wfs", action="store_true",
                     help="reference the Berlin tree cadastre as live WFS layers instead of the "
                          "GeoPackage from benchmark/fetch_berlin_trees.py (QGIS 3.44 on this Mac "
@@ -772,6 +891,9 @@ def main(argv=None) -> int:
             print(f"!!! {tool} not found under {a.gdal_bin}", file=sys.stderr)
             return 2
     out.mkdir(parents=True, exist_ok=True)
+    if a.phase == "check":
+        print("== check")
+        return 1 if phase_check(a.als_data, out, a.gdal_bin) else 0
     if a.phase in ("derived", "all"):
         print("== derived data")
         manifest = phase_derived(a.als_data, out, a.gdal_bin)
@@ -785,6 +907,8 @@ def main(argv=None) -> int:
         print("== project")
         for p in phase_project(a.als_data, out, manifest, live_wfs=a.live_wfs, imports=a.import_project):
             print(f"  wrote {p}")
+        print("== check")
+        return 1 if phase_check(a.als_data, out, a.gdal_bin) else 0
     return 0
 
 

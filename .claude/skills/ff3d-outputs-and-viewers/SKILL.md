@@ -237,7 +237,12 @@ mosaic processed it, only downloaded it, or never fetched it -- R13 Spandau is 5
 one unchecked top-level group, resolving relative datasources against that project's
 directory; this is how the WINMOL retraining project
 (`~/work/hnee/WINMOL/Winmol_retraining_Tegel.qgz`, 108 layers) lives inside the Berlin
-project. After a regeneration, QGIS shows the old tree until Project ▸ Revert.
+project. After a regeneration, QGIS shows the old tree until Project ▸ Revert. `--phase check` (also run
+automatically after every project build) verifies completeness: every datasource exists, every
+VRT carries every tile on disk for its product, every merged GeoPackage has every tile; it found
+the DOP 2025 layer holding 11 of 44 tiles because gdalbuildvrt silently drops sources whose band
+count differs (a 4-band RGB+alpha delivery next to a 3-band one) -- `build_vrt` now selects a
+common band count and surfaces gdalbuildvrt's warnings.
 
 Building one by hand instead:
 

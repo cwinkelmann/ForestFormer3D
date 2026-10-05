@@ -29,28 +29,31 @@ title, every other heading is shifted down one level, a `\newpage` precedes each
 exist is replaced by a visible *[figure missing: ...]* note -- a missing image otherwise
 aborts xelatex with an error naming only a temp file.
 
-## Which documents, in what order
+## Structure: the report proper, then an appendix
 
-`DEFAULT_ORDER` in the script is the narrative, not the file-name order:
+Since 2026-10-05 the PDF has two parts. `MAIN` in the script is the reader-facing report
+-- `summary` (executive summary), `introduction` (question, study area figure
+`assets/analytics/analytics_study_area.png`, data at a glance), `data-sources`, `methods`,
+`berlin-analytics` (the GENERATED results chapter) and `discussion` (findings, limitations,
+outlook) -- without source lines. `APPENDIX` holds the working studies as they were written
+(`carrot-ff3d`, `inference-profile`, `als-density-eval`, `tegel-als`, `tegel-berlin-2021`,
+`spandau-berlin-2021`, `berlin-visual-report`, `berlin-dop-overlay`, `seamless-ids`,
+`segmentanytree-berlin`, `ams3d-berlin`, `potree-viewer`), each with its "Source: ..., last
+edited" line, behind a `\appendix` part page. `RUNBOOK-*.md` and the session log stay out.
 
-1. `carrot-ff3d` -- the released model reproduced on the H100 host
-2. `inference-profile` -- where inference time goes, `region_step_factor`
-3. `als-density-eval` -- the thinning study
-4. `tegel-als`, `tegel-berlin-2021`, `spandau-berlin-2021` -- the Berlin runs
-5. `berlin-visual-report`, `berlin-dop-overlay` -- figures and orthophoto overlays
-6. `seamless-ids` -- halo + mosaic-wide stitch
-7. `segmentanytree-berlin`, `ams3d-berlin` -- the two comparison methods
-8. `berlin-analytics` -- the GENERATED comparisons chapter: `benchmark/berlin_analytics.py`
-   writes `docs/benchmarks/2026-10-05-berlin-analytics.md` and `assets/analytics/*.png` from the
-   stitched tree tables, border/stitch/mask JSONs, the agreement JSONs under
-   `ALS_Data/berlin_agreement/`, the forest stand map and the tree cadastre. Never edit that
-   markdown by hand -- change the script's `write_doc` and re-run it (a minute), then rebuild.
-9. `potree-viewer`
+**Numbers in the hand-written chapters are placeholders**, filled at build time from
+`docs/benchmarks/assets/analytics/analytics.json` (written by `benchmark/berlin_analytics.py`):
+`{{methods.ff3d.trees}}`, `{{agreement.ff3d_sat.matched_frac_a|pct}}`, `{{stands_r|2}}`,
+`{{methods.ff3d.height_q.1}}` (list index), formats `pct`, `pct0`, `int`, or a digit count.
+An unknown key renders as a visible `[n/a: key]` and a warning, never silently. So after
+the mosaic changes: run `berlin_analytics.py`, then rebuild, and the summary follows the
+data. Never write a number by hand into summary/introduction/discussion that the analytics
+JSON has.
 
-`RUNBOOK-*.md` and the session log are deliberately NOT in it: a reader-facing report is
-not an operations manual. To add a study, write it as `docs/benchmarks/<date>-<key>.md`
-with one H1 and put `<key>` into `DEFAULT_ORDER` where it belongs in the story; `--docs`
-builds an ad-hoc subset without touching the default.
+Headings: the first H1 is the chapter, H2/H3 stay sections/subsections (pandoc numbers
+them; a manual "## 3b. Title" prefix is stripped). To add a study, write it as
+`docs/benchmarks/<date>-<key>.md` with one H1 and put `<key>` into `APPENDIX` (or `MAIN`
+if it is reader-facing); `--docs` builds an ad-hoc subset.
 
 ## Verify before handing it over
 
@@ -68,8 +71,8 @@ for o in top: print(" -", o.title)
 PY
 ```
 
-Expected on 2026-10-05: 78 pages, 12 chapters, 17 images, every chapter title a study
-name. Two figures referenced by `2026-09-22-tegel-als.md`
+Expected on 2026-10-05 (evening): ~105 pages, 6 chapters + 12 appendix studies (7 top-level
+outline entries, the last being the appendix part), 25 images. Two figures referenced by `2026-09-22-tegel-als.md`
 (`assets/2026-09-22-tegel-r12-qgis.png`, `-r13-qgis.png`) do not exist in
 `docs/benchmarks/assets/` and appear as *figure missing* notes; they are QGIS screenshots
 the user takes by hand -- drop them into `assets/` and rebuild.
