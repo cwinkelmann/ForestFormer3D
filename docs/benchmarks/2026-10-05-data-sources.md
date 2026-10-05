@@ -72,6 +72,32 @@ densest built-up tiles lose the most: 383_5827 40 % of its "trees" (5,330 instan
 383_5826 3,982, 380_5830 3,800. Any "buildings masked" figure quoted before 2026-10-05
 was computed with ten tiles unmasked and is superseded by these numbers.
 
+## 3b. What grows inside the forest: the Berlin forest stand map
+
+The tree cadastre (section 5) stops at the forest edge. Inside it, the Berliner Forsten
+inventory by stand, and that map is published:
+
+| | |
+|---|---|
+| Product | "Alters- und Bestandesstruktur der Wälder – Forstbetriebskarte 2014", Umweltatlas Berlin; catalogue record `f15f6603-4640-3d64-9dfb-45575347a901` |
+| Access | WFS `https://gdi.berlin.de/services/wfs/ua_forstbetriebskarte_2014`, feature types `c_hauptbaumarten` (stands with species by canopy layer), `a_mischbaumarten`, `b_forstverwalt` |
+| Licence | dl-de/zero-2-0 (from the capabilities document, checked 2026-10-05) |
+| Content per stand | id, forest district, stand type, area, age class, and for the main layer (`s1`), two lower layers and the standards: up to five species each with code, German name, mixing share (%), DBH (cm) and height (m) |
+| Fetch | `benchmark/fetch_berlin_forest_stands.py` -> `ALS_Data/berlin_forest/forstbetriebskarte_2014.gpkg`; **740 stands, 2,227 ha** intersect the 33-tile mosaic, all in forest district Tegel |
+| Caveat | a 2014 management inventory, seven years before the 2021 ALS; stand polygons are 1-20 ha, so it says what a stand is made of, not where any tree stands |
+
+Area-weighted composition of the main canopy layer over those 740 stands: **Scots pine
+53.9 %**, sessile oak 19.4 %, beech 6.1 %, European larch 4.0 %, birch 3.7 %, "oak"
+unspecified 3.1 %, pedunculate oak 1.4 %, Douglas fir 1.2 %, then black alder, ash, red
+oak and small-leaved lime below 1 % each. So the canopy ForestFormer3D segments here is
+predominantly pine with oak, which matters for reading the results: the model was trained
+on mixed temperate plots, and pine crowns are the sparse, high-crowned case.
+
+The 974 Probekreis crowns of section 5 tell the opposite story -- beech 70 %, pine 12 %,
+birch 7 % -- and their median polygon is under 1 m²: they are the regeneration layer under
+that pine canopy, not the canopy. The two sources describe different strata of the same
+forest and should not be compared as if they were one population.
+
 ## 4. Models
 
 **ForestFormer3D** -- Xiang, Wielgosz, Puliti, Král, Krůček, Missarov, Astrup: "ForestFormer3D",

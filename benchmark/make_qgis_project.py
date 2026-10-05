@@ -298,8 +298,21 @@ def raster_layer_xml(lid: str, name: str, source: str, renderer: str, bounds, ll
             f"<blendMode>0</blendMode></maplayer>")
 
 
-def symbol_fill(outline: str, width="0.3", fill="0,0,0,0", style="no") -> str:
-    return (f"<symbol type=\"fill\" name=\"0\" alpha=\"1\" clip_to_extent=\"1\" force_rhr=\"0\" is_animated=\"0\" frame_rate=\"10\">"
+def renderer_categorized(attr: str, categories: list[tuple[str, str]], outline="60,60,60,120") -> str:
+    """``<renderer-v2 type="categorizedSymbol">`` over ``attr``: one (value, fill colour) per
+    category plus a final grey catch-all (an empty value matches everything else)."""
+    cats, syms = [], []
+    for i, (value, colour) in enumerate(categories + [("", "158,158,158,90")]):
+        label = value or "other"
+        cats.append(f"<category value=\"{esc(value)}\" symbol=\"{i}\" label=\"{esc(label)}\" render=\"true\" type=\"string\"/>")
+        syms.append(symbol_fill(outline, "0.15", colour, "solid", name=str(i)))
+    return (f"<renderer-v2 type=\"categorizedSymbol\" attr=\"{esc(attr)}\" forceraster=\"0\" symbollevels=\"0\" "
+            f"enableorderby=\"0\" referencescale=\"-1\"><categories>{''.join(cats)}</categories>"
+            f"<symbols>{''.join(syms)}</symbols><rotation/><sizescale/></renderer-v2>")
+
+
+def symbol_fill(outline: str, width="0.3", fill="0,0,0,0", style="no", name="0") -> str:
+    return (f"<symbol type=\"fill\" name=\"{name}\" alpha=\"1\" clip_to_extent=\"1\" force_rhr=\"0\" is_animated=\"0\" frame_rate=\"10\">"
             f"<layer class=\"SimpleFill\" enabled=\"1\" locked=\"0\" pass=\"0\"><Option type=\"Map\">"
             f"<Option name=\"color\" type=\"QString\" value=\"{fill}\"/>"
             f"<Option name=\"outline_color\" type=\"QString\" value=\"{outline}\"/>"
@@ -331,7 +344,12 @@ def symbol_marker(color: str, size_expr: str | None = None) -> str:
 
 
 def vector_layer_xml(lid: str, name: str, source: str, geometry: str, symbol: str, bounds, ll, wkt: str,
-                     provider: str = "ogr") -> str:
+                     provider: str = "ogr", renderer: str | None = None) -> str:
+    """``renderer`` (a whole ``<renderer-v2>``) replaces the default single-symbol one built
+    from ``symbol``; pass it for categorized layers."""
+    renderer_xml = renderer or (
+        f"<renderer-v2 type=\"singleSymbol\" forceraster=\"0\" symbollevels=\"0\" enableorderby=\"0\" referencescale=\"-1\">"
+        f"<symbols>{symbol}</symbols><rotation/><sizescale/></renderer-v2>")
     return (f"<maplayer type=\"vector\" geometry=\"{geometry}\" autoRefreshTime=\"0\" autoRefreshMode=\"Disabled\" "
             f"hasScaleBasedVisibilityFlag=\"0\" maxScale=\"0\" minScale=\"1e+08\" simplifyDrawingHints=\"1\" "
             f"simplifyDrawingTol=\"1\" simplifyMaxScale=\"1\" simplifyLocal=\"1\" simplifyAlgorithm=\"0\" "
@@ -341,8 +359,7 @@ def vector_layer_xml(lid: str, name: str, source: str, geometry: str, symbol: st
             f"<layername>{esc(name)}</layername><srs>{srs_xml(wkt)}</srs>"
             f"<provider encoding=\"UTF-8\">{provider}</provider>"
             f"<map-layer-style-manager current=\"default\"><map-layer-style name=\"default\"/></map-layer-style-manager>"
-            f"<renderer-v2 type=\"singleSymbol\" forceraster=\"0\" symbollevels=\"0\" enableorderby=\"0\" referencescale=\"-1\">"
-            f"<symbols>{symbol}</symbols><rotation/><sizescale/></renderer-v2>"
+            f"{renderer_xml}"
             f"<blendMode>0</blendMode><featureBlendMode>0</featureBlendMode><layerOpacity>1</layerOpacity></maplayer>")
 
 
@@ -537,8 +554,37 @@ def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False) 
         else:
             print(f"  tree cadastre: {gpkg} missing (benchmark/fetch_berlin_trees.py), group skipped")
 
+    def forest_stands_group():
+        """Berlin's forest stand map (Forstbetriebskarte 2014, Umweltatlas): the only source
+        for what grows INSIDE the forest. Each stand carries up to five species per canopy
+        layer with mixing share; the layer is coloured by the dominant species of the main
+        layer (s1_1_deuts), categories ordered by area-weighted share so the legend reads
+        like the composition. Fetched by benchmark/fetch_berlin_forest_stands.py."""
+        gpkg = als / "berlin_forest" / "forstbetriebskarte_2014.gpkg"
+        if not gpkg.exists():
+            print(f"  forest stands: {gpkg} missing (benchmark/fetch_berlin_forest_stands.py), group skipped")
+            return
+        import geopandas as gpd
+
+        g = gpd.read_file(gpkg, layer="hauptbaumarten", columns=["s1_1_deuts", "gis_area"])
+        share = g.groupby("s1_1_deuts")["gis_area"].sum().sort_values(ascending=False)
+        palette = ["217,164,65,160", "122,74,29,160", "46,139,87,160", "200,239,52,160", "235,235,225,170",
+                   "160,82,45,160", "181,101,29,160", "31,95,63,160", "120,160,200,160", "200,120,160,160"]
+        cats = [(str(sp), palette[i]) for i, sp in enumerate(share.index[:len(palette)])]
+        src = f"{rel(gpkg)}|layername=hauptbaumarten"
+        lid = layer_id("forest_stands_2014")
+        nm = "stands by dominant species of the main canopy layer (2014 inventory)"
+
+        def body():
+            T.layer(vector_layer_xml(lid, nm, src, "Polygon", "", bounds, ll, wkt,
+                                     renderer=renderer_categorized("s1_1_deuts", cats)),
+                    lid, nm, src, "ogr", True)
+
+        T.group("Berlin forest stand map (Forstbetriebskarte 2014, dl-de/zero-2-0)", True, True, body)
+
     # tree order = draw order top-down: vectors over rasters over orthophotos over basemap
     tree_cadastre_group(live_wfs)
+    forest_stands_group()
     buildings_layer()
     for key in ("ff3d", "sat", "ams3d", "ff3d_masked"):
         if key in manifest["methods"]:
