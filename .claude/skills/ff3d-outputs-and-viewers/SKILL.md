@@ -215,6 +215,21 @@ DOP overlays (`benchmark/plot_berlin_dop_overlays.py`) are covered in
 
 ## 6. QGIS (3.28+)
 
+**Ready-made project over the whole Berlin mosaic:** `python benchmark/make_qgis_project.py
+--phase all` (plain Python + MacPorts GDAL, no PyQGIS) writes
+`/Volumes/2TB/winmol/ALS_Data/berlin_qgis/berlin_als_2021.qgz` -- one group per method
+(ForestFormer3D, SegmentAnyTree, AMS3D, ForestFormer3D building-masked), each with the
+crowns, tree tops (size = height), instance ids and semantic classes mosaicked into ONE layer
+per product (GDAL VRTs and merged GeoPackages with a `tile` column, under `berlin_qgis/derived/`),
+plus the three orthophoto sets, the exported terrain, the ALKIS footprints and an OSM basemap.
+The LAS point clouds are a separate `berlin_als_2021_pointclouds.qgz`, because QGIS builds a
+COPC index per file on first load. Re-run after a copy completes: a tile missing a product is
+skipped with a warning, never silently. Why no PyQGIS: the QGIS 3.44 bundle's python refuses
+its own numpy on this Mac (code-signing Team-ID check) and the app's `--code` route does not
+run headless, so the project XML is written directly.
+
+Building one by hand instead:
+
 1. New project, Project ▸ Properties ▸ CRS `EPSG:25833`.
 2. Drag `<T>.las` in — it opens as a point cloud layer, CRS read from the WKT VLR.
    Symbology "Attribute by Ramp" on `treeID` (or `semantic`).
