@@ -657,9 +657,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     ams = sub.add_parser("ams3d", help="adaptive mean shift crown segmentation (CPU) -> "
                                        "the same LAS/GeoPackage/GeoTIFF/report set as run+merge+masks")
-    ams.add_argument("--las", required=True, type=Path,
+    ams.add_argument("--las", type=Path, default=None,
                      help="a km tile in projected coordinates, or a local-coordinate tile "
                           "with an E<x>_N<y> origin token in its name")
+    ams.add_argument("--subtiles", type=Path, default=None, metavar="DIR",
+                     help="instead of --las: an existing `split --buffer` directory (the haloed "
+                          "sub-tiles the ForestFormer3D and SegmentAnyTree runs used). Writes one "
+                          "result LAS per sub-tile with EVERY point in input order, for ONE "
+                          "mosaic-wide `stitch` afterwards -- the like-for-like comparison. "
+                          "No merge, masks or report here; stitch produces those.")
     ams.add_argument("--out", required=True, type=Path, help="output directory")
     ams.add_argument("--buffer", type=float, default=10.0, metavar="M",
                      help="context around each 100 m sub-tile of a km tile (default 10)")
@@ -826,8 +832,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ams3d":
         # Lazy: scipy/geopandas/rasterio are only needed here.
-        from ff3d_geo.ams3d import CONFIGS, run_ams3d_pipeline
+        from ff3d_geo.ams3d import CONFIGS, run_ams3d_pipeline, run_ams3d_subtiles
 
+        if (args.las is None) == (args.subtiles is None):
+            raise ValueError("ams3d: give exactly one of --las (a tile) or --subtiles (a split directory)")
+        if args.subtiles is not None:
+            if not Path(args.subtiles).is_dir():
+                raise ValueError(f"--subtiles {args.subtiles} is not a directory")
+            run_ams3d_subtiles(args.subtiles, args.out, CONFIGS[args.config], workers=args.workers,
+                               epsg=args.epsg, config_name=args.config)
+            return 0
         if not Path(args.las).is_file():
             raise ValueError(f"--las {args.las} does not exist")
         run_ams3d_pipeline(

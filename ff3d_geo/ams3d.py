@@ -362,6 +362,98 @@ def params_for(config: str, **overrides) -> Ams3dParams:
 
 # ---- km-tile pipeline ---------------------------------------------------------
 
+def _pin_blas_threads() -> None:
+    """One BLAS thread per pool worker, or 48 workers x 64-thread pools crawl.
+
+    numpy's and scipy's bundled OpenBLAS each start a thread pool sized to the host
+    (64 threads apiece on carrot's 224 cores) in every spawned worker; 48 workers x 127
+    pool threads then spend their time in the pool barrier and a km tile crawled at ~13
+    runnable processes. Spawned children inherit os.environ and OpenBLAS reads these on
+    import, so set them before the pool starts.
+    """
+    import os
+
+    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
+
+def _subtile_job_all_points(args: tuple) -> dict:
+    """Pool worker for :func:`run_ams3d_subtiles`: every point, input order."""
+    sub_in, sub_out, params, epsg = args
+    info = run_ams3d_tile(sub_in, sub_out, params, buffer_m=0.0, epsg=epsg)
+    info["stem"] = Path(sub_in).stem
+    return info
+
+
+def run_ams3d_subtiles(sub_dir, out_dir, params: Ams3dParams = Ams3dParams(),
+                       workers: int | None = None, epsg: int = DEFAULT_EPSG,
+                       config_name: str | None = None, log=None) -> dict:
+    """Segment an existing split (``ff3d_geo split --buffer ...``) for ``ff3d_geo stitch``.
+
+    The like-for-like path. :func:`run_ams3d_pipeline` cuts its own 10 m-buffer split,
+    keeps only each sub-tile's core and offsets ids per sub-tile, which leaves a tree cut
+    by a sub-tile border as two trees -- the seam that the ForestFormer3D and
+    SegmentAnyTree production runs no longer have. This instead takes the SAME haloed
+    sub-tiles those runs used (``<sub_dir>/<stem>.las`` next to ``split_manifest.json``
+    and the ``<stem>_ident.npy`` sidecars) and writes one result LAS per sub-tile holding
+    EVERY point in the input order, halo included, so ``stitch`` can match instances over
+    the shared halo and hand out one id per tree across the mosaic. The halo points must
+    carry labels for that, which is why the core is not cropped here.
+
+    Writes ``<out_dir>/<stem>.las`` per sub-tile (the ``run --out`` layout ``stitch``
+    reads with ``--results``) and ``<out_dir>/ams3d_subtiles.json`` with the config and
+    per-sub-tile runtimes. Returns that summary.
+    """
+    from multiprocessing import get_context
+
+    if log is None:
+        def log(msg: str) -> None:
+            print(msg, flush=True)
+
+    import os
+
+    sub_dir, out_dir = Path(sub_dir), Path(out_dir)
+    subtiles = sorted(p for p in sub_dir.glob("*.las") if _parse_size(p.name) is not None)
+    if not subtiles:
+        raise ValueError(f"{sub_dir}: no <stem>_<size>m.las sub-tiles (is this a split directory?)")
+    if not (sub_dir / "split_manifest.json").is_file():
+        raise ValueError(f"{sub_dir}: no split_manifest.json; stitch needs the split's manifest")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if workers is None:
+        workers = max(1, (os.cpu_count() or 2) // 2)
+    n_workers = min(workers, len(subtiles))
+    jobs = [(sub, out_dir / f"{sub.stem}.las", params, epsg) for sub in subtiles]
+
+    t0 = time.perf_counter()
+    results: list[dict] = []
+    _pin_blas_threads()
+    if n_workers == 1:
+        for job in jobs:
+            info = _subtile_job_all_points(job)
+            results.append(info)
+            log(f"  {info['stem']}: {info['n_trees']} trees, {info['n_vegetation']} vegetation pts, "
+                f"{info['seconds']:.1f} s")
+    else:
+        with get_context("spawn").Pool(n_workers) as pool:
+            for info in pool.imap_unordered(_subtile_job_all_points, jobs):
+                results.append(info)
+                log(f"  {info['stem']}: {info['n_trees']} trees, {info['n_vegetation']} vegetation pts, "
+                    f"{info['seconds']:.1f} s")
+    seconds = time.perf_counter() - t0
+    results.sort(key=lambda r: r["stem"])
+    log(f"segmented {len(jobs)} sub-tiles with {n_workers} workers in {seconds:.1f} s")
+    summary = {
+        "config": config_name, "params": params.as_dict(), "workers": n_workers,
+        "sub_dir": str(sub_dir), "n_subtiles": len(jobs), "segmentation_s": seconds,
+        "subtiles": [{k: r[k] for k in ("stem", "n_points", "n_trees", "n_vegetation", "seconds")}
+                     for r in results],
+    }
+    import json
+
+    (out_dir / "ams3d_subtiles.json").write_text(json.dumps(summary, indent=1))
+    return summary
+
+
 def _is_local_tile(las_path: Path) -> bool:
     """True when the file name carries an ``E<x>_N<y>`` origin and its x range lies
     below that easting, i.e. it is a local-coordinate sub-tile (the r12/r13 100 m
@@ -449,13 +541,7 @@ def run_ams3d_pipeline(las_path, out_dir, params: Ams3dParams = Ams3dParams(),
     t0 = time.perf_counter()
     results: list[dict] = []
     n_workers = min(workers, len(jobs))
-    # numpy's and scipy's bundled OpenBLAS each start a thread pool sized to the host
-    # (64 threads apiece on carrot's 224 cores) in every spawned worker; 48 workers x
-    # 127 pool threads then spend their time in the pool barrier and the km tile
-    # crawled at ~13 runnable processes. Spawned children inherit os.environ, and
-    # OpenBLAS reads these on import, so pin the pools to one thread per worker.
-    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
-        os.environ.setdefault(var, "1")
+    _pin_blas_threads()
     if n_workers == 1:
         for job in jobs:
             info = _subtile_job(job)

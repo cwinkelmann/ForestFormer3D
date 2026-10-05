@@ -45,6 +45,27 @@ nohup python -m ff3d_geo ams3d --las inputs/berlin/$T.las --out work_dirs/ams3d-
 tail -f work_dirs/logs/ams3d-$T.log      # one line per finished sub-tile with its seconds
 ```
 
+**Like-for-like with ForestFormer3D and SegmentAnyTree (2026-10-05):** the `--las` path
+above cuts its own 10 m-buffer split, keeps each sub-tile's core and offsets ids per
+sub-tile, so a tree cut by a sub-tile border is two trees -- the seam the other two
+methods no longer have. `--subtiles` runs AMS3D over the SAME haloed sub-tiles those
+production runs used and writes every point in input order (halo included) so ONE
+mosaic-wide `stitch` can unify ids over the shared halo:
+
+```bash
+# per tile, CPU only; 4 queues x 48 workers on carrot's 224 cores, ~30 min per tile
+nohup bash benchmark/ams3d_run_cpu.sh <tile stems...> > work_dirs/logs/ams3d/ams3d-q0-$(date +%Y%m%d-%H%M%S).log 2>&1 < /dev/null &
+#   = python -m ff3d_geo ams3d --subtiles inputs/berlin/sub/<T> --out work_dirs/ams3d33-<T>/sub --workers 48
+# once every tile is done: one stitch, then border-check + masks per tile -> work_dirs/ams3d-mosaic/
+nohup bash benchmark/ams3d_stitch.sh $(ls -d inputs/berlin/sub/*/ | xargs -n1 basename) > work_dirs/logs/ams3d/stitch-$(date +%Y%m%d-%H%M%S).log 2>&1 < /dev/null &
+```
+
+No algorithm change: `run_ams3d_tile(..., buffer_m=0)` already emits all points in input
+order shifted to UTM with treeID/semantic/score, which is exactly `stitch`'s contract
+(`tests/test_geo_ams3d_subtiles.py` ends with a real stitch over the output). The 3-tile
+results under `work_dirs/ams3d-<T>` from the `--las` path are the un-stitched baseline the
+benchmark doc describes; keep them apart from `work_dirs/ams3d33-<T>` / `ams3d-mosaic`.
+
 Options: `--config default|A|B|C`, `--buffer M` (10), `--size M` (100), `--workers N`
 (default `os.cpu_count() // 2`; use 48 on carrot when others are busy), `--keep-subtiles`.
 The km tile is split with `ff3d_geo.split.split_las(..., buffer_m=10)`; each sub-tile is
