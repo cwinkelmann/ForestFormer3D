@@ -215,6 +215,13 @@ DOP overlays (`benchmark/plot_berlin_dop_overlays.py`) are covered in
 
 ## 6. QGIS (3.28+)
 
+**Drone orthomosaic drape (2026-10-06):** the WINMOL 2025 orthomosaics of R12 (9.6 cm) and R13
+(10 cm, EPSG:32633) are cut to km tiles by `benchmark/cut_drone_ortho_tiles.sh` (EPSG:25833,
+0.4 m, RGBA with the footprint as cutline) into `ALS_Data/berlin_drone_2025/<T>.tif`, copied to
+carrot `inputs/berlin_drone_2025/`, and drawn by `build_potree_site.py --drone2025-dir` as the
+`drone2025` layer (between the two DOPs in `LAYER_DZ`); `write_dop_png` keeps an alpha band or
+the nodata value transparent, so a tile the footprint only touches is not painted black.
+
 **Ready-made project over the whole Berlin mosaic:** `python benchmark/make_qgis_project.py
 --phase all` (plain Python + MacPorts GDAL, no PyQGIS) writes
 `/Volumes/2TB/winmol/ALS_Data/berlin_qgis/berlin_als_2021.qgz` -- one group per method

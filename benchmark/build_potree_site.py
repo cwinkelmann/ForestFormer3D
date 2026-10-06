@@ -13,6 +13,7 @@ light-weight overlays that the viewer drapes on top of them:
   data/<tile>_instance.png|.json  instance raster, random colours, transparent nodata
   data/<tile>_dop2021.png|.json   leaf-off orthophoto  (downsampled)
   data/<tile>_dop2025.png|.json   leaf-on orthophoto   (downsampled)
+  data/<tile>_drone2025.png|.json WINMOL 2025 drone orthomosaic, where the survey flew (RGBA)
   data/tiles.json               manifest read by index.html
 
 With ``--variant sat --sat-dir <dir>`` (or ``--variant ams3d --ams3d-dir <dir>``) it
@@ -224,7 +225,17 @@ def write_dop_png(tif: Path, out_png: Path, out_json: Path, bounds, px: int, gro
             out_shape=(n, px, px),
             resampling=Resampling.average,
         )
+        # A drone orthomosaic cut to a km tile covers only part of it: its alpha band
+        # (gdalwarp -dstalpha) or nodata value marks the rest, which must stay see-through
+        # instead of painting the tile black.
+        alpha = None
+        if r.count >= 4 and r.colorinterp[3].name == "alpha":
+            alpha = r.read(4, out_shape=(px, px), resampling=Resampling.nearest)
+        elif r.nodata is not None:
+            alpha = np.where((a == r.nodata).all(axis=0), 0, 255).astype(np.uint8)
     rgb = np.transpose(a, (1, 2, 0)).astype(np.uint8)
+    if alpha is not None and (alpha < 255).any():
+        rgb = np.dstack([rgb, alpha.astype(np.uint8)])
     _png(out_png, rgb)
     _extent_json(out_json, bounds, {"z": round(ground_z, 2)})
 
@@ -369,7 +380,7 @@ def build_tile(tile: str, args_dict: dict) -> dict:
         rec["layers"]["instance"] = {"png": f"data/{tile}_instance.png",
                                      "json": f"data/{tile}_instance.json"}
 
-    for key, src_dir in (("dop2021", a.dop2021_dir), ("dop2025", a.dop2025_dir)):
+    for key, src_dir in (("dop2021", a.dop2021_dir), ("dop2025", a.dop2025_dir), ("drone2025", a.drone2025_dir)):
         if not src_dir:
             continue
         tif = Path(src_dir) / f"{tile}.tif"
@@ -401,6 +412,9 @@ def main() -> int:
                    help="dir with <tile>/<tile>.las + gpkg + tif of that method")
     p.add_argument("--dop2021-dir", default=None)
     p.add_argument("--dop2025-dir", default=None)
+    p.add_argument("--drone2025-dir", default=None,
+                   help="dir with <tile>.tif cut from the WINMOL 2025 drone orthomosaics (RGBA, "
+                        "EPSG:25833; benchmark/cut_drone_ortho_tiles.sh); tiles without one get no layer")
     p.add_argument("--tiles", nargs="*", default=None, help="subset of tile names")
     p.add_argument("--texture-px", type=int, default=1792, help="orthophoto texture size")
     p.add_argument("--chm-cell", type=float, default=0.5)

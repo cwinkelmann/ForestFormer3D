@@ -154,8 +154,8 @@
 			colorMode: "treeid",
 			method: "ff3d",                         // which segmentation the loaded tiles show
 			wanted: new Set(),                      // tiles the user checked (survive a method switch)
-			layers: { chm: false, instance: false, dtm: false, dop2021: false, dop2025: false },
-			opacity: { chm: 0.85, instance: 0.85, dtm: 1.0, dop2021: 1.0, dop2025: 1.0 },
+			layers: { chm: false, instance: false, dtm: false, dop2021: false, dop2025: false, drone2025: false },
+			opacity: { chm: 0.85, instance: 0.85, dtm: 1.0, dop2021: 1.0, dop2025: 1.0, drone2025: 1.0 },
 			vectors: { crowns: false, markers: false },
 			dz: 0,
 			showPoints: true,                       // the drapes sit under the cloud; see buildPointControls
@@ -365,7 +365,7 @@
 
 		// Draw order from the ground up. The gaps only have to beat z-fighting: the drapes
 		// are transparent and depth-sorted, so a layer enabled above another hides it.
-		const LAYER_DZ = { dtm: -0.15, dop2025: 0.0, dop2021: 0.15, instance: 0.30, chm: 0.45 };
+		const LAYER_DZ = { dtm: -0.15, dop2025: 0.0, drone2025: 0.08, dop2021: 0.15, instance: 0.30, chm: 0.45 };
 		// The one list of draped layers: key order here is bottom-to-top and drives both
 		// which meshes get built and their renderOrder. Adding a layer in one place only.
 		const LAYER_KEYS = Object.keys(LAYER_DZ);
@@ -628,6 +628,7 @@
 				chm: "CHM (0.5 m, viridis)", instance: "instance mask",
 				dtm: "terrain / DTM (absolute z)",
 				dop2021: "DOP 2021 (leaf-off)", dop2025: "DOP 2025 (leaf-on)",
+				drone2025: "drone orthomosaic 2025 (WINMOL R12/R13, 10 cm)",
 			};
 			for (const key of Object.keys(names)) {
 				const row = document.createElement("div");

@@ -206,3 +206,41 @@ def test_dtm_png_is_opaque_north_up_and_records_absolute_elevation(tmp_path):
     assert doc["bounds"] == [float(v) for v in bounds]
     assert doc["units"] == "m absolute (DHHN2016)"
     assert doc["vmin"] <= doc["vmax"]
+
+
+def test_dop_png_keeps_an_alpha_band_or_nodata_transparent(tmp_path):
+    """A drone orthomosaic cut to a km tile covers part of it: the alpha band (or the nodata
+    value) must come through as transparency, not as black paint over the rest of the tile."""
+    import numpy as np
+    import rasterio
+    from PIL import Image
+    from rasterio.transform import from_bounds
+
+    from build_potree_site import write_dop_png
+
+    bounds = (381000.0, 5829000.0, 382000.0, 5830000.0)
+    tf = from_bounds(*bounds, 40, 40)
+    rgb = np.full((3, 40, 40), 120, dtype=np.uint8)
+    alpha = np.zeros((40, 40), dtype=np.uint8); alpha[:, 20:] = 255          # right half covered
+    with rasterio.open(tmp_path / "rgba.tif", "w", driver="GTiff", width=40, height=40, count=4, dtype="uint8",
+                       crs="EPSG:25833", transform=tf) as dst:
+        dst.write(np.concatenate([rgb, alpha[None]]))
+        dst.colorinterp = [rasterio.enums.ColorInterp.red, rasterio.enums.ColorInterp.green,
+                           rasterio.enums.ColorInterp.blue, rasterio.enums.ColorInterp.alpha]
+    write_dop_png(tmp_path / "rgba.tif", tmp_path / "a.png", tmp_path / "a.json", bounds, 20, 35.0)
+    a = np.asarray(Image.open(tmp_path / "a.png"))
+    assert a.shape == (20, 20, 4) and (a[:, :10, 3] == 0).all() and (a[:, 10:, 3] == 255).all()
+
+    rgb0 = rgb.copy(); rgb0[:, :, :20] = 0                                     # left half = nodata 0
+    with rasterio.open(tmp_path / "nd.tif", "w", driver="GTiff", width=40, height=40, count=3, dtype="uint8",
+                       crs="EPSG:25833", transform=tf, nodata=0) as dst:
+        dst.write(rgb0)
+    write_dop_png(tmp_path / "nd.tif", tmp_path / "b.png", tmp_path / "b.json", bounds, 20, 35.0)
+    b = np.asarray(Image.open(tmp_path / "b.png"))
+    assert b.shape == (20, 20, 4) and (b[:, :10, 3] == 0).all() and (b[:, 10:, 3] == 255).all()
+
+    with rasterio.open(tmp_path / "full.tif", "w", driver="GTiff", width=40, height=40, count=3, dtype="uint8",
+                       crs="EPSG:25833", transform=tf) as dst:
+        dst.write(rgb)
+    write_dop_png(tmp_path / "full.tif", tmp_path / "c.png", tmp_path / "c.json", bounds, 20, 35.0)
+    assert np.asarray(Image.open(tmp_path / "c.png")).shape == (20, 20, 3)     # opaque stays RGB

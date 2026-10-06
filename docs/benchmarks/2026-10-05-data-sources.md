@@ -148,6 +148,13 @@ predicted tree top within 3 m, and the height residual against the cadastre heig
 unavailable on load although the service answers every request, so the project reads the
 GeoPackage.
 
+The WINMOL 2025 drone campaign also produced orthomosaics of both survey footprints
+(`WINDWURF_Tegel/Revier_12/ortho/result_Res1.2_QGIS_preview_1to8.tif`, 9.6 cm, and
+`Revier_13/Ortho/result_Res10_COG.tif`, 10 cm; EPSG:32633, leaf-on, summer 2025). They are
+cut to km tiles (`benchmark/cut_drone_ortho_tiles.sh`, EPSG:25833, 0.4 m, transparent
+outside the footprint) and draped in the viewer as the `drone2025` layer; they are project
+data, not an open dataset.
+
 The WINMOL 2025 field campaign delineated 974 crowns with species labels inside three
 sample circles (*Probekreise*) in Revier 12 Tegelsee and Revier 13 Spandau
 (`training_data/WINDWURF_Tegel/Revier_1{2,3}/202507_*.gpkg`). They are the only
