@@ -73,8 +73,12 @@ def main() -> int:
                    help="where to put the patched copy (default: system temp)")
     a = p.parse_args()
 
-    scratch = a.scratch or Path(tempfile.gettempdir())
-    scratch.mkdir(parents=True, exist_ok=True)
+    # A private scratch directory per invocation: three converters running the same tile
+    # stem for three methods in parallel once shared /tmp/<stem>.patched.las and converted
+    # each other's copies (76 failures and silently cross-labelled octrees, 2026-10-06).
+    base = a.scratch or Path(tempfile.gettempdir())
+    base.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=f"potree-{a.las.stem}-", dir=str(base)))
     tmp = scratch / f"{a.las.stem}.patched.las"
 
     print(f"[{a.las.stem}] copying + patching -> {tmp}", flush=True)
@@ -88,7 +92,7 @@ def main() -> int:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         sys.stdout.write(r.stdout[-2000:])
     finally:
-        os.remove(tmp)
+        shutil.rmtree(scratch, ignore_errors=True)
 
     ok = (a.out / "metadata.json").exists()
     print(f"[{a.las.stem}] rc={r.returncode} metadata.json={ok}", flush=True)
