@@ -6,7 +6,10 @@ description: Use when running anything on the carrot GPU server (or the T14 work
 # carrot: the GPU server for ForestFormer3D
 
 Every GPU step of this project runs on **carrot**, an 8x H100 80 GB box shared with
-other users. Nothing GPU-related runs on the Mac. The Mac runs `ff3d_geo` conversions,
+other users. **Since 2026-10-06 the user has restricted this project to GPUs 0-3** ("for now"; lift
+only when told): launch queues on those indices only, still skipping any card that is busy
+(`nvidia-smi`) or owned by one of our own queues (`pgrep -f`), e.g. `EXTEND_GPUS="0 1 2 3"`
+for `benchmark/berlin_extend_mosaic.sh`. Nothing GPU-related runs on the Mac. The Mac runs `ff3d_geo` conversions,
 reports, figures and the CPU tests.
 
 ## 1. Connect
