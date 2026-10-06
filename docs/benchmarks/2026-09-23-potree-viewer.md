@@ -1,9 +1,10 @@
 # Potree web viewer for the Berlin ALS 2021 tiles (2026-09-23)
 
-**Status 2026-10-05.** The production site on carrot (`http://10.188.1.1:8080/`, last
-section) carries ForestFormer3D and SegmentAnyTree on all 33 tiles and AMS3D on 3; the
-AMS3D 33-tile set and the 44-tile re-stitch follow. The rest of this chapter is the
-2026-09-23/25 write-up.
+**Status 2026-10-06.** The production site on carrot (`http://10.188.1.1:8080/`, last
+section) carries the 44-tile mosaic for all three methods, rebuilt by
+`benchmark/potree_rebuild_mosaic.sh` after the re-stitch (octrees for every tile and method,
+base build plus the two variants, swap, HTTP checks; the 33-tile site is kept beside it).
+The rest of this chapter is the 2026-09-23/25 write-up.
 
 **What.** An offline Potree site for exploring the ForestFormer3D segmentation of the
 Berlin ALS 2021 tiles around Tegel at full resolution: the per-tile point clouds as

@@ -106,7 +106,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--als-data", type=Path, default=Path("/Volumes/2TB/winmol/ALS_Data"))
     ap.add_argument("--stands", type=Path, default=None, help="default <als-data>/berlin_forest/forstbetriebskarte_2014.gpkg")
-    ap.add_argument("--results", default="berlin_als_2021_ff3d_v2", help="result dir (per-tile subdirs) under --als-data")
+    ap.add_argument("--results", default="berlin_als_2021_ff3d_v3", help="result dir (per-tile subdirs) under --als-data")
     ap.add_argument("--las-dir", default="berlin_als_2021", help="downloaded km-tile LAS dir under --als-data")
     ap.add_argument("--out", type=Path, default=None, help="default <als-data>/berlin_forest/reviere.gpkg")
     ap.add_argument("--min-ha", type=float, default=0.5)

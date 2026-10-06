@@ -46,16 +46,14 @@ individual crowns in closed forest.
 * **References are coarse and dated.** The stand map is a 2014 management inventory with
   1-20 ha polygons; the cadastre height is an inspection estimate in whole metres.
 * **The mosaic edge is one-sided.** Sub-tiles on the outer edge of the mosaic have a thinner
-  halo; the same holds for the existing tiles' border with the eleven tiles now being
-  added until those neighbours are re-run.
+  halo; the same holds for the border between the first 33 tiles and the eleven added
+  later, whose neighbours were split before those tiles existed.
 * **Nondeterminism.** Run-to-run variation of the model is below the differences reported
   here (appendix), but not zero.
 
 ## Outlook
 
-1. Finish the Spandau footprint: eleven tiles with all three methods, one re-stitch of the
-   then 44-tile mosaic, and this report regenerated from it.
-2. Use the WINMOL field circles as reference: match predicted crowns to the 974 delineated
+1. Use the WINMOL field circles as reference: match predicted crowns to the 974 delineated
    ones, by species, and report precision and recall per method -- the first accuracy
    figure on these tiles.
 3. Post-filters for production use: drop instances under 2 m with crowns over 50 m², apply

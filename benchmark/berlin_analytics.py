@@ -32,11 +32,14 @@ import numpy as np
 
 EPSG = 25833
 # key -> (label, result dir under --als-data, agreement dir under --als-data/berlin_agreement)
+# v3 = the 44-tile mosaics of 2026-10-06 (2 m height filter); the 33-tile sets stay as
+# berlin_als_2021_ff3d_v2 / berlin_als_2021_sat / berlin_als_2021_ams3d.
 METHODS = {
-    "ff3d": ("ForestFormer3D", "berlin_als_2021_ff3d_v2"),
-    "sat": ("SegmentAnyTree", "berlin_als_2021_sat"),
-    "ams3d": ("AMS3D", "berlin_als_2021_ams3d"),
+    "ff3d": ("ForestFormer3D", "berlin_als_2021_ff3d_v3"),
+    "sat": ("SegmentAnyTree", "berlin_als_2021_sat_v3"),
+    "ams3d": ("AMS3D", "berlin_als_2021_ams3d_v3"),
 }
+AGREEMENT_TAG = "44"      # berlin_agreement/<a>_vs_<b>_<tag>/ from the carrot driver
 COLOURS = {"ff3d": "#1f5fbf", "sat": "#b4267a", "ams3d": "#e08a1e"}
 FLAT_H, FLAT_AREA = 2.0, 50.0        # a "tree" under 2 m tall over 50 m2 of crown is ground labelled leaf
 SMALL_POINTS = 20                    # instances with fewer points than this are noise-sized
@@ -117,6 +120,11 @@ def load_trees(als: Path, key: str, log=print):
     if not frames:
         return None
     out = pd.concat(frames, ignore_index=True)
+    # A table regenerated per tile from the tile's own LAS (building mask, height filter)
+    # lists a tree straddling a km border in both tiles; the stitch's tables list it once.
+    # Count every id once, in the tile holding most of its points.
+    out = out.sort_values(["tree_id", "n_points"], ascending=[True, False]).drop_duplicates("tree_id", keep="first")
+    out = out.sort_values(["tile", "tree_id"]).reset_index(drop=True)
     return gpd.GeoDataFrame(out, geometry="geometry", crs=f"EPSG:{EPSG}")
 
 
@@ -452,8 +460,9 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
                          " / ".join(fmt(v) for v in S["methods"][k]["height_q"]), fmt(S["methods"][k]["crown_q"][1])] for k in keys]), "",
               "All three methods ran on the same 20 m-halo split of each km tile and went through the same "
               "mosaic-wide stitch, so per-point labels are directly comparable (SegmentAnyTree and AMS3D "
-              "preserve point order; ForestFormer3D's result is re-ordered to the split). AMS3D's "
-              f"{S['methods'].get('ams3d', {}).get('tiles', 0)} tiles are the subset it has been run on so far.", ""]
+              "preserve point order; ForestFormer3D's result is re-ordered to the split)."
+              + (f" AMS3D's {S['methods']['ams3d']['tiles']} tiles are the subset it has been run on so far."
+                 if "ams3d" in S["methods"] and S["methods"]["ams3d"]["tiles"] < S["methods"]["ff3d"]["tiles"] else ""), ""]
 
     # 2 per tile
     if "ff3d" in keys and "sat" in keys:
@@ -735,14 +744,13 @@ def main(argv=None) -> int:
             fig_distributions(trees, a.assets / "analytics_distributions_3way.png", tiles=three, title_suffix=f" on the {len(three)} tiles all methods cover")
 
     print("== agreement")
-    agr = load_agreement(als / "berlin_agreement" / "ff3d_vs_sat_33")
+    agr = load_agreement(als / "berlin_agreement" / f"ff3d_vs_sat_{AGREEMENT_TAG}")
     if agr:
         S["agreement"] = {"ff3d_sat": pooled_agreement(agr)}
         fig_agreement(agr, a.assets / "analytics_agreement.png", labels["ff3d"], labels["sat"])
-        d3 = als / "berlin_agreement" / "ams3d_3tiles"
         pairs = {}
         for k in ("ff3d", "sat"):
-            recs = [json.loads(f.read_text()) for f in real(sorted(d3.glob(f"{k}_vs_ams3d_*.json")))]
+            recs = load_agreement(als / "berlin_agreement" / f"{k}_vs_ams3d_{AGREEMENT_TAG}")
             if recs:
                 pairs[f"{labels[k]} vs AMS3D"] = pooled_agreement(recs)
         if pairs:

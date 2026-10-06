@@ -16,7 +16,7 @@ given; the fetch scripts named here are the record of exactly what was requested
 | Licence | Datenlizenz Deutschland – Zero – 2.0 (dl-de/zero-2-0) |
 | Flight | 24/25 February and 2 March 2021 -- **leaf-off** |
 | CRS | ETRS89 / UTM 33N (EPSG:25833), heights DHHN2016; the LAS headers carry no CRS, the code sets it |
-| Tiles | 1 km squares named `3dm_33_<E>_<N>_1_be.las`; 33 used here (Tegel and Spandau), 4-27 M points each (584 M in total, 18 M on average; forest tiles 20-27 M, the lake tile 381_5827 3.6 M) |
+| Tiles | 1 km squares named `3dm_33_<E>_<N>_1_be.las`; 44 used here (Tegel and Spandau; 33 on 2026-09-24, eleven more on 2026-10-06), 4-27 M points each (18 M on average; forest tiles 20-27 M, the lake tile 381_5827 3.6 M) |
 | Density | ~10 pts/m² averaged over a km tile (much of it water, roofs, streets); 20-30 pts/m² over forested 100 m sub-tiles |
 | Classes present | 2 (ground), 3/4/5 (vegetation by height), 7 (noise), 32 -- **no class 6 (building)**: roof points sit in 3/4/5 |
 | Fetch | `benchmark/fetch_berlin_als.py` (skill `ff3d-als-download`); copies on the 2TB volume `ALS_Data/berlin_als_2021/` and on carrot `inputs/berlin/` |
@@ -100,15 +100,13 @@ a whole is not published, but the stand id encodes it (`00101301-0062-a-H010`: c
 4-5 are the Revier, 12 = Tegelsee, 13 = Spandau), so `benchmark/derive_berlin_reviere.py`
 also dissolves the stands per Revier. Both go into `berlin_forest/reviere.gpkg` together
 with a coverage layer: the km tiles each area needs and whether the mosaic processed them.
-That shows what the 33-tile mosaic covers of the two WINMOL areas: **R12 Tegelsee is
-complete** (all 515 ha in processed tiles), while **R13 Spandau is 56 % covered** -- 454 of
-its 1,034 ha lie in eleven km tiles that were downloaded but never processed (375_5826 and
-376_5826 are entirely inside the footprint, 376_5825 56 ha, 377_5826 46 ha, 378_5827 41 ha,
-378_5826 36 ha, 377_5825 33 ha, 374_5826 15 ha, 375_5825 13 ha, 375_5829 11 ha, 374_5825
-5 ha). The dissolved district tells the same story (458 ha of 1,053 ha in the same tiles
-plus a 0.7 ha sliver never fetched). Reviere 11 and 15, north and south of the mosaic, are
-outside the download extent. The project's coverage layer draws the unprocessed tiles in
-orange (downloaded only) and red (not downloaded).
+On 2026-10-05 that showed the 33-tile mosaic covering R12 Tegelsee entirely but **R13
+Spandau only to 56 %**: 454 of its 1,034 ha lay in eleven km tiles that were downloaded but
+never processed (375_5826 and 376_5826 entirely inside the footprint, 376_5825, 377_5826,
+378_5827, 378_5826, 377_5825, 374_5826, 375_5825, 375_5829, 374_5825). Those eleven were
+processed with all three methods and the mosaic re-stitched on 2026-10-06, so both
+footprints are now complete (44 tiles). Reviere 11 and 15, north and south of the mosaic,
+remain outside the download extent; the project's coverage layer draws them in red.
 
 The 974 Probekreis crowns of section 5 tell the opposite story -- beech 70 %, pine 12 %,
 birch 7 % -- and their median polygon is under 1 m²: they are the regeneration layer under
