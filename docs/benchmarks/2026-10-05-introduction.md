@@ -47,6 +47,7 @@ points/m² over forest.
 | DOP 2021 (leaf-off) and TrueDOP 2025 summer orthophotos | GDI Berlin WMS | visual checks, viewer, QGIS |
 | ForestFormer3D weights `epoch_3000_fix.pth` | Zenodo 16742708 | the model, used as released |
 | SegmentAnyTree `PointGroup-PAPER.pt` | the authors' release | comparison method |
+| PointTreeFormer results, 15 Tegel tiles | Stefan Reder (HNEE), run of 2026-10-05 | comparison method (results only) |
 | WINMOL 2025 survey footprints and 974 field-circle crowns | project data | coverage; not yet used for accuracy |
 
 The data-sources chapter gives the full provenance and licences; the methods chapter

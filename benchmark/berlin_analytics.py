@@ -38,9 +38,10 @@ METHODS = {
     "ff3d": ("ForestFormer3D", "berlin_als_2021_ff3d_v3"),
     "sat": ("SegmentAnyTree", "berlin_als_2021_sat_v3"),
     "ams3d": ("AMS3D", "berlin_als_2021_ams3d_v3"),
+    "ptf": ("PointTreeFormer", "berlin_als_2021_ptf"),      # S. Reder's results, 15 Tegel tiles (benchmark/ptf_to_ff3d.py)
 }
 AGREEMENT_TAG = "44"      # berlin_agreement/<a>_vs_<b>_<tag>/ from the carrot driver
-COLOURS = {"ff3d": "#1f5fbf", "sat": "#b4267a", "ams3d": "#e08a1e"}
+COLOURS = {"ff3d": "#1f5fbf", "sat": "#b4267a", "ams3d": "#e08a1e", "ptf": "#2e8b57"}
 FLAT_H, FLAT_AREA = 2.0, 50.0        # a "tree" under 2 m tall over 50 m2 of crown is ground labelled leaf
 SMALL_POINTS = 20                    # instances with fewer points than this are noise-sized
 CADASTRE_MATCH_M = 3.0               # a predicted top within this distance of a cadastre tree is a detection
@@ -122,8 +123,11 @@ def load_trees(als: Path, key: str, log=print):
     out = pd.concat(frames, ignore_index=True)
     # A table regenerated per tile from the tile's own LAS (building mask, height filter)
     # lists a tree straddling a km border in both tiles; the stitch's tables list it once.
-    # Count every id once, in the tile holding most of its points.
-    out = out.sort_values(["tree_id", "n_points"], ascending=[True, False]).drop_duplicates("tree_id", keep="first")
+    # Count every id once, in the tile holding most of its points -- but only where ids ARE
+    # mosaic-wide (a stitch.json exists); a method with per-tile ids (PointTreeFormer) reuses
+    # id 0.. in every tile and must be counted per (tile, id).
+    if (root / "stitch.json").exists():
+        out = out.sort_values(["tree_id", "n_points"], ascending=[True, False]).drop_duplicates("tree_id", keep="first")
     out = out.sort_values(["tile", "tree_id"]).reset_index(drop=True)
     return gpd.GeoDataFrame(out, geometry="geometry", crs=f"EPSG:{EPSG}")
 
@@ -458,11 +462,14 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
                        [[L[k], S["methods"][k]["tiles"], fmt(S["methods"][k]["trees"]), fmt(S["methods"][k]["trees_per_km2"], 0),
                          fmt(S["methods"][k]["points_q"][1], 0),
                          " / ".join(fmt(v) for v in S["methods"][k]["height_q"]), fmt(S["methods"][k]["crown_q"][1])] for k in keys]), "",
-              "All three methods ran on the same 20 m-halo split of each km tile and went through the same "
-              "mosaic-wide stitch, so per-point labels are directly comparable (SegmentAnyTree and AMS3D "
-              "preserve point order; ForestFormer3D's result is re-ordered to the split)."
-              + (f" AMS3D's {S['methods']['ams3d']['tiles']} tiles are the subset it has been run on so far."
-                 if "ams3d" in S["methods"] and S["methods"]["ams3d"]["tiles"] < S["methods"]["ff3d"]["tiles"] else ""), ""]
+              "ForestFormer3D, SegmentAnyTree and AMS3D ran on the same 20 m-halo split of each km tile and went "
+              "through the same mosaic-wide stitch, so per-point labels are directly comparable (SegmentAnyTree and "
+              "AMS3D preserve point order; ForestFormer3D's result is re-ordered to the split); PointTreeFormer's "
+              "per-tile results were re-ordered onto the same points."
+              + "".join(f" {L[k]} covers {S['methods'][k]['tiles']} of the tiles, the subset it has been run on."
+                        for k in keys if S["methods"][k]["tiles"] < S["methods"]["ff3d"]["tiles"])
+              + (" PointTreeFormer's ids are per km tile (its run had a 20 m buffer but no mosaic-wide stitch), "
+                 "so its border trees are counted on both sides of a km line." if "ptf" in keys else ""), ""]
 
     # 2 per tile
     if "ff3d" in keys and "sat" in keys:
@@ -520,14 +527,18 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
                  "Both are candidates for a post-filter; neither is applied to the products this chapter "
                  "describes (the minimum-height rule of the methods chapter applies from the 44-tile stitch on)."), ""]
     if S.get("three_way_tiles"):
-        lines += [f"On the {len(S['three_way_tiles'])} tiles all three methods cover "
+        lines += [f"On the {len(S['three_way_tiles'])} tiles every method covers "
                   f"({', '.join(tile_key(t) for t in S['three_way_tiles'])}):", "",
-                  f"![The same three distributions restricted to the tiles all three methods cover, now with AMS3D. "
+                  f"![The same distributions restricted to the tiles every method covers, all methods. "
                   f"Same axes and binning as the previous figure.]({assets_rel}/analytics_distributions_3way.png)", "",
                   "What we see: AMS3D has no short mode at all -- its height distribution starts at about 10 m -- and "
-                  "its crowns are the largest of the three. Mean shift with a height-dependent bandwidth merges the "
-                  "understory into the canopy tree above it, which is why it reports the fewest trees and the tallest "
-                  "ones; the two learned methods separate that layer.", "",
+                  "its crowns are the largest. Mean shift with a height-dependent bandwidth merges the understory into "
+                  "the canopy tree above it, which is why it reports the fewest trees and the tallest ones; the learned "
+                  "methods separate that layer. PointTreeFormer is the odd one out in height: a broad mode at 10-18 m, "
+                  "exactly where the other three have their trough, and the heaviest tail of large crowns (hulls "
+                  "over 75 m² are twice as frequent as in ForestFormer3D) -- consistent with it drawing the larger "
+                  "crowns in the agreement table and with mid-height instances that the others split into a canopy "
+                  "tree and an understory one.", "",
                   md_table(["method", "trees on these tiles", "height p10 / p50 / p90 (m)", "crown p50 (m²)"],
                            [[L[k], fmt(v["trees"]), " / ".join(fmt(x) for x in v["height_q"]), fmt(v["crown_q"][1])]
                             for k, v in S["three_way"].items()]), ""]
@@ -559,8 +570,11 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
         if S["agreement"].get("ams3d"):
             rows = [[p, v["tiles"], pct(v["matched_frac_a"]), pct(v["matched_frac_b"]), fmt(v["iou_median"], 3), pct(v["split_a_frac"]), pct(v["split_b_frac"])]
                     for p, v in S["agreement"]["ams3d"].items()]
-            lines += ["On the tiles AMS3D covers, the classical baseline against each learned method (A = first named):", "",
-                      md_table(["pair", "tiles", "A matched", "B matched", "median IoU", "A split by B", "B split by A"], rows), ""]
+            lines += ["The other pairs, each on the tiles both methods cover (A = the first named):", "",
+                      md_table(["pair", "tiles", "A matched", "B matched", "median IoU", "A split by B", "B split by A"], rows), "",
+                      "The split columns say who draws the larger crowns: a method whose trees are often covered by "
+                      "several instances of the other draws them large (AMS3D, PointTreeFormer), one that splits the "
+                      "other's trees draws them small (SegmentAnyTree).", ""]
 
     # 5 seams + buildings
     lines += ["## 5. Seams and the building mask", "",
@@ -661,7 +675,8 @@ def write_doc(doc: Path, assets_rel: str, S: dict, labels: dict) -> None:
               "* The inventory heights are stand means from 2014 and the cadastre heights are inspection "
               "estimates; both references are coarser than the ALS-derived heights they are compared with.",
               "* The flat-blob and noise flags are descriptive; no filtering was applied to any count in this report.",
-              "* AMS3D covers a subset of tiles; its rows are not comparable with the 33-tile totals of the other two.", ""]
+              "* A method that covers only part of the tiles (the table says how many) is not comparable with the "
+              "whole-mosaic totals of the others; its per-tile rates are.", ""]
     doc.write_text("\n".join(lines))
 
 
@@ -734,9 +749,10 @@ def main(argv=None) -> int:
                 inside = [t for t in common if f.geometry.intersection(box(int(t.split("_")[2]) * 1000, int(t.split("_")[3]) * 1000,
                                                                           int(t.split("_")[2]) * 1000 + 1000, int(t.split("_")[3]) * 1000 + 1000)).area > 2.5e5]
                 S["ratio_by_footprint"][f.key] = {"tiles": len(inside), "ratio": float(np.mean([ratio[t] for t in inside])) if inside else np.nan}
-    fig_distributions({k: v for k, v in trees.items() if k != "ams3d"} or trees, a.assets / "analytics_distributions.png")
-    if "ams3d" in trees and len(trees) > 1:
-        three = sorted(set(trees["ams3d"].tile).intersection(*[set(v.tile) for k, v in trees.items() if k != "ams3d"]))
+    full = {k: v for k, v in trees.items() if v.tile.nunique() == trees["ff3d"].tile.nunique()} if "ff3d" in trees else trees
+    fig_distributions(full or trees, a.assets / "analytics_distributions.png")
+    if len(trees) > len(full):
+        three = sorted(set.intersection(*[set(v.tile) for v in trees.values()]))
         if three:
             S["three_way_tiles"] = three
             S["three_way"] = {k: {"trees": int(v.tile.isin(three).sum()), "height_q": quantiles(v[v.tile.isin(three)].height),
@@ -749,10 +765,14 @@ def main(argv=None) -> int:
         S["agreement"] = {"ff3d_sat": pooled_agreement(agr)}
         fig_agreement(agr, a.assets / "analytics_agreement.png", labels["ff3d"], labels["sat"])
         pairs = {}
-        for k in ("ff3d", "sat"):
-            recs = load_agreement(als / "berlin_agreement" / f"{k}_vs_ams3d_{AGREEMENT_TAG}")
+        for d in sorted((als / "berlin_agreement").glob(f"*_vs_*_{AGREEMENT_TAG}")):
+            a_key, b_key = d.name[: -len(f"_{AGREEMENT_TAG}")].split("_vs_")
+            if (a_key, b_key) == ("ff3d", "sat") or a_key not in labels or b_key not in labels:
+                continue
+            recs = load_agreement(d)
             if recs:
-                pairs[f"{labels[k]} vs AMS3D"] = pooled_agreement(recs)
+                pairs[f"{labels[a_key]} vs {labels[b_key]}"] = pooled_agreement(recs)
+                S["agreement"][f"{a_key}_{b_key}"] = pairs[f"{labels[a_key]} vs {labels[b_key]}"]
         if pairs:
             S["agreement"]["ams3d"] = pairs
 

@@ -66,3 +66,31 @@ def test_real_drops_macos_resource_forks(tmp_path):
     (tmp_path / "a.json").write_text("{}")
     (tmp_path / "._a.json").write_bytes(b"\x00\x05\x16\x07")
     assert [p.name for p in real(sorted(tmp_path.glob("*.json")))] == ["a.json"]
+
+
+def test_load_trees_dedupes_only_mosaic_wide_ids(tmp_path):
+    """Stitched methods (stitch.json present) list a km-border tree in two tiles' regenerated
+    tables and must count it once; a method with per-tile ids (PointTreeFormer) reuses id 0..
+    in every tile and must be counted per (tile, id)."""
+    gpd = pytest.importorskip("geopandas")
+    from shapely.geometry import Point
+    import berlin_analytics as ba
+
+    def table(root, tile, ids, npts):
+        d = root / tile; d.mkdir(parents=True)
+        g = gpd.GeoDataFrame({"tree_id": ids, "x": [0.0] * len(ids), "y": [0.0] * len(ids), "top_z": [10.0] * len(ids),
+                              "height": [10.0] * len(ids), "crown_area_m2": [20.0] * len(ids), "n_points": npts,
+                              "mean_score": [0.5] * len(ids)}, geometry=[Point(0, 0)] * len(ids), crs="EPSG:25833")
+        g.to_file(d / f"{tile}_trees.gpkg", driver="GPKG", layer="trees")
+
+    als = tmp_path
+    for key, with_stitch in (("ff3d", True), ("ptf", False)):
+        root = als / ba.METHODS[key][1]
+        table(root, "3dm_33_380_5828_1_be", [0, 1], [100, 50])
+        table(root, "3dm_33_381_5828_1_be", [1, 2], [30, 70])          # id 1 appears in both tiles
+        if with_stitch:
+            (root / "stitch.json").write_text("{}")
+    ff3d = ba.load_trees(als, "ff3d", log=lambda m: None)
+    ptf = ba.load_trees(als, "ptf", log=lambda m: None)
+    assert len(ff3d) == 3 and ff3d[ff3d.tree_id == 1].tile.tolist() == ["3dm_33_380_5828_1_be"]   # kept where it has most points
+    assert len(ptf) == 4

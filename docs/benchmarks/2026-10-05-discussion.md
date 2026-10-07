@@ -17,6 +17,12 @@ SegmentAnyTree finds {{ratio_by_footprint.R13.ratio|2}}x as many trees, in Tegel
 finding -- their stand structure differs -- and the WINMOL field circles in both are the
 instrument to settle it.
 
+PointTreeFormer, on the 15 Tegel tiles it covers, matches ForestFormer3D about as often as
+SegmentAnyTree does but from the other side: it draws the larger crowns, so its instances are the
+ones covered by several ForestFormer3D trees. Three methods thus bracket ForestFormer3D's crown
+size -- SegmentAnyTree smaller, PointTreeFormer and AMS3D larger -- which again is a statement
+about agreement, not about which size is right.
+
 The classical baseline reports fewer, larger and taller instances and misses the understory
 mode of the height distribution altogether; its role in this report is to show what a
 model-free method gets from the same points, and the deep models add a second mode of

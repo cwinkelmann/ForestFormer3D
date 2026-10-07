@@ -1,6 +1,6 @@
 # Comparisons and analytics across the Berlin mosaic
 
-Generated 2026-10-06 by `benchmark/berlin_analytics.py` from the stitched per-tile products on the 2TB volume; every number here is also in `assets/analytics/analytics.json`. The chapter compares the three segmentation methods with each other on identical points and, where an external reference exists, against the Berlin forest inventory and the tree cadastre. It says nothing about which method is *right* in the forest interior -- no per-tree ground truth exists there (data-sources chapter, section 5).
+Generated 2026-10-07 by `benchmark/berlin_analytics.py` from the stitched per-tile products on the 2TB volume; every number here is also in `assets/analytics/analytics.json`. The chapter compares the three segmentation methods with each other on identical points and, where an external reference exists, against the Berlin forest inventory and the tree cadastre. It says nothing about which method is *right* in the forest interior -- no per-tree ground truth exists there (data-sources chapter, section 5).
 
 ## 1. What was compared
 
@@ -9,8 +9,9 @@ Generated 2026-10-06 by `benchmark/berlin_analytics.py` from the stitched per-ti
 | ForestFormer3D | 44 | 1,107,126 | 25,162 | 285 | 4.9 / 18.6 / 28.8 | 26.2 |
 | SegmentAnyTree | 44 | 1,211,894 | 27,543 | 212 | 6.9 / 19.8 / 28.8 | 19.4 |
 | AMS3D | 44 | 655,726 | 14,903 | 302 | 10.8 / 21.6 / 29.9 | 36.6 |
+| PointTreeFormer | 15 | 357,015 | 23,801 | 298 | 6.7 / 18.4 / 30.1 | 40.0 |
 
-All three methods ran on the same 20 m-halo split of each km tile and went through the same mosaic-wide stitch, so per-point labels are directly comparable (SegmentAnyTree and AMS3D preserve point order; ForestFormer3D's result is re-ordered to the split).
+ForestFormer3D, SegmentAnyTree and AMS3D ran on the same 20 m-halo split of each km tile and went through the same mosaic-wide stitch, so per-point labels are directly comparable (SegmentAnyTree and AMS3D preserve point order; ForestFormer3D's result is re-ordered to the split); PointTreeFormer's per-tile results were re-ordered onto the same points. PointTreeFormer covers 15 of the tiles, the subset it has been run on. PointTreeFormer's ids are per km tile (its run had a 20 m buffer but no mosaic-wide stitch), so its border trees are counted on both sides of a km line.
 
 ## 2. Trees per km tile
 
@@ -31,22 +32,24 @@ What we see: the height panel has two modes for both methods, a tall one at 24-2
 | ForestFormer3D | 1,107,126 | 0 (0.0 %) | 36,108 (3.3 %) | 462 (0.04 %) |
 | SegmentAnyTree | 1,211,894 | 0 (0.0 %) | 47,126 (3.9 %) | 552 (0.05 %) |
 | AMS3D | 655,726 | 0 (0.0 %) | 78 (0.0 %) | 808 (0.12 %) |
+| PointTreeFormer | 357,015 | 0 (0.0 %) | 10,761 (3.0 %) | 153 (0.04 %) |
 
 Both height distributions are bimodal: a canopy mode near 26 m and a second mode at 4-7 m (understory, hedges, young trees in gardens). ForestFormer3D has more of the low mode and of instances under 2 m; SegmentAnyTree's crowns are smaller (crown area p50 20 vs 26 m²) because it cuts more of them (section 4).
 
 The flat-blob flag is the artefact seen in the viewer: an instance with almost no height but a large footprint is bare ground (ALS class 2) that the model labelled as leaf, not a tree. The noise-sized flag counts instances too small to be a crown at 20-30 pts/m². The products of this chapter went through the stitch's minimum-height rule (2.0 m), which removed 15,841 instances mosaic-wide before any table was written; the counts above are after it, and the flat-blob row is what the 2 m rule does not reach (instances taller than 2 m with a wide, flat hull).
 
-On the 44 tiles all three methods cover (374_5825, 374_5826, 374_5827, 374_5828, 375_5825, 375_5826, 375_5827, 375_5828, 375_5829, 376_5825, 376_5826, 376_5827, 376_5828, 377_5825, 377_5826, 377_5827, 377_5828, 378_5826, 378_5827, 379_5826, 379_5827, 379_5828, 379_5829, 379_5830, 380_5826, 380_5827, 380_5828, 380_5829, 380_5830, 381_5826, 381_5827, 381_5828, 381_5829, 381_5830, 382_5826, 382_5827, 382_5828, 382_5829, 382_5830, 383_5826, 383_5827, 383_5828, 383_5829, 383_5830):
+On the 15 tiles every method covers (379_5826, 379_5827, 379_5828, 379_5829, 380_5826, 380_5827, 380_5828, 380_5829, 381_5827, 381_5828, 381_5829, 382_5828, 382_5829, 383_5828, 383_5829):
 
-![The same three distributions restricted to the tiles all three methods cover, now with AMS3D. Same axes and binning as the previous figure.](assets/analytics/analytics_distributions_3way.png)
+![The same distributions restricted to the tiles every method covers, all methods. Same axes and binning as the previous figure.](assets/analytics/analytics_distributions_3way.png)
 
-What we see: AMS3D has no short mode at all -- its height distribution starts at about 10 m -- and its crowns are the largest of the three. Mean shift with a height-dependent bandwidth merges the understory into the canopy tree above it, which is why it reports the fewest trees and the tallest ones; the two learned methods separate that layer.
+What we see: AMS3D has no short mode at all -- its height distribution starts at about 10 m -- and its crowns are the largest. Mean shift with a height-dependent bandwidth merges the understory into the canopy tree above it, which is why it reports the fewest trees and the tallest ones; the learned methods separate that layer. PointTreeFormer is the odd one out in height: a broad mode at 10-18 m, exactly where the other three have their trough, and the heaviest tail of large crowns (hulls over 75 m² are twice as frequent as in ForestFormer3D) -- consistent with it drawing the larger crowns in the agreement table and with mid-height instances that the others split into a canopy tree and an understory one.
 
 | method | trees on these tiles | height p10 / p50 / p90 (m) | crown p50 (m²) |
 | :--- | ---: | ---: | ---: |
-| ForestFormer3D | 1,107,126 | 4.9 / 18.6 / 28.8 | 26.2 |
-| SegmentAnyTree | 1,211,894 | 6.9 / 19.8 / 28.8 | 19.4 |
-| AMS3D | 655,726 | 10.8 / 21.6 / 29.9 | 36.6 |
+| ForestFormer3D | 392,805 | 4.5 / 18.2 / 30.1 | 27.3 |
+| SegmentAnyTree | 388,517 | 6.9 / 21.3 / 30.4 | 21.5 |
+| AMS3D | 232,502 | 10.6 / 22.2 / 31.1 | 39.4 |
+| PointTreeFormer | 357,015 | 6.7 / 18.4 / 30.1 | 40.0 |
 
 ## 4. Instance agreement: ForestFormer3D vs SegmentAnyTree
 
@@ -56,12 +59,15 @@ What we see: the matched fractions move together from tile to tile (0.35-0.68) a
 
 Pooled over 44 tiles and 778,681,715 identical points: 637,325 tree pairs overlap with IoU ≥ 0.5, i.e. 57.0 % of ForestFormer3D's 1,117,231 trees and 52.2 % of SegmentAnyTree's 1,219,764; the median IoU of a matched pair is 0.742 (the median of the per-tile medians; all pooled figures weight tiles by their tree count, so they differ in the last digit from the unweighted tile means quoted in the appendix). 28.8 % of ForestFormer3D trees are covered by two or more SegmentAnyTree instances against 10.5 % the other way round: where the two disagree, SegmentAnyTree has mostly cut one crown into several, which is also why it reports more trees.
 
-On the tiles AMS3D covers, the classical baseline against each learned method (A = first named):
+The other pairs, each on the tiles both methods cover (A = the first named):
 
 | pair | tiles | A matched | B matched | median IoU | A split by B | B split by A |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
 | ForestFormer3D vs AMS3D | 44 | 32.0 % | 53.7 % | 0.725 | 11.4 % | 34.1 % |
+| ForestFormer3D vs PointTreeFormer | 15 | 51.1 % | 56.9 % | 0.732 | 17.8 % | 31.6 % |
 | SegmentAnyTree vs AMS3D | 44 | 27.3 % | 50.1 % | 0.726 | 9.8 % | 39.0 % |
+
+The split columns say who draws the larger crowns: a method whose trees are often covered by several instances of the other draws them large (AMS3D, PointTreeFormer), one that splits the other's trees draws them small (SegmentAnyTree).
 
 ## 5. Seams and the building mask
 
@@ -129,9 +135,11 @@ The cadastre lists managed trees with a surveyed position and a height that is u
 | R12 | 515 | ForestFormer3D | 100 % | 193,229 | 375 | 6.1 / 22.6 / 31.5 |
 | R12 | 515 | SegmentAnyTree | 100 % | 186,125 | 361 | 9.1 / 24.9 / 31.8 |
 | R12 | 515 | AMS3D | 100 % | 131,396 | 255 | 13.1 / 24.2 / 32.0 |
+| R12 | 515 | PointTreeFormer | 100 % | 180,312 | 350 | 9.4 / 21.6 / 31.4 |
 | R13 | 1,034 | ForestFormer3D | 100 % | 372,818 | 361 | 6.8 / 21.1 / 28.4 |
 | R13 | 1,034 | SegmentAnyTree | 100 % | 434,322 | 420 | 7.8 / 21.4 / 28.2 |
 | R13 | 1,034 | AMS3D | 100 % | 254,523 | 246 | 12.3 / 22.2 / 29.0 |
+| R13 | 1,034 | PointTreeFormer | 0 % | 0 | – | – / – / – |
 
 Density is per covered hectare, so partially covered footprints (R13 Spandau until its eleven remaining tiles are processed; AMS3D on its tile subset) stay comparable; the tree counts are partial.
 
@@ -140,4 +148,4 @@ Density is per covered hectare, so partially covered footprints (R13 Spandau unt
 * Agreement between methods is not accuracy: two methods can agree on a wrong split.
 * The inventory heights are stand means from 2014 and the cadastre heights are inspection estimates; both references are coarser than the ALS-derived heights they are compared with.
 * The flat-blob and noise flags are descriptive; no filtering was applied to any count in this report.
-* AMS3D covers a subset of tiles; its rows are not comparable with the 33-tile totals of the other two.
+* A method that covers only part of the tiles (the table says how many) is not comparable with the whole-mosaic totals of the others; its per-tile rates are.
