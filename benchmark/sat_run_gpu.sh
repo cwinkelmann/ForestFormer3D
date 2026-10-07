@@ -50,7 +50,7 @@ fi
 
 for T in "$@"; do
     IN="$FF3D_ROOT/inputs/$SAT_SUB/$T"
-    OUT="$FF3D_ROOT/work_dirs/sat-$T"
+    OUT="$FF3D_ROOT/${SAT_OUT_PREFIX:-work_dirs/sat-}$T"      # SAT_OUT_PREFIX: elsewhere, e.g. the speed benchmark
     RAW="$OUT/sat_raw"
     if [ ! -d "$IN" ]; then echo "!!! $T: no sub-tiles under $IN"; continue; fi
     N=$(ls "$IN"/*.las 2>/dev/null | wc -l)

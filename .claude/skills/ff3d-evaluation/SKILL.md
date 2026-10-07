@@ -209,3 +209,18 @@ detection rate + height residual against the tree cadastre (nearest predicted to
 `berlin-analytics` (see `ff3d-pdf-report`) plus `assets/analytics/analytics.json`. Agreement
 needs identical points in identical order: the 3-tile AMS3D set from the old un-haloed run
 cannot be compared that way (the 44-tile run computes all three pairs on carrot).
+
+## 9. Speed: throughput under sharing vs a clean benchmark
+
+`benchmark/tile_timings.py` reads the production queue logs; its per-sub-tile seconds carry two
+concurrency columns (queues sharing the same GPU / the host, time-weighted) because the
+production runs were never alone: the 44-tile medians (FF3D 61 s, SAT 73 s, AMS3D 11 s per
+100 m sub-tile) were measured with 5-7 queues on the host and two SAT containers per GPU, and
+the 13-tile extension ran three FF3D queues on one GPU. Only rows with similar concurrency
+compare. `benchmark/speed_benchmark.sh <gpu> <tiles>...` is the clean measurement: it waits
+until none of our queues/chains runs, then per tile runs FF3D (one process), SAT (one container)
+and AMS3D (48 workers) strictly in sequence on one GPU, sampling `nvidia-smi` every 10 s, into
+`work_dirs/bench-<T>-<method>/` and `work_dirs/logs/bench/speed-<TS>.json` (seconds, s per
+sub-tile, GPU utilisation mean/max, memory). Production results are never touched
+(`SAT_OUT_PREFIX`, `AMS3D_OUT_PREFIX`). The methods chapter quotes the clean figures; the
+production ones are "throughput as run".

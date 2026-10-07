@@ -30,7 +30,7 @@ for T in "$@"; do
     echo "!!! $T: not a 3dm_33_<E>_<N>_1_be km-tile stem" >&2; exit 2
   fi
   IN="inputs/$AMS3D_SUB/$T"
-  OUT="work_dirs/ams3d33-$T/sub"
+  OUT="${AMS3D_OUT_PREFIX:-work_dirs/ams3d33-}$T/sub"       # AMS3D_OUT_PREFIX: elsewhere, e.g. the speed benchmark
   if [ ! -f "$IN/split_manifest.json" ]; then echo "!!! $T: no haloed split under $IN"; continue; fi
   N=$(ls "$IN"/*.las 2>/dev/null | wc -l)
   echo "=== $(date +%FT%T) $T: ams3d --subtiles ($N sub-tiles, $AMS3D_WORKERS workers, config $AMS3D_CONFIG) ==="
