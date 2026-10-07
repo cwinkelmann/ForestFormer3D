@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cut the WINMOL 2025 drone orthomosaics (R12 Tegelsee 9.6 cm, R13 Spandau 10 cm, EPSG:32633)
-# into Berlin km tiles for the viewer's `drone2025` drape: EPSG:25833, 0.4 m (the drape texture
-# is 1792 px per km, so finer is wasted), RGB + alpha, transparent outside the survey footprint
+# into Berlin km tiles for the viewer's `drone2025` drape: EPSG:25833, 0.2 m (the drone drape
+# texture is 4096 px per km = 24 cm), RGB + alpha, transparent outside the survey footprint
 # (the mosaics carry black and white borders that would otherwise paint the tile).
 #
 #   bash benchmark/cut_drone_ortho_tiles.sh [out dir]          # Mac, MacPorts GDAL
@@ -12,7 +12,7 @@
 set -uo pipefail
 OUT="${1:-/Volumes/2TB/winmol/ALS_Data/berlin_drone_2025}"
 GDAL="${GDAL_BIN:-/opt/local/bin}"
-RES="${DRONE_RES:-0.4}"
+RES="${DRONE_RES:-0.2}"
 PY="${PYTHON:-$(cd "$(dirname "$0")/.." && pwd)/.venv-cpu/bin/python}"
 B=/Volumes/2TB/winmol/training_data/WINDWURF_Tegel
 mkdir -p "$OUT"

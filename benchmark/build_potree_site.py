@@ -64,10 +64,17 @@ def _round_coords(geom, ndigits=1):
 
 
 def _png(path: Path, rgba: np.ndarray) -> None:
+    """Write an RGB(A) array as the image ``path``'s suffix says: ``.png`` lossless, ``.webp``
+    lossy (quality 90) -- a 4096 px orthophoto drape with alpha is ~4 MB as WebP against
+    ~40 MB as PNG, and three.js' TextureLoader reads both."""
     from PIL import Image
 
     mode = "RGBA" if rgba.shape[2] == 4 else "RGB"
-    Image.fromarray(rgba, mode).save(path, optimize=True)
+    img = Image.fromarray(rgba, mode)
+    if path.suffix.lower() == ".webp":
+        img.save(path, quality=90, method=4)
+    else:
+        img.save(path, optimize=True)
 
 
 def _extent_json(path: Path, bounds, extra=None) -> None:
@@ -380,20 +387,26 @@ def build_tile(tile: str, args_dict: dict) -> dict:
         rec["layers"]["instance"] = {"png": f"data/{tile}_instance.png",
                                      "json": f"data/{tile}_instance.json"}
 
-    for key, src_dir in (("dop2021", a.dop2021_dir), ("dop2025", a.dop2025_dir), ("drone2025", a.drone2025_dir)):
+    # (key, source dir, texture size, image suffix): the drone mosaic is 10 cm imagery and
+    # gets a larger texture as WebP; the WMS orthophotos stay at the default PNG.
+    for key, src_dir, px, suffix in (("dop2021", a.dop2021_dir, a.texture_px, ".png"),
+                                     ("dop2025", a.dop2025_dir, a.texture_px, ".png"),
+                                     ("drone2025", a.drone2025_dir, a.drone_texture_px, ".webp")):
         if not src_dir:
             continue
         tif = Path(src_dir) / f"{tile}.tif"
-        png, js = data_dir / f"{tile}_{key}.png", data_dir / f"{tile}_{key}.json"
+        js = data_dir / f"{tile}_{key}.json"
         if not tif.exists():
             # no orthophoto here (carrot holds only the newest tiles' GeoTIFFs): keep the
             # overlay a previous build wrote, so a rebuild for new ids does not lose it
-            if png.exists() and js.exists():
-                rec["layers"][key] = {"png": f"data/{png.name}", "json": f"data/{js.name}"}
+            for old in (data_dir / f"{tile}_{key}{suffix}", data_dir / f"{tile}_{key}.png"):
+                if old.exists() and js.exists():
+                    rec["layers"][key] = {"png": f"data/{old.name}", "json": f"data/{js.name}"}
+                    break
             continue
-        write_dop_png(tif, png, js, bounds, a.texture_px, ground_z)
-        rec["layers"][key] = {"png": f"data/{tile}_{key}.png",
-                              "json": f"data/{tile}_{key}.json"}
+        img = data_dir / f"{tile}_{key}{suffix}"
+        write_dop_png(tif, img, js, bounds, px, ground_z)
+        rec["layers"][key] = {"png": f"data/{img.name}", "json": f"data/{js.name}"}
 
     vec = write_vectors(ff3d_dir, tile, data_dir)
     rec["trees"] = {"file": f"data/{vec['trees']['file']}", "count": vec["trees"]["count"]}
@@ -417,6 +430,8 @@ def main() -> int:
                         "EPSG:25833; benchmark/cut_drone_ortho_tiles.sh); tiles without one get no layer")
     p.add_argument("--tiles", nargs="*", default=None, help="subset of tile names")
     p.add_argument("--texture-px", type=int, default=1792, help="orthophoto texture size")
+    p.add_argument("--drone-texture-px", type=int, default=4096,
+                   help="texture size of the drone2025 drape (WebP; 4096 = 24 cm per km tile)")
     p.add_argument("--chm-cell", type=float, default=0.5)
     p.add_argument("--dtm-cell", type=float, default=2.0)
     p.add_argument("--jobs", type=int, default=4)

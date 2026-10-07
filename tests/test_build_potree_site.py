@@ -244,3 +244,16 @@ def test_dop_png_keeps_an_alpha_band_or_nodata_transparent(tmp_path):
         dst.write(rgb)
     write_dop_png(tmp_path / "full.tif", tmp_path / "c.png", tmp_path / "c.json", bounds, 20, 35.0)
     assert np.asarray(Image.open(tmp_path / "c.png")).shape == (20, 20, 3)     # opaque stays RGB
+
+
+def test_png_writer_takes_the_format_from_the_suffix(tmp_path):
+    import numpy as np
+    from PIL import Image
+
+    from build_potree_site import _png
+
+    rgba = np.zeros((16, 16, 4), dtype=np.uint8); rgba[..., 0] = 200; rgba[:, 8:, 3] = 255
+    _png(tmp_path / "a.webp", rgba); _png(tmp_path / "a.png", rgba)
+    w, p = Image.open(tmp_path / "a.webp"), Image.open(tmp_path / "a.png")
+    assert w.format == "WEBP" and p.format == "PNG" and w.mode == "RGBA" and w.size == (16, 16)
+    assert np.asarray(w)[:, :8, 3].max() == 0 and np.asarray(w)[:, 8:, 3].min() > 250   # alpha survives

@@ -348,9 +348,12 @@
 			if (!layer) return null;
 			const [minx, miny, maxx, maxy] = rec.bounds;
 			const tex = texLoader.load(layer.png);
-			tex.minFilter = THREE.LinearFilter;
-			tex.generateMipmaps = false;
-			tex.anisotropy = 4;
+			// The WMS drapes are 1792 px (not a power of two: no mipmaps possible); the drone
+			// mosaic is 4096 px, so it gets mipmaps or it shimmers when zoomed out.
+			const pot = key === "drone2025";
+			tex.minFilter = pot ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+			tex.generateMipmaps = pot;
+			tex.anisotropy = pot ? 8 : 4;
 			const mat = new THREE.MeshBasicMaterial({
 				map: tex, transparent: true, opacity: state.opacity[key],
 				depthWrite: false, side: THREE.DoubleSide,
