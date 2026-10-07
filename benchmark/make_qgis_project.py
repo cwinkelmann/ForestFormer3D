@@ -88,9 +88,13 @@ def union_bounds(tiles) -> tuple[float, float, float, float]:
 
 def wgs84(bounds) -> tuple[float, float, float, float]:
     """The same box in lon/lat, which QGIS stores next to the projected extent."""
+    return wgs84_from(bounds, EPSG)
+
+
+def wgs84_from(bounds, epsg: int) -> tuple[float, float, float, float]:
     from pyproj import Transformer
 
-    tr = Transformer.from_crs(EPSG, 4326, always_xy=True)
+    tr = Transformer.from_crs(epsg, 4326, always_xy=True)
     (x0, y0), (x1, y1) = tr.transform(bounds[0], bounds[1]), tr.transform(bounds[2], bounds[3])
     return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
@@ -608,6 +612,34 @@ def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False,
                         lid, nm, rel(derived / o["vrt"]), "gdal", key == "dop2025")
         T.group("Orthophotos", True, False, body)
 
+    def drone_group():
+        """The WINMOL 2025 drone orthomosaics at native resolution (R12 1.2 cm, R13 1.3 cm,
+        EPSG:32633, Cloud-Optimised GeoTIFFs with internal pyramids): QGIS reads them as they
+        are, which is the one place the full detail can be looked at -- the viewer's drape is
+        limited to 24 cm. Unchecked by default; the R13 file is 20 GB."""
+        from pyproj import CRS
+
+        base = Path("/Volumes/2TB/winmol/training_data/WINDWURF_Tegel")
+        cogs = [("R12 Tegelsee 2025, 1.2 cm (R12_jpeg90_cog.tif)", base / "Revier_12" / "ortho" / "R12_jpeg90_cog.tif"),
+                ("R13 Spandau 2025, 1.3 cm (result_Res1.3_COG.tif)", base / "Revier_13" / "Ortho" / "result_Res1.3_COG.tif")]
+        cogs = [(n, f) for n, f in cogs if f.exists()]
+        if not cogs:
+            print("  drone orthomosaics: none found under WINDWURF_Tegel, group skipped")
+            return
+        wkt33 = CRS.from_epsg(32633).to_wkt()
+
+        def body():
+            import rasterio
+
+            for nm, f in cogs:
+                with rasterio.open(f) as r:
+                    b = tuple(r.bounds)
+                lid = layer_id(f"drone_{f.stem}")
+                T.layer(raster_layer_xml(lid, nm, str(f), renderer_multiband(), b, wgs84_from(b, 32633), wkt33),
+                        lid, nm, str(f), "gdal", False)
+
+        T.group("WINMOL drone orthomosaics 2025 (native, EPSG:32633)", False, False, body)
+
     def terrain_group():
         def body():
             for key, t in manifest["terrain"].items():
@@ -746,6 +778,7 @@ def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False,
         if key in manifest["methods"]:
             method_group(key, manifest["methods"][key], checked=(key == "ff3d"))
     terrain_group()
+    drone_group()
     ortho_group()
     basemap()
 
