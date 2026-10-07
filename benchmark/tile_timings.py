@@ -19,7 +19,10 @@ it runs on carrot's system python:
     python3 benchmark/tile_timings.py --tiles 3dm_33_378_5828_1_be ... --json work_dirs/logs/tile_timings.json
     python3 benchmark/tile_timings.py --running           # only what is in flight
 
-A tile that ran more than once (a retry) keeps its LAST completed run.
+A tile that ran more than once (a retry) keeps its LAST completed run. The two concurrency
+columns say how many of our runs shared the GPU / the host while a tile ran (time-weighted):
+per-sub-tile seconds are production throughput under that sharing, not a clean benchmark,
+and only rows with similar concurrency compare.
 """
 
 from __future__ import annotations
@@ -75,8 +78,39 @@ def collect(root: Path) -> dict:
     return out
 
 
+def concurrency(data: dict, now: datetime) -> dict:
+    """For every (tile, method) run: how many of OUR runs overlapped it in time -- on the same
+    GPU and on the host as a whole -- averaged over its duration. A tile that ran alone scores
+    1.0 on both; three queues sharing GPU 4 score about 3. The per-sub-tile seconds are only
+    comparable between runs with similar values here."""
+    runs = []
+    for tile, methods in data.items():
+        for method, rec in methods.items():
+            if "start" not in rec:
+                continue
+            a = datetime.fromisoformat(rec["start"])
+            b = datetime.fromisoformat(rec["end"]) if rec.get("end") else now
+            if (b - a).total_seconds() > ABANDONED_AFTER_S and not rec.get("end"):
+                continue
+            runs.append((tile, method, rec.get("gpu"), a, b))
+    out = {}
+    for tile, method, gpu, a, b in runs:
+        dur = max((b - a).total_seconds(), 1.0)
+        same_gpu = host = 0.0
+        for t2, m2, g2, a2, b2 in runs:
+            ov = (min(b, b2) - max(a, a2)).total_seconds()
+            if ov <= 0:
+                continue
+            host += ov / dur
+            if gpu is not None and g2 == gpu:
+                same_gpu += ov / dur
+        out[(tile, method)] = {"gpu_concurrency": round(same_gpu, 1) if gpu is not None else None, "host_concurrency": round(host, 1)}
+    return out
+
+
 def rows(data: dict, tiles=None, now: datetime | None = None, running_only=False) -> list[dict]:
     now = now or datetime.now()
+    conc = concurrency(data, now)
     out = []
     for tile in sorted(data):
         if tiles and tile not in tiles:
@@ -96,7 +130,8 @@ def rows(data: dict, tiles=None, now: datetime | None = None, running_only=False
             out.append({"tile": tile, "method": method, "gpu": rec.get("gpu"), "start": rec["start"],
                         "subtiles": n, "run_s": rec["run_s"], "elapsed_s": secs,
                         "s_per_subtile": round(secs / n, 1) if n else None,
-                        "status": "abandoned" if abandoned else ("running" if running else "done")})
+                        "status": "abandoned" if abandoned else ("running" if running else "done"),
+                        **conc.get((tile, method), {"gpu_concurrency": None, "host_concurrency": None})})
     return out
 
 
@@ -121,10 +156,13 @@ def fmt_hm(seconds) -> str:
 
 
 def markdown(table: list[dict], summ: dict) -> str:
-    lines = ["| tile | method | GPU | start | sub-tiles | run | s / sub-tile | status |", "|---|---|---:|---|---:|---:|---:|---|"]
+    lines = ["| tile | method | GPU | start | sub-tiles | run | s / sub-tile | queues on GPU / host | status |",
+             "|---|---|---:|---|---:|---:|---:|---:|---|"]
     for r in table:
+        cq = r.get("gpu_concurrency"); ch = r.get("host_concurrency")
         lines.append(f"| {r['tile'][7:15]} | {r['method']} | {r['gpu'] if r['gpu'] is not None else 'cpu'} | {r['start'][5:16].replace('T', ' ')} | "
-                     f"{r['subtiles'] or '–'} | {fmt_hm(r['elapsed_s'])} | {r['s_per_subtile'] or '–'} | {r['status']} |")
+                     f"{r['subtiles'] or '–'} | {fmt_hm(r['elapsed_s'])} | {r['s_per_subtile'] or '–'} | "
+                     f"{cq if cq is not None else '–'} / {ch if ch is not None else '–'} | {r['status']} |")
     lines += ["", "| method | tiles done | hours total | s / sub-tile median (min–max) | running |", "|---|---:|---:|---:|---:|"]
     for m, s in summ.items():
         lines.append(f"| {m} | {s['tiles']} | {s['hours_total']} | {s['s_per_subtile_median']} ({s['s_per_subtile_min']}–{s['s_per_subtile_max']}) | {s['running']} |")

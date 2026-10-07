@@ -67,3 +67,14 @@ def test_latest_start_wins_and_stale_starts_are_abandoned(tmp_path):
     old = rows(collect(tmp_path), now=datetime(2026, 10, 9, 0, 0, 0))
     assert {r["status"] for r in old if r["tile"] == "3dm_33_380_5825_1_be"} == {"abandoned"}
     assert all(r["tile"] != "3dm_33_380_5825_1_be" for r in rows(collect(tmp_path), now=datetime(2026, 10, 9), running_only=True))
+
+
+def test_concurrency_counts_overlapping_runs_on_the_same_gpu_and_host(tmp_path):
+    _logs(tmp_path)
+    (tmp_path / "work_dirs/logs/berlin-gpu4-block2.log").write_text(
+        f"=== 2026-10-07T16:10:40 3dm_33_381_5825_1_be: run (30 sub-tiles) ===\n"      # overlaps T's second half on GPU 4
+        f"=== 2026-10-07T16:40:40 3dm_33_381_5825_1_be: tile done (run 1800s) ===\n")
+    table = rows(collect(tmp_path), now=datetime(2026, 10, 7, 17, 0, 0))
+    by = {(r["tile"], r["method"]): r for r in table}
+    assert by[(T, "ff3d")]["gpu_concurrency"] == 1.5 and by[(T, "ff3d")]["host_concurrency"] == 1.5
+    assert by[(T, "ams3d")]["gpu_concurrency"] is None and by[(T, "ams3d")]["host_concurrency"] == 2.0   # with the SAT run
