@@ -126,6 +126,15 @@ as is on data 5-100x sparser than its training plots (see the density study).
 `cwinkelmann/SegmentAnyTree` at commit `661c88e` with the published checkpoint
 `model_file/PointGroup-PAPER.pt` (665 MB, Git LFS upstream), image `segment-any-tree:cu118`.
 
+**PointTreeFormer** -- Stefan Reder's transformer-based tree segmentation (HNEE), run by him over
+15 km tiles of the Tegel block (`/storage/sreder/projects/ALS_Berlin/PointTreeFormer/clipped_<T>.laz`
+on carrot, 2026-10-05: LAZ 1.4 with a 20 m buffer and the extra dimensions
+`classification_prediction` 0/1/2 = ground/wood/leaf, `classification_binary_prediction`,
+`instance_id_prediction`). `benchmark/ptf_to_ff3d.py` crops the buffer, re-orders the points to
+our result LAS (the core holds exactly the tile's source points), applies the 2 m rule and writes
+the product contract; it is the `ptf` method in the viewer. No model, code or weights of it are
+in this repository.
+
 **AMS3D** -- an in-house adaptive mean-shift crown segmentation (`ff3d_geo/ams3d.py`), ported
 from a spike in the `GEE_animation` repository; CPU only, no learned weights. It is the
 classical baseline, not a published method.

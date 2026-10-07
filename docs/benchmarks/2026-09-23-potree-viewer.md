@@ -4,7 +4,8 @@
 section) carries the 44-tile mosaic for all three methods, rebuilt by
 `benchmark/potree_rebuild_mosaic.sh` after the re-stitch (octrees for every tile and method,
 base build plus the two variants, swap, HTTP checks; the 33-tile site is kept beside it).
-Since the same day the WINMOL 2025 drone orthomosaics of R12 and R13 are a further drape
+Since 2026-10-07 Stefan Reder's PointTreeFormer results (15 Tegel tiles) are a fourth method
+(`ptf`, `benchmark/ptf_to_ff3d.py`, `--variant ptf`). Since 2026-10-06 the WINMOL 2025 drone orthomosaics of R12 and R13 are a further drape
 (`drone2025`, where the survey flew; `--drone2025-dir`). The rest of this chapter is the
 2026-09-23/25 write-up.
 

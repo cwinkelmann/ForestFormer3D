@@ -143,6 +143,12 @@ the seam two-sided at ~1 GPU-h per tile.
 
 ## 3. Watch it
 
+`python3 benchmark/tile_timings.py [--running] [--json ...]` (stdlib only, run on carrot from
+the repo root) turns the queue logs of all three methods into one per-tile table -- start,
+GPU, sub-tiles, run time, seconds per sub-tile, running/abandoned/done -- plus a per-method
+summary; the 44-tile mosaic measured FF3D 61 s, SAT 73 s and AMS3D 11 s per 100 m sub-tile
+(medians; FF3D and SAT on shared H100s).
+
 ```bash
 tail -5 work_dirs/logs/berlin-gpu5-*.log        # poll every few minutes, NOT in a tight loop
 grep -h 'tile done\|!!!' work_dirs/logs/berlin-gpu*.log

@@ -215,6 +215,15 @@ DOP overlays (`benchmark/plot_berlin_dop_overlays.py`) are covered in
 
 ## 6. QGIS (3.28+)
 
+**PointTreeFormer variant (2026-10-07):** Stefan Reder's results live on carrot at
+`/storage/sreder/projects/ALS_Berlin/PointTreeFormer/clipped_<T>.laz` (15 Tegel tiles, 20 m buffer,
+`instance_id_prediction` / `classification_prediction` 0 ground 1 wood 2 leaf, no CRS record).
+`benchmark/ptf_to_ff3d.py --laz ... --out work_dirs/ptf-mosaic/<T> --order-like work_dirs/berlin-mosaic-44/<T>.las --min-height 2`
+writes the contract (core only, in OUR point order so `instance_agreement.py` works, 2 m rule);
+`work_dirs/logs/potree/add_ptf.sh` on carrot converts all tiles, builds `out_ptf` octrees, links
+`pointclouds_ptf/`, runs `--variant ptf` and the FF3D-vs-PTF agreement (`work_dirs/logs/agreement-ptf/`).
+The viewer's method buttons come from `METHODS` in `potree_index.html` (ptf added).
+
 **Drone orthomosaic drape (2026-10-06):** the WINMOL 2025 orthomosaics of R12 (9.6 cm) and R13
 (10 cm, EPSG:32633) are cut to km tiles by `benchmark/cut_drone_ortho_tiles.sh` (EPSG:25833,
 0.4 m, RGBA with the footprint as cutline) into `ALS_Data/berlin_drone_2025/<T>.tif`, copied to
