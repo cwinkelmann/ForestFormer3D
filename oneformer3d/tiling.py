@@ -201,3 +201,39 @@ def relabel_contiguous(labels: torch.Tensor) -> torch.Tensor:
         _, inverse = torch.unique(labels[valid], return_inverse=True)
         out[valid] = inverse
     return out
+
+
+def split_batched_inverse_mapping(row_batch: torch.Tensor, inverse_mapping: torch.Tensor,
+                                  sizes: list[int]) -> list[torch.Tensor]:
+    """Per-region inverse mappings out of ONE batched sparse collate.
+
+    ``row_batch`` is the batch column of the sparse tensor's coordinates (one
+    entry per voxel row), ``inverse_mapping`` maps every input point of the
+    concatenated batch to its voxel row, and ``sizes`` says how many points each
+    region contributed, in collate order. The backbone hands the regions back
+    separately (``features[indices[:, 0] == i]``, rows in ascending order), so
+    each region needs its points mapped to the rank of their voxel row *within
+    that region's rows*, not to the global row. Returns one mapping per region.
+
+    Raises ``ValueError`` when a point lands in another region's voxel, which
+    would mean the collate mixed the regions up.
+    """
+    if sum(sizes) != inverse_mapping.numel():
+        raise ValueError(f'{inverse_mapping.numel()} mapped points for regions of sizes {sizes}')
+    n_rows = row_batch.numel()
+    row_batch = row_batch.long()
+    inverse_mapping = inverse_mapping.long()
+    n_batch = len(sizes)
+    counts = torch.bincount(row_batch, minlength=n_batch)
+    starts = torch.cumsum(counts, 0) - counts
+    # stable sort by batch keeps the ascending row order inside every region
+    order = torch.argsort(row_batch, stable=True)
+    rank = torch.empty(n_rows, dtype=torch.long, device=row_batch.device)
+    rank[order] = torch.arange(n_rows, device=row_batch.device) - starts[row_batch[order]]
+    expected = torch.repeat_interleave(
+        torch.arange(n_batch, device=row_batch.device),
+        torch.tensor(sizes, device=row_batch.device))
+    if not bool((row_batch[inverse_mapping] == expected).all()):
+        raise ValueError('batched collate mapped a point into another region\'s voxel')
+    per_point = rank[inverse_mapping]
+    return list(torch.split(per_point, sizes))

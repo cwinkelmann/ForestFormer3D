@@ -10,7 +10,8 @@ from mmdet3d.models import Base3DDetector
 from mmengine.logging import MessageHub, print_log
 from .tiling import (SemanticVotes, degenerate_region_reason,
                      generate_cylindrical_regions, merge_instances_by_score,
-                     relabel_contiguous, sample_region)
+                     relabel_contiguous, sample_region,
+                     split_batched_inverse_mapping)
 from .mask_matrix_nms import mask_matrix_nms
 from .ply_io import result_ply_element
 import open3d as o3d
@@ -2176,73 +2177,98 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         n_used = 0               # regions that were actually segmented
         log_cap = 3              # spell out at most this many of each kind
 
-        for region_idx, (cx, cy) in enumerate(regions.tolist()):
-            region_mask = ((points[:, 0] - cx) ** 2 + (points[:, 1] - cy) ** 2) <= self.radius ** 2
-            pc1_indices = torch.where(region_mask)[0]
-            if pc1_indices.numel() == 0:
-                n_empty += 1
-                continue
-            pc1 = points[pc1_indices]
-            pc2, pc2_indices = self.grid_sample(pc1, pc1_indices, grid_size)
-            pc3, pc3_indices = sample_region(pc2, pc2_indices, max_points)
+        # Regions go through the backbone `region_batch` at a time: cropping,
+        # voxel sampling and the pre-filter stay per region (cheap), the sparse
+        # collate, the UNet and the two point heads run once per batch, and the
+        # query sampling, decoder and mask post-processing are per region again
+        # (the decoder loops over its list of scenes), so every region sees the
+        # same numbers as it would alone. 1 reproduces the unbatched loop.
+        region_batch = int(cfg.get('region_batch', 1))
+        if region_batch < 1:
+            raise ValueError(f'model.test_cfg.region_batch must be >= 1, got {region_batch}')
 
-            reason = degenerate_region_reason(pc3, self.voxel_size, min_region_points)
-            if reason is not None:
-                n_prefiltered += 1
-                # An empty tile can hold hundreds of these; the summary below
-                # reports the total, so only the first few are spelled out.
-                if n_prefiltered <= log_cap:
-                    print_log(
-                        f'{scan_name}: skipping degenerate region {region_idx} '
-                        f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
-                        f'({pc3.shape[0]} after voxel downsampling): {reason}',
-                        logger='current', level=logging.WARNING)
-                del pc1, pc2, pc3
-                continue
+        def reject(r, err):
+            nonlocal n_rejected
+            n_rejected += 1
+            # Capped like the pre-filter: a pathological tile must not put a
+            # WARNING per region into a km-tile log.
+            if n_rejected <= log_cap:
+                print_log(
+                    f'{scan_name}: spconv rejected region {r["idx"]} '
+                    f'at ({r["cx"]:.1f}, {r["cy"]:.1f}) with {r["pc1"].shape[0]} points '
+                    f'({r["pc3"].shape[0]} after voxel downsampling); skipping it: '
+                    f'{str(err).strip().splitlines()[0]}',
+                    logger='current', level=logging.WARNING)
 
+        def segment(batch):
+            """One backbone pass over `batch` (a list of prepared regions)."""
+            nonlocal n_used
             x = None
             try:
-                coordinates, features, inverse_mapping, spatial_shape = self.collate([pc3])
-                x = spconv.SparseConvTensor(features, coordinates, spatial_shape, 1)
-                x = self.extract_feat(x)
+                coordinates, features, inverse_mapping, spatial_shape = self.collate(
+                    [r['pc3'] for r in batch])
+                x = spconv.SparseConvTensor(features, coordinates, spatial_shape, len(batch))
+                feats = self.extract_feat(x)
+                if len(feats) != len(batch):
+                    raise ValueError(
+                        f'backbone returned {len(feats)} feature blocks for {len(batch)} regions')
+                inverse_maps = split_batched_inverse_mapping(
+                    coordinates[:, 0], inverse_mapping, [r['pc3'].shape[0] for r in batch])
             except ValueError as err:
                 # spconv's "Your points vanished here": the region's voxels all
                 # fall outside the output grid of one of the UNet's stride-2
-                # convolutions. Only this region is lost -- its points simply get
+                # convolutions. A batch of several regions is retried one by one
+                # so that only the bad region is lost -- its points simply get
                 # no vote here and fall back to whatever the overlapping regions
                 # say, or to nodata (-1) if there are none.
-                n_rejected += 1
-                # Capped like the pre-filter: a pathological tile must not put a
-                # WARNING per region into a km-tile log.
-                if n_rejected <= log_cap:
-                    print_log(
-                        f'{scan_name}: spconv rejected region {region_idx} '
-                        f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
-                        f'({pc3.shape[0]} after voxel downsampling); skipping it: '
-                        f'{str(err).strip().splitlines()[0]}',
-                        logger='current', level=logging.WARNING)
-                # `x` may hold the region's sparse tensor: drop it before the cache
+                # `x` may hold the batch's sparse tensor: drop it before the cache
                 # call, or `empty_cache()` frees less than it looks like it does.
-                del pc1, pc2, pc3, x
+                del x
                 torch.cuda.empty_cache()
-                continue
+                if len(batch) > 1:
+                    for r in batch:
+                        segment([r])
+                else:
+                    reject(batch[0], err)
+                return
 
-            n_used += 1
-            embed_logits = self.Embed(x[0])
-            bi_semantic_logits = self.BiSemantic(x[0])
-            tree_indices = torch.where(torch.argmax(bi_semantic_logits, dim=1) == 1)[0]
+            n_used += len(batch)
+            sizes = [f.shape[0] for f in feats]
+            all_feats = torch.cat(feats)
+            embed_logits = self.Embed(all_feats).split(sizes)
+            bi_semantic_logits = self.BiSemantic(all_feats).split(sizes)
 
-            # nearest pc3 point for every pc1 point, chunked to bound memory
-            nn_idx = torch.cat([
-                torch.cdist(pc1[s:s + self.chunk, :3].float(), pc3[:, :3].float()).argmin(1)
-                for s in range(0, pc1.shape[0], self.chunk)])
+            # per region: query points for the decoder, nearest pc3 point of every pc1 point
+            per_region = []
+            dec_feats, dec_queries = [], []
+            for j, r in enumerate(batch):
+                tree_indices = torch.where(torch.argmax(bi_semantic_logits[j], dim=1) == 1)[0]
+                pc1, pc3 = r['pc1'], r['pc3']
+                # nearest pc3 point for every pc1 point, chunked to bound memory
+                nn_idx = torch.cat([
+                    torch.cdist(pc1[s:s + self.chunk, :3].float(), pc3[:, :3].float()).argmin(1)
+                    for s in range(0, pc1.shape[0], self.chunk)])
+                selected = None
+                if tree_indices.numel() > 1:
+                    batch_vec = torch.zeros(tree_indices.numel(), dtype=torch.long, device=device)
+                    ratio = min(self.query_point_num / tree_indices.numel(), 1.0)
+                    selected = tree_indices[fps(embed_logits[j][tree_indices], batch_vec, ratio=ratio)]
+                    dec_feats.append(feats[j])
+                    dec_queries.append(feats[j][selected])
+                per_region.append((nn_idx, selected))
+            out = self.decoder(dec_feats, dec_queries) if dec_feats else None
 
-            if tree_indices.numel() > 1:
-                batch_vec = torch.zeros(tree_indices.numel(), dtype=torch.long, device=device)
-                ratio = min(self.query_point_num / tree_indices.numel(), 1.0)
-                selected = tree_indices[fps(embed_logits[tree_indices], batch_vec, ratio=ratio)]
-                x = self.decoder(x, [x[0][selected]])
-                result = self.predict_by_feat_test(x, inverse_mapping, pc3, selected)[0]
+            slot = 0
+            for j, r in enumerate(batch):
+                nn_idx, selected = per_region[j]
+                pc1_indices, pc3, cx, cy = r['pc1_indices'], r['pc3'], r['cx'], r['cy']
+                if selected is None:
+                    bi_pc3 = torch.argmax(bi_semantic_logits[j][inverse_maps[j]], dim=1)
+                    votes.add_binary(pc1_indices, bi_pc3[nn_idx] == 1)
+                    continue
+                out_j = {'masks': [out['masks'][slot]], 'scores': [out['scores'][slot]]}
+                slot += 1
+                result = self.predict_by_feat_test(out_j, inverse_maps[j], pc3, selected)[0]
 
                 sem_pc3 = torch.as_tensor(result.pts_semantic_mask[0], device=device).long()
                 votes.add(pc1_indices, sem_pc3[nn_idx])
@@ -2257,12 +2283,44 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                     for k in keep.tolist():
                         mask_indices.append(pc1_indices[masks[k][nn_idx]].cpu())
                         mask_scores.append(float(scores[k]))
-            else:
-                bi_pc3 = torch.argmax(bi_semantic_logits[inverse_mapping], dim=1)
-                votes.add_binary(pc1_indices, bi_pc3[nn_idx] == 1)
 
-            del pc1, pc2, pc3, x, embed_logits, bi_semantic_logits, nn_idx
+            del x, feats, all_feats, embed_logits, bi_semantic_logits, per_region, out
             torch.cuda.empty_cache()
+
+        pending = []             # prepared regions waiting for the next backbone pass
+        for region_idx, (cx, cy) in enumerate(regions.tolist()):
+            region_mask = ((points[:, 0] - cx) ** 2 + (points[:, 1] - cy) ** 2) <= self.radius ** 2
+            pc1_indices = torch.where(region_mask)[0]
+            if pc1_indices.numel() == 0:
+                n_empty += 1
+                continue
+            pc1 = points[pc1_indices]
+            pc2, pc2_indices = self.grid_sample(pc1, pc1_indices, grid_size)
+            pc3, pc3_indices = sample_region(pc2, pc2_indices, max_points)
+            del pc2
+
+            reason = degenerate_region_reason(pc3, self.voxel_size, min_region_points)
+            if reason is not None:
+                n_prefiltered += 1
+                # An empty tile can hold hundreds of these; the summary below
+                # reports the total, so only the first few are spelled out.
+                if n_prefiltered <= log_cap:
+                    print_log(
+                        f'{scan_name}: skipping degenerate region {region_idx} '
+                        f'at ({cx:.1f}, {cy:.1f}) with {pc1.shape[0]} points '
+                        f'({pc3.shape[0]} after voxel downsampling): {reason}',
+                        logger='current', level=logging.WARNING)
+                del pc1, pc3
+                continue
+
+            pending.append(dict(idx=region_idx, cx=cx, cy=cy,
+                                pc1_indices=pc1_indices, pc1=pc1, pc3=pc3))
+            if len(pending) >= region_batch:
+                segment(pending)
+                pending = []
+        if pending:
+            segment(pending)
+            pending = []
 
         n_skipped = n_prefiltered + n_rejected
         if n_skipped:

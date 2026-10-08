@@ -447,3 +447,38 @@ for spec in "0.25 0" "0.25 1" "0.5 0" "0.5 1"; do
   work_dirs/logs/step/run.sh $spec 2
 done
 ```
+
+## Addendum 2026-10-08: cylinders batched through the backbone (`region_batch`)
+
+After the z-filter vectorisation the per-cylinder loop still ran the sparse collate, the
+UNet and the two point heads once per cylinder (625 times per 100 m sub-tile). The
+production queues showed 36-45 % GPU utilisation and under 5 GB of VRAM per process on
+the H100 for that reason: every launch is tiny and the host cannot issue the next one fast
+enough. `model.test_cfg.region_batch` (default 8) now collects that many prepared cylinders
+and pushes them through `collate` + `extract_feat` + `Embed`/`BiSemantic` as ONE batch;
+`tiling.split_batched_inverse_mapping` hands each region its own point-to-voxel map back.
+Query sampling, the decoder call (its layers loop over the list of scenes anyway) and the
+mask post-processing stay per region, so a region sees the same numbers as alone: per-point
+backbone features agree to 5e-7, and the end-to-end labelling differs by 0.23 % of the
+points, the same as two single-region runs of each other (0.27 %, the sparse backbone is not
+bit-reproducible). An spconv `ValueError` on a batch retries its regions one by one.
+
+Measured on carrot, GPU 6 idle and otherwise unused, `ff3d_geo run` over one 100 m Berlin
+sub-tile (3dm_33_381_5828 E381300 N5828300, 376,233 points, 625 cylinders), the `inference`
+step of the run (container start + `tools/test.py`), two repeats where given:
+
+| `region_batch` | inference step | GPU util mean / max | VRAM peak | trees |
+|---:|---:|---:|---:|---:|
+| 1 | 72.7 s, 72.9 s | 40 % / 78 % | 2.3-2.6 GB | 760, 748 |
+| 4 | 56.1 s | 46 % / 95 % | 4.9 GB | 747 |
+| 8 | 54.1 s, 54.5 s | 43-45 % / 99 % | 5.7-8.7 GB | 744, 749 |
+| 16 | 53.4 s, 53.1 s | 37-41 % / 99 % | 5.0-7.1 GB | 740, 742 |
+| 32 | 53.0 s | 39 % / 99 % | 10.8 GB | 744 |
+
+The step shrinks by a quarter and is flat beyond 8: what is left is the per-region decoder
+(six cross/self-attention layers, looped per scene inside the layers), `predict_by_feat_test`
+and the `cdist` nearest-neighbour lookup, plus the fixed container start and model load. The
+mean GPU utilisation hardly moves for the same reason. Tree counts vary by +-1 % between
+identical runs (noise floor), the batched runs sit inside that band. The next lever is
+batching the decoder's attention over padded scenes, which touches the training path and
+was not done here.

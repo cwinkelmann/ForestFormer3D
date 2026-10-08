@@ -176,6 +176,11 @@ result PLYs and rewrites `evaluation_total_test.txt` there on every run.
 per 100 m tile, every point seen ~44 times). Override without editing the config:
 `--cfg-options model.test_cfg.region_step_factor=0.5`.
 
+- `model.test_cfg.region_batch` (default **8**, since 2026-10-08) batches that many cylinders
+  through the sparse collate + UNet + heads; the decoder and mask post-processing stay per
+  region, so results are unchanged within the noise floor. Idle H100, one 100 m Berlin
+  sub-tile: inference step 73 s -> 54 s, flat from 8 to 32 (addendum in the profile doc).
+  It is a free speed-up with no quality trade-off, unlike the step factor below.
 - `0.5` -> 169 regions, measured **3.4x** faster per sample - and **-0.05 F1** on thinned
   data (0.3344 -> 0.2845), with 14 % fewer merged instances on an unlabeled tile.
   **Keep 0.25 for low-density clouds**; `0.333` is the conservative middle step if speed

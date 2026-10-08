@@ -143,13 +143,18 @@ def test_scan_with_only_five_points_writes_an_unlabelled_ply(
     assert (np.asarray(vertex['semantic_pred']) == -1).all()
 
 
+@pytest.mark.parametrize('region_batch', [1, 4])
 def test_spconv_value_error_is_caught_per_region(
-        tmp_path, monkeypatch, mm_caplog, build_model, synthetic_plot):
-    """With the pre-filter disabled, a ValueError out of spconv only loses its region."""
+        tmp_path, monkeypatch, mm_caplog, build_model, synthetic_plot, region_batch):
+    """With the pre-filter disabled, a ValueError out of spconv only loses its region.
+
+    With `region_batch` > 1 the failure first hits a batch of regions; that batch
+    must be retried one by one so that only the degenerate region is dropped.
+    """
     import oneformer3d.oneformer3d as ofm
 
     out_dir = tmp_path / 'out'
-    model = build_model(out_dir, **COARSE)
+    model = build_model(out_dir, region_batch=region_batch, **COARSE)
     cluster, _, _ = synthetic_plot(n_ground=4000, n_trees=2)
     points = torch.cat([cluster, collinear_trio()])
     n = points.shape[0]
@@ -160,9 +165,11 @@ def test_spconv_value_error_is_caught_per_region(
     raised = []
 
     def flaky(x):
-        # the three-point region is the only one with a handful of voxels
-        if x.features.shape[0] < 64:
-            raised.append(int(x.features.shape[0]))
+        # the three-point region is the only one with a handful of voxels; in a
+        # batch it is the smallest member
+        per_region = torch.bincount(x.indices[:, 0].long(), minlength=x.batch_size)
+        if int(per_region.min()) < 64:
+            raised.append(int(per_region.min()))
             raise ValueError('Your points vanished here, this usually because you '
                              'provide conv params that may ignore some input points.')
         return real_extract_feat(x)
