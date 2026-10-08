@@ -11,10 +11,11 @@
 #   bytile    work_dirs/<m>-mosaic-<TAG>-by-tile/<T>/ symlink layouts (build_potree_site wants <dir>/<T>/<T>.las)
 #   filter    drop instances under FF3D_MIN_HEIGHT (2 m) from any mosaic stitched without
 #             --min-height, recompute border metrics and the agreements (ff3d_geo.filter)
-#   octrees   PotreeConverter per tile and method into work_dirs/logs/potree/out_<m><TAG>/, three methods in parallel
+#   octrees   PotreeConverter per tile and method into work_dirs/logs/potree/out_<m><TAG>/, four sets in parallel
+#             (ff3d from the building-masked LAS, ff3d_raw from the raw model output, sat, ams3d)
 #   site      a fresh site dir next to the served one: viewer files copied from it, the
 #             orthophoto overlays of tiles whose GeoTIFF is not on carrot carried over,
-#             octrees hard-linked in, ForestFormer3D base build, SAT and AMS3D variants
+#             octrees hard-linked in, ForestFormer3D base build, SAT / AMS3D / ff3d_raw / ptf variants
 #   swap      served dir -> <served>_<old tiles>tiles, fresh dir -> served, nginx restarted,
 #             a few HTTP checks against the container
 #
@@ -61,6 +62,15 @@ if ! done_marker bytile; then
     for T in "${TILES[@]}"; do
       D="work_dirs/$M-mosaic-$TAG-by-tile/$T"; mkdir -p "$D"
       for f in "work_dirs/$M-mosaic-$TAG/$T"*; do ln -sfn "$FF3D_ROOT/$f" "$D/$(basename "$f")"; done
+      # ForestFormer3D: the stitch also writes the building-masked products into
+      # masked/ (roof instances dropped, footprint points -> class 3); those are the
+      # deliverable, so they override the raw ones (the raw _border.json stays).
+      if [ "$M" = berlin ] && [ -f "work_dirs/berlin-mosaic-$TAG/masked/$T.las" ]; then
+        for f in "work_dirs/berlin-mosaic-$TAG/masked/$T"*; do ln -sfn "$FF3D_ROOT/$f" "$D/$(basename "$f")"; done
+        # ... and the raw model output stays reachable as the ff3d_raw viewer variant
+        R="work_dirs/berlin-mosaic-$TAG-by-tile-raw/$T"; mkdir -p "$R"
+        for f in "work_dirs/berlin-mosaic-$TAG/$T"*; do ln -sfn "$FF3D_ROOT/$f" "$R/$(basename "$f")"; done
+      fi
     done
   done
   mark bytile
@@ -113,21 +123,29 @@ EOF2
 fi
 
 # ---------------------------------------------------------------------------- octrees
-convert_all() {   # $1 = mosaic prefix (berlin|sat|ams3d), $2 = out dir name
+convert_all() {   # $1 = directory holding <T>.las, $2 = out dir name
   for T in "${TILES[@]}"; do
     [ -f "$LOG/$2/$T/metadata.json" ] && continue
-    python3 benchmark/potree_convert_tile.py --las "work_dirs/$1-mosaic-$TAG/$T.las" \
+    [ -f "$1/$T.las" ] || { echo "!!! $2 $T: no $1/$T.las"; continue; }
+    python3 benchmark/potree_convert_tile.py --las "$1/$T.las" \
       --out "$LOG/$2/$T" --potree-converter "$PC" > "$LOG/conv_$2_$T.log" 2>&1 \
       || echo "!!! $2 $T conversion failed"
   done
 }
+# ForestFormer3D: the building-masked LAS (masked/) is the deliverable and becomes the
+# base "ff3d" octrees; the raw model output becomes the "ff3d_raw" variant so the viewer
+# can show where the ALKIS footprint mask overrode the model (semantic 3, no instance).
+FF3D_LAS="work_dirs/berlin-mosaic-$TAG"; FF3D_RAW_LAS=""
+if [ -d "$FF3D_LAS/masked" ]; then FF3D_RAW_LAS="$FF3D_LAS"; FF3D_LAS="$FF3D_LAS/masked"; fi
 if ! done_marker octrees; then
-  log "octrees: ${#TILES[@]} tiles x 3 methods"
-  convert_all berlin "out_v3_$TAG" & P1=$!
-  convert_all sat "out_sat$TAG" & P2=$!
-  convert_all ams3d "out_ams3d$TAG" & P3=$!
-  wait $P1 $P2 $P3
-  for O in "out_v3_$TAG" "out_sat$TAG" "out_ams3d$TAG"; do
+  log "octrees: ${#TILES[@]} tiles x 3 methods (+ ff3d_raw: ${FF3D_RAW_LAS:-none})"
+  convert_all "$FF3D_LAS" "out_v3_$TAG" & P1=$!
+  convert_all "work_dirs/sat-mosaic-$TAG" "out_sat$TAG" & P2=$!
+  convert_all "work_dirs/ams3d-mosaic-$TAG" "out_ams3d$TAG" & P3=$!
+  P4=""; [ -n "$FF3D_RAW_LAS" ] && { convert_all "$FF3D_RAW_LAS" "out_ff3draw$TAG" & P4=$!; }
+  wait $P1 $P2 $P3 $P4
+  for O in "out_v3_$TAG" "out_sat$TAG" "out_ams3d$TAG" "out_ff3draw$TAG"; do
+    [ -d "$LOG/$O" ] || continue
     log "$O: $(ls "$LOG/$O"/*/metadata.json 2>/dev/null | wc -l)/${#TILES[@]} octrees"
   done
   mark octrees
@@ -140,8 +158,11 @@ if ! done_marker site; then
   for f in index.html README.md libs build; do [ -e "$SITE/$f" ] && cp -a "$SITE/$f" "$NEW/"; done
   # orthophoto overlays of the tiles whose GeoTIFFs are not on carrot: carried over
   cp -a "$SITE"/data/*_dop2021.* "$SITE"/data/*_dop2025.* "$NEW/data/" 2>/dev/null
-  for pair in "out_v3_$TAG:pointclouds" "out_sat$TAG:pointclouds_sat" "out_ams3d$TAG:pointclouds_ams3d"; do
+  # out_ptf holds the PointTreeFormer octrees (15 tiles, built once by add_ptf.sh)
+  for pair in "out_v3_$TAG:pointclouds" "out_sat$TAG:pointclouds_sat" "out_ams3d$TAG:pointclouds_ams3d" \
+              "out_ff3draw$TAG:pointclouds_ff3d_raw" "out_ptf:pointclouds_ptf"; do
     IFS=: read -r O D <<< "$pair"
+    [ -d "$LOG/$O" ] || continue
     mkdir -p "$NEW/$D"
     for T in "${TILES[@]}"; do
       [ -f "$LOG/$O/$T/metadata.json" ] && cp -al "$LOG/$O/$T" "$NEW/$D/$T"
@@ -151,17 +172,21 @@ if ! done_marker site; then
   python benchmark/build_potree_site.py --site "$NEW" --ff3d-dir "work_dirs/berlin-mosaic-$TAG-by-tile" \
     --dop2021-dir "$DOP21" --dop2025-dir "$DOP25" --jobs 8 > "$LOG/site-$TAG-base.log" 2>&1 \
     || { echo "!!! base site build failed (see $LOG/site-$TAG-base.log)"; exit 1; }
-  for V in sat ams3d; do
-    python benchmark/build_potree_site.py --site "$NEW" --variant "$V" --variant-dir "work_dirs/$V-mosaic-$TAG-by-tile" \
+  for pair in "sat:work_dirs/sat-mosaic-$TAG-by-tile" "ams3d:work_dirs/ams3d-mosaic-$TAG-by-tile" \
+              "ff3d_raw:work_dirs/berlin-mosaic-$TAG-by-tile-raw" "ptf:work_dirs/ptf-mosaic"; do
+    IFS=: read -r V VD <<< "$pair"
+    [ -d "$NEW/pointclouds_$V" ] && [ -d "$VD" ] || { log "variant $V skipped (no octrees or no $VD)"; continue; }
+    python benchmark/build_potree_site.py --site "$NEW" --variant "$V" --variant-dir "$VD" \
       --jobs 8 > "$LOG/site-$TAG-$V.log" 2>&1 || echo "!!! $V variant build failed (see $LOG/site-$TAG-$V.log)"
   done
   python - "$NEW/data/tiles.json" <<'EOF'
 import json, sys
 recs = json.load(open(sys.argv[1]))
 recs = recs["tiles"] if isinstance(recs, dict) and "tiles" in recs else recs
-n = len(recs); sat = sum("sat" in r.get("variants", {}) for r in recs); ams = sum("ams3d" in r.get("variants", {}) for r in recs)
+n = len(recs)
+counts = {v: sum(v in r.get("variants", {}) for r in recs) for v in ("sat", "ams3d", "ff3d_raw", "ptf")}
 dop = sum("dop2021" in r.get("layers", {}) for r in recs)
-print(f"  manifest: {n} tiles, sat {sat}, ams3d {ams}, dop2021 overlays {dop}")
+print(f"  manifest: {n} tiles, variants {counts}, dop2021 overlays {dop}")
 EOF
   mark site
 fi
@@ -174,7 +199,7 @@ if ! done_marker swap; then
   docker restart "$CONTAINER" > /dev/null && sleep 5
   ok=0; bad=0
   for T in "${TILES[@]:0:3}" "${TILES[@]: -3}"; do
-    for path in "pointclouds/$T/metadata.json" "pointclouds_sat/$T/metadata.json" "pointclouds_ams3d/$T/metadata.json" "data/${T}_trees.geojson"; do
+    for path in "pointclouds/$T/metadata.json" "pointclouds_sat/$T/metadata.json" "pointclouds_ams3d/$T/metadata.json" "pointclouds_ff3d_raw/$T/metadata.json" "data/${T}_trees.geojson"; do
       code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/$path"); [ "$code" = "200" ] && ok=$((ok + 1)) || { bad=$((bad + 1)); echo "  !! $code $path"; }
     done
   done

@@ -17,7 +17,8 @@ light-weight overlays that the viewer drapes on top of them:
   data/tiles.json               manifest read by index.html
 
 With ``--variant sat --sat-dir <dir>`` (or ``--variant ams3d --ams3d-dir <dir>``,
-``--variant ptf --variant-dir <dir>``) it
+``--variant ptf --variant-dir <dir>``, ``--variant ff3d_raw --variant-dir <dir>`` for the
+ForestFormer3D output before the ALKIS building mask) it
 instead attaches a second segmentation -- SegmentAnyTree, converted to the same contract
 by benchmark/sat_to_ff3d.py, the AMS3D baseline, which writes that contract itself, or
 Stefan Reder's PointTreeFormer results (benchmark/ptf_to_ff3d.py) -- to tiles
@@ -421,7 +422,7 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--site", required=True, help="output site root (holds pointclouds/)")
     p.add_argument("--ff3d-dir", default=None, help="dir with <tile>/<tile>.las + gpkg + tif")
-    p.add_argument("--variant", default=None, choices=["sat", "ams3d", "ptf"],
+    p.add_argument("--variant", default=None, choices=["sat", "ams3d", "ptf", "ff3d_raw"],
                    help="attach a second method to tiles already in the manifest")
     p.add_argument("--variant-dir", "--sat-dir", "--ams3d-dir", dest="variant_dir", default=None,
                    help="dir with <tile>/<tile>.las + gpkg + tif of that method")

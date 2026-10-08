@@ -167,7 +167,8 @@
 		// returns the record as the active method sees it: octree, attributes, tree
 		// count, vectors and instance mask from the variant; bounds, ground, CHM and
 		// orthophotos (which depend only on the input tile) from the base record.
-		const METHODS = { ff3d: "ForestFormer3D", sat: "SegmentAnyTree", ams3d: "AMS3D", ptf: "PointTreeFormer (S. Reder)" };
+		const METHODS = { ff3d: "ForestFormer3D", ff3d_raw: "ForestFormer3D raw (before the building mask)",
+		                  sat: "SegmentAnyTree", ams3d: "AMS3D", ptf: "PointTreeFormer (S. Reder)" };
 		function view(rec, method = state.method) {
 			if (!rec || method === "ff3d") return rec;
 			const v = rec.variants && rec.variants[method];
@@ -250,7 +251,9 @@
 			return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
 		}
 
-		const SEM_COLORS = { 0: [150, 116, 78], 1: [168, 92, 52], 2: [72, 170, 84], 255: [110, 110, 110] };
+		// 3 = building: points inside a (buffered) ALKIS footprint, set by the post-filter
+		// (ff3d_geo buildings); the raw variant has no such class.
+		const SEM_COLORS = { 0: [150, 116, 78], 1: [168, 92, 52], 2: [72, 170, 84], 3: [214, 64, 64], 255: [110, 110, 110] };
 		const CLS_LABELS = { 2: "ground", 3: "low veg", 4: "med veg", 5: "high veg" };
 
 		// ------------------------------------------------------------- colour presets
@@ -279,15 +282,17 @@
 				apply(pc) {
 					const m = pc.material;
 					m.activeAttributeName = "semantic";
-					m.setRange("semantic", [0, 2]);
+					m.setRange("semantic", [0, 3]);
 					setGradient(m, lutTexture(
-						i => (i + 0.5) / LUT_N * 2,
-						v => SEM_COLORS[Math.max(0, Math.min(2, Math.round(v)))]));
+						i => (i + 0.5) / LUT_N * 3,
+						v => SEM_COLORS[Math.max(0, Math.min(3, Math.round(v)))]));
 				},
 				legend: () => `
 					<div><span class="sw" style="background:rgb(150,116,78)"></span>0 ground</div>
 					<div><span class="sw" style="background:rgb(168,92,52)"></span>1 wood (stem / branch)</div>
-					<div><span class="sw" style="background:rgb(72,170,84)"></span>2 leaf</div>`,
+					<div><span class="sw" style="background:rgb(72,170,84)"></span>2 leaf</div>
+					<div><span class="sw" style="background:rgb(214,64,64)"></span>3 building: inside an ALKIS footprint, instance removed by the post-filter
+					(compare with the "ForestFormer3D raw" method to see what the model itself predicted there)</div>`,
 			},
 			height: {
 				label: "height",
