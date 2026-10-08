@@ -128,3 +128,75 @@ def test_region_batch_must_be_positive(tmp_path, build_model, synthetic_plot):
     model = build_model(tmp_path / 'out', region_batch=0)
     with pytest.raises(ValueError, match='region_batch'):
         _predict(model, tmp_path, points, 'plot_zero')
+
+
+def _backbone_regions(model, points, centres):
+    """Backbone features + inverse maps of a few cylinders, each run alone (as a list)."""
+    import spconv.pytorch as spconv
+
+    pts = points.cuda()
+    feats, maps = [], []
+    with torch.no_grad():
+        for cx, cy in centres:
+            idx = torch.where(((pts[:, 0] - cx) ** 2 + (pts[:, 1] - cy) ** 2) <= model.radius ** 2)[0]
+            pc2, _ = model.grid_sample(pts[idx], idx, 0.2)
+            c, f, inv, sh = model.collate([pc2])
+            feats.append(model.extract_feat(spconv.SparseConvTensor(f, c, sh, 1))[0])
+            maps.append(inv.long())
+    return feats, maps
+
+
+def test_forward_padded_matches_the_per_scene_decoder(build_model, synthetic_plot):
+    """The padded batched decoder gives every scene the masks and scores the per-scene
+    decoder gives it, for scenes of different sizes and query counts."""
+    model = build_model('/tmp/unused')
+    points, _, _ = synthetic_plot()
+    feats, _ = _backbone_regions(model, points, [(3.0, 3.5), (5.0, 3.5), (4.0, 4.0)])
+    g = torch.Generator(device='cpu').manual_seed(0)
+    queries = [f[torch.randperm(f.shape[0], generator=g)[:n].cuda()] for f, n in zip(feats, (300, 120, 37))]
+    with torch.no_grad():
+        ref = model.decoder(feats, [q.clone() for q in queries])
+        out = model.decoder.forward_padded(feats, [q.clone() for q in queries])
+    assert len(out['masks']) == 3 and len(out['aux_outputs']) == len(ref['aux_outputs'])
+    for i in range(3):
+        assert out['masks'][i].shape == ref['masks'][i].shape
+        assert torch.allclose(out['masks'][i], ref['masks'][i], atol=2e-3, rtol=1e-3), \
+            f'scene {i}: max |diff| {(out["masks"][i] - ref["masks"][i]).abs().max().item()}'
+        assert torch.allclose(out['scores'][i], ref['scores'][i], atol=2e-3, rtol=1e-3)
+    # a single scene takes the ordinary path
+    with torch.no_grad():
+        one = model.decoder.forward_padded(feats[:1], [queries[0].clone()])
+        one_ref = model.decoder(feats[:1], [queries[0].clone()])
+    assert torch.equal(one['masks'][0], one_ref['masks'][0])
+
+
+def test_batched_query_sampling_picks_query_point_num_per_region(tmp_path, monkeypatch, build_model, synthetic_plot):
+    """One fps call per batch still yields min(query_point_num, n_tree_points) queries per
+    region, each drawn from that region's own tree points."""
+    import oneformer3d.oneformer3d as ofm
+
+    model = build_model(tmp_path / 'out', region_batch=4)
+    seen = []
+    real = model.decoder.forward_padded
+
+    def spy(feats, queries):
+        seen.append([(f.shape[0], q.shape[0]) for f, q in zip(feats, queries)])
+        return real(feats, queries)
+
+    monkeypatch.setattr(model.decoder, 'forward_padded', spy)
+    points, _, _ = synthetic_plot()
+    _predict(model, tmp_path, points, 'plot_fps')
+    assert seen, 'the batched decoder path never ran'
+    for batch in seen:
+        assert len(batch) > 1
+        for n_points, n_queries in batch:
+            assert 1 <= n_queries <= min(model.query_point_num, n_points)
+
+
+def test_batched_decoder_can_be_switched_off(tmp_path, monkeypatch, build_model, synthetic_plot):
+    model = build_model(tmp_path / 'out', region_batch=4, batched_decoder=False)
+    called = []
+    monkeypatch.setattr(model.decoder, 'forward_padded', lambda *a, **k: called.append(1))
+    points, _, _ = synthetic_plot()
+    sem, inst, _ = _predict(model, tmp_path, points, 'plot_nopad')
+    assert not called and (inst >= 0).any()

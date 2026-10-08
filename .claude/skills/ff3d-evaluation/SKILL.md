@@ -180,7 +180,9 @@ per 100 m tile, every point seen ~44 times). Override without editing the config
   through the sparse collate + UNet + heads; the decoder and mask post-processing stay per
   region, so results are unchanged within the noise floor. Idle H100, one 100 m Berlin
   sub-tile: inference step 73 s -> 54 s, flat from 8 to 32 (addendum in the profile doc).
-  It is a free speed-up with no quality trade-off, unlike the step factor below.
+  `batched_decoder` (default True, same day) adds one fps call and a padded batched decoder
+  pass per batch: another ~18 % off the inference step. Both are free speed-ups with no
+  quality trade-off, unlike the step factor below.
 - `0.5` -> 169 regions, measured **3.4x** faster per sample - and **-0.05 F1** on thinned
   data (0.3344 -> 0.2845), with 14 % fewer merged instances on an unlabeled tile.
   **Keep 0.25 for low-density clouds**; `0.333` is the conservative middle step if speed

@@ -66,6 +66,7 @@ model = dict(
         overlap_threshold=0.3,     # drop a mask when this fraction of its points is already assigned
         region_step_factor=0.25,   # cylinder lattice pitch = radius * this; larger is faster, less overlap
         region_batch=8,            # cylinders per backbone pass (collate + UNet + heads); 1 = one at a time. H100, 100 m Berlin sub-tile: 73 s -> 54 s inference, flat beyond 8; lower on small GPUs
+        batched_decoder=True,      # with a batch: one fps call and one padded decoder pass per batch (another ~18 % off the inference step); False = per cylinder
         topk_insts=300,
         inst_score_thr=0.0,
         pan_score_thr=0.0,

@@ -2186,6 +2186,10 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         region_batch = int(cfg.get('region_batch', 1))
         if region_batch < 1:
             raise ValueError(f'model.test_cfg.region_batch must be >= 1, got {region_batch}')
+        # With a batch, the query sampling (one torch_cluster fps call with a per-region
+        # ratio) and the decoder (padded batched attention, `forward_padded`) also run
+        # once per batch; False keeps them per region (for comparisons).
+        batched_decoder = bool(cfg.get('batched_decoder', True))
 
         def reject(r, err):
             nonlocal n_rejected
@@ -2238,25 +2242,48 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             embed_logits = self.Embed(all_feats).split(sizes)
             bi_semantic_logits = self.BiSemantic(all_feats).split(sizes)
 
-            # per region: query points for the decoder, nearest pc3 point of every pc1 point
-            per_region = []
-            dec_feats, dec_queries = [], []
+            # per region: tree points, nearest pc3 point of every pc1 point
+            tree_idx, nn_idxs = [], []
             for j, r in enumerate(batch):
-                tree_indices = torch.where(torch.argmax(bi_semantic_logits[j], dim=1) == 1)[0]
+                tree_idx.append(torch.where(torch.argmax(bi_semantic_logits[j], dim=1) == 1)[0])
                 pc1, pc3 = r['pc1'], r['pc3']
                 # nearest pc3 point for every pc1 point, chunked to bound memory
-                nn_idx = torch.cat([
+                nn_idxs.append(torch.cat([
                     torch.cdist(pc1[s:s + self.chunk, :3].float(), pc3[:, :3].float()).argmin(1)
-                    for s in range(0, pc1.shape[0], self.chunk)])
-                selected = None
-                if tree_indices.numel() > 1:
-                    batch_vec = torch.zeros(tree_indices.numel(), dtype=torch.long, device=device)
-                    ratio = min(self.query_point_num / tree_indices.numel(), 1.0)
-                    selected = tree_indices[fps(embed_logits[j][tree_indices], batch_vec, ratio=ratio)]
-                    dec_feats.append(feats[j])
-                    dec_queries.append(feats[j][selected])
-                per_region.append((nn_idx, selected))
-            out = self.decoder(dec_feats, dec_queries) if dec_feats else None
+                    for s in range(0, pc1.shape[0], self.chunk)]))
+            # query points: farthest point sampling of the tree points' embeddings,
+            # `query_point_num` per region -- one batched call over the regions that
+            # have trees (torch_cluster takes a per-batch ratio tensor)
+            with_trees = [j for j in range(len(batch)) if tree_idx[j].numel() > 1]
+            selected = {}
+            if with_trees and batched_decoder:
+                counts = torch.tensor([tree_idx[j].numel() for j in with_trees], device=device)
+                batch_vec = torch.repeat_interleave(
+                    torch.arange(len(with_trees), device=device), counts)
+                # torch_cluster takes ceil(ratio * n) points per batch element; a ratio of
+                # exactly q/n can round to q + 1 in float, so aim half a point below q
+                ratio = torch.clamp((self.query_point_num - 0.5) / counts.double(), max=1.0)
+                picked = fps(torch.cat([embed_logits[j][tree_idx[j]] for j in with_trees]),
+                             batch_vec, ratio=ratio)
+                starts = torch.cumsum(counts, 0) - counts
+                owner = batch_vec[picked]
+                for k, j in enumerate(with_trees):
+                    local = (picked[owner == k] - starts[k])[:self.query_point_num]
+                    selected[j] = tree_idx[j][local]
+            else:
+                for j in with_trees:
+                    batch_vec = torch.zeros(tree_idx[j].numel(), dtype=torch.long, device=device)
+                    ratio = min(self.query_point_num / tree_idx[j].numel(), 1.0)
+                    selected[j] = tree_idx[j][fps(embed_logits[j][tree_idx[j]], batch_vec, ratio=ratio)]
+            per_region = [(nn_idxs[j], selected.get(j)) for j in range(len(batch))]
+            dec_feats = [feats[j] for j in with_trees]
+            dec_queries = [feats[j][selected[j]] for j in with_trees]
+            if not dec_feats:
+                out = None
+            elif batched_decoder and len(dec_feats) > 1:
+                out = self.decoder.forward_padded(dec_feats, dec_queries)
+            else:
+                out = self.decoder(dec_feats, dec_queries)
 
             slot = 0
             for j, r in enumerate(batch):
@@ -2284,7 +2311,7 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                         mask_indices.append(pc1_indices[masks[k][nn_idx]].cpu())
                         mask_scores.append(float(scores[k]))
 
-            del x, feats, all_feats, embed_logits, bi_semantic_logits, per_region, out
+            del x, feats, all_feats, embed_logits, bi_semantic_logits, per_region, out, tree_idx, nn_idxs, selected
             torch.cuda.empty_cache()
 
         pending = []             # prepared regions waiting for the next backbone pass

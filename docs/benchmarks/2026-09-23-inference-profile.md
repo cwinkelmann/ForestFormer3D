@@ -482,3 +482,34 @@ mean GPU utilisation hardly moves for the same reason. Tree counts vary by +-1 %
 identical runs (noise floor), the batched runs sit inside that band. The next lever is
 batching the decoder's attention over padded scenes, which touches the training path and
 was not done here.
+
+### Round 2 (same day): batched query sampling and a padded batched decoder
+
+Section timers around one 100 m sub-tile with its halo (1,225 cylinders, `region_batch`
+8, GPU 4, host busy with the 57-tile stitch), `_predict_full_plot` only:
+
+| section | batched backbone only | + batched fps and decoder | + SDPA cross-attention |
+|---|---:|---:|---:|
+| predict total | 50.7 s | 39.6 s | 36.1 s |
+| farthest point sampling | 14.3 s (1,225 calls) | 5.6 s (154 calls) | 5.6 s |
+| decoder | 14.1 s (per scene) | 13.2 s (padded) | 9.3 s |
+| backbone (`extract_feat`) | 5.9 s | 5.2 s | 6.1 s |
+| `cdist` nearest neighbour | 3.7 s | 2.3 s | 2.6 s |
+| collate | 2.8 s | 2.7 s | 2.5 s |
+| mask post-processing (`predict_by_feat_test`) | 2.2 s | 2.2 s | 2.2 s |
+
+`model.test_cfg.batched_decoder` (default True) does two things for a batch: one
+`torch_cluster.fps` call over the tree points of all regions with a per-region ratio
+tensor (ratio aimed half a point below `query_point_num`, because `ceil(ratio * n)` can
+round up), and `ForAINetv2QueryDecoder_XAwarequery.forward_padded`, which pads the
+regions' point features and queries to the batch maximum and runs every attention layer
+once per batch; padded keys are masked out of the softmax, padded queries dropped before
+the heads, and a query that masks every key attends its scene's real keys exactly as the
+per-scene code does. `nn.MultiheadAttention` only takes a per-head mask of shape
+(B * heads, Lq, S) and converts it to float, which for 8 cylinders x 18 k points is 1.4 GB
+per layer; the cross-attention therefore runs the module's own projections through
+`scaled_dot_product_attention` with the mask broadcast over the heads (`_masked_cross_attention`).
+Per-scene outputs agree with the per-scene decoder to 2e-3 (test), the training path is
+untouched. A/B of the whole `tools/test.py` run on the same host, two repeats each:
+`batched_decoder=False` 67 s / 73 s, `True` 55 s / 60 s. Random-start fps makes every run
+of either path a different sample, so results compare only within the noise floor.

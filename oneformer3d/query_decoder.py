@@ -5,6 +5,36 @@ from mmengine.model import BaseModule
 from mmdet3d.registry import MODELS
 
 
+def _masked_cross_attention(attn, Q, K, allowed):
+    """``attn(Q, K, K, attn_mask=...)`` for a batch, with one (B, Lq, S) boolean
+    ``allowed`` mask shared by all heads.
+
+    ``nn.MultiheadAttention`` only takes a per-head mask of shape (B * heads, Lq, S) and
+    turns it into a float mask, so a batch of 8 cylinders with 18 k points each copies a
+    1.4 GB mask per layer. This runs the same projections and
+    ``scaled_dot_product_attention`` with the mask broadcast over the heads instead; the
+    maths is the module's (scaled softmax attention, out projection, no attention
+    dropout in eval mode). Falls back to the module for an unusual configuration.
+    """
+    import torch.nn.functional as F
+
+    if (not getattr(attn, '_qkv_same_embed_dim', False) or attn.in_proj_bias is None
+            or attn.bias_k is not None or attn.training):
+        n_heads = attn.num_heads
+        out, _ = attn(Q, K, K, attn_mask=(~allowed).repeat_interleave(n_heads, dim=0))
+        return out
+    n_batch, n_q, _ = Q.shape
+    n_k = K.shape[1]
+    e, h = attn.embed_dim, attn.num_heads
+    w_q, w_k, w_v = attn.in_proj_weight.split(e, 0)
+    b_q, b_k, b_v = attn.in_proj_bias.split(e, 0)
+    q = F.linear(Q, w_q, b_q).view(n_batch, n_q, h, e // h).transpose(1, 2)
+    k = F.linear(K, w_k, b_k).view(n_batch, n_k, h, e // h).transpose(1, 2)
+    v = F.linear(K, w_v, b_v).view(n_batch, n_k, h, e // h).transpose(1, 2)
+    out = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed[:, None, :, :])
+    return attn.out_proj(out.transpose(1, 2).reshape(n_batch, n_q, e))
+
+
 class CrossAttentionLayer(BaseModule):
     """Cross attention layer.
 
@@ -764,6 +794,83 @@ class ForAINetv2QueryDecoder_XAwarequery(BaseModule):
             masks=pred_masks[-1],
             scores=pred_scores[-1],
             aux_outputs=aux_outputs)
+
+    def forward_padded(self, x, queries):
+        """Inference-only batched form of :meth:`forward_iter_pred`.
+
+        The layers above loop over the scenes of a batch and run one attention per
+        scene; for full-plot inference that is one small launch per cylinder and keeps
+        the GPU idle between them. This pads the scenes' point features and queries to
+        the batch maximum and runs every attention layer ONCE over the whole batch.
+        Padded keys are excluded from every softmax, padded queries are dropped before
+        the heads, and a query row that attends nothing attends all real keys of its
+        scene exactly as the per-scene code does, so the per-scene outputs match
+        :meth:`forward_iter_pred` up to float summation order. Needs ``iter_pred``;
+        the training path is untouched (dropout is identity in eval mode, which is the
+        only mode this is used in).
+        """
+        if not self.iter_pred:
+            return self.forward_simple(x, queries)
+        n_scenes = len(x)
+        if n_scenes == 1:
+            return self.forward_iter_pred(x, queries)
+        inst_feats = [self.input_proj(y) for y in x]
+        mask_feats = [self.x_mask(y) for y in x]
+        qs = self._get_queries(queries, n_scenes)
+        n_q = [q.shape[0] for q in qs]
+        n_p = [f.shape[0] for f in inst_feats]
+        max_q, max_p = max(n_q), max(n_p)
+        device, dtype = qs[0].device, qs[0].dtype
+        d_model = qs[0].shape[1]
+        n_heads = self.cross_attn_layers[0].attn.num_heads
+
+        Q = torch.zeros(n_scenes, max_q, d_model, device=device, dtype=dtype)
+        K = torch.zeros(n_scenes, max_p, inst_feats[0].shape[1], device=device, dtype=dtype)
+        key_pad = torch.ones(n_scenes, max_p, dtype=torch.bool, device=device)   # True = padding
+        q_pad = torch.ones(n_scenes, max_q, dtype=torch.bool, device=device)
+        for i in range(n_scenes):
+            Q[i, :n_q[i]] = qs[i]
+            K[i, :n_p[i]] = inst_feats[i]
+            key_pad[i, :n_p[i]] = False
+            q_pad[i, :n_q[i]] = False
+
+        def head(Qb):
+            return self._forward_head([Qb[i, :n_q[i]] for i in range(n_scenes)], mask_feats)
+
+        pred_score, pred_mask, attn_mask = head(Q)
+        pred_scores, pred_masks = [pred_score], [pred_mask]
+        for layer in range(len(self.cross_attn_layers)):
+            ca = self.cross_attn_layers[layer]
+            if attn_mask is not None:
+                am = torch.zeros(n_scenes, max_q, max_p, dtype=torch.bool, device=device)
+                for i in range(n_scenes):
+                    am[i, :n_q[i], :n_p[i]] = attn_mask[i]
+                am |= key_pad[:, None, :]
+                # the per-scene code lets a query that masks every key attend all of
+                # them instead; here "all of them" must stay the scene's REAL keys
+                full = am.all(-1, keepdim=True)
+                am = torch.where(full, key_pad[:, None, :].expand_as(am), am)
+                out = _masked_cross_attention(ca.attn, Q, K, ~am)
+            else:
+                out, _ = ca.attn(Q, K, K, key_padding_mask=key_pad)
+            if ca.fix:
+                out = ca.dropout(out)
+            Q = out + Q
+            if ca.fix:
+                Q = ca.norm(Q)
+            sa = self.self_attn_layers[layer]
+            z, _ = sa.attn(Q, Q, Q, key_padding_mask=q_pad)
+            Q = sa.norm(sa.dropout(z) + Q)
+            ff = self.ffn_layers[layer]
+            Q = ff.norm(ff.net(Q) + Q)
+            pred_score, pred_mask, attn_mask = head(Q)
+            pred_scores.append(pred_score)
+            pred_masks.append(pred_mask)
+
+        aux_outputs = [
+            {'masks': masks, 'scores': scores}
+            for scores, masks in zip(pred_scores[:-1], pred_masks[:-1])]
+        return dict(masks=pred_masks[-1], scores=pred_scores[-1], aux_outputs=aux_outputs)
 
     def forward(self, x, queries=None):
         """Forward pass.
