@@ -1,40 +1,170 @@
-# ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds
+# ForestFormer3D — city-scale tree segmentation on open ALS data
 
-This is the official implementation of the paper:
+This is a fork of the official [ForestFormer3D](https://bxiang233.github.io/FF3D/) (ICCV 2025
+oral) implementation. The upstream code trains and evaluates on dense forest-plot scans; this
+fork adds the tooling to run it **unchanged, without retraining, on real georeferenced
+airborne laser scanning (ALS) tiles** and ran it over 44 km² of Berlin's open 2021 ALS
+covering the Tegel and Spandau forests.
 
-**"ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds"**
+> The original project README — paper, citation, dataset, and the upstream setup, training and
+> testing instructions — is kept in full at the [bottom of this file](#original-project-readme).
 
-(*Accepted as Oral at ICCV 2025 –  🏝️ Honolulu!* 🎉)
+**Result: one seamless mosaic of 1,107,126 tree instances** over ~580 million points, each with
+a position, top height, crown polygon, point count and confidence score, delivered as LAS point
+clouds, GeoPackage tree tables, GeoTIFF rasters, a QGIS project and a web viewer. Two other
+methods were run on exactly the same points through exactly the same tiling and merging:
+[SegmentAnyTree](https://github.com/SmartForest-no/SegmentAnyTree) (the other published deep
+model) and AMS3D (a classical adaptive mean-shift baseline); a fourth, PointTreeFormer
+(S. Reder, HNEE), enters as results only on 15 of the tiles.
 
-- 🌐 [Project page](https://bxiang233.github.io/FF3D/)
-- 📄 [Paper on arXiv](https://www.arxiv.org/abs/2506.16991)
-- 📦 [Dataset & pre-trained model on zenodo](https://zenodo.org/records/16742708)
+📄 **Full report: [`docs/benchmarks/report/berlin-ff3d-report.pdf`](docs/benchmarks/report/berlin-ff3d-report.pdf)**
+([markdown](docs/benchmarks/report/berlin-ff3d-report.md)) · pipeline:
+[`docs/inference-pipeline.md`](docs/inference-pipeline.md) · runbook:
+[`docs/benchmarks/RUNBOOK-tegel.md`](docs/benchmarks/RUNBOOK-tegel.md)
 
----
+![The study area: 44 km tiles over the Tegel and Spandau forests](docs/benchmarks/assets/analytics/analytics_study_area.png)
 
-## 📚 Citation
-
-If you find this project helpful, please cite our paper:
-
-```bibtex
-@inproceedings{xiang2025forestformer3d,
-  title     = {ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds},
-  author    = {Binbin Xiang and Maciej Wielgosz and Stefano Puliti and Kamil Král and Martin Krůček and Azim Missarov and Rasmus Astrup},
-  booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
-  year      = {2025}
-}
-```
-
----
-
-🆕 📢 ## For a faster way to run ForestFormer3D inference on your own test data, please use the following instruction:
-[FF3D_inference – ff3d_forestsens](https://github.com/bxiang233/FF3D_inference/tree/main/ff3d_forestsens)
-
-This version uses 2 inference iterations by default. If your trees are not extremely densely distributed, you can set the number of iterations to 1 instead.
+*The study area in EPSG:25833. Green: forest stands of the Berlin Forstbetriebskarte 2014; grey:
+ALKIS building footprints; squares: the 1 km ALS tiles; thick outlines: the WINMOL 2025 survey
+footprints of Revier 12 Tegelsee (east) and Revier 13 Spandau (west).*
 
 ---
 
-## Environment (CUDA 11.8 image)
+## What we found
+
+### 1. The method scales from 100 m plots to a city, if the tiling is right
+
+The model is trained on ~100 m plots, so each 1 km tile is split into 100 m sub-tiles. Done
+naïvely, every sub-tile border becomes a scar: an unlabelled strip plus crowns cut in half with
+two different ids. Splitting with a **20 m halo** and then merging *all* sub-tiles of the whole
+mosaic **in one pass** — unifying instances by their IoU on the shared halo points — gives tree
+ids that are unique and dense across sub-tile *and* km-tile borders alike. The excess of
+unlabelled points along the grid lines dropped from **6.3 to 0.115 percentage points**, and
+911,528 instances were unified over the halos.
+
+| before: seamed, one run per sub-tile | after: 20 m halo + mosaic-wide stitch |
+| --- | --- |
+| ![seamed result, 380 m across](docs/benchmarks/assets/seamless/before-treeid-381_5829-E381700-N5829400.jpg) | ![stitched result, 380 m across](docs/benchmarks/assets/seamless/after-treeid-381_5829-E381700-N5829400.jpg) |
+| ![seam closeup, the grey strip runs down the 100 m line](docs/benchmarks/assets/seamless/before-seam-closeup-E381700.png) | ![same place after stitching: crowns carry one id across the line](docs/benchmarks/assets/seamless/after-seam-closeup-E381700.png) |
+
+Cost: about **1.5 GPU-hours per km tile** on an H100 (SegmentAnyTree 1.9, AMS3D 22 CPU-minutes
+on 48 cores). See [`docs/benchmarks/2026-09-24-seamless-ids.md`](docs/benchmarks/2026-09-24-seamless-ids.md).
+
+### 2. The two deep models largely agree — and disagree in one characteristic way
+
+Compared on **778,681,715 identical points**: 637,325 tree pairs overlap at IoU ≥ 0.5 (57.0 % of
+ForestFormer3D's trees, 52.2 % of SegmentAnyTree's), and those matches are tight (median IoU
+**0.742**). Where the two differ, SegmentAnyTree has usually **cut one crown into several**:
+28.8 % of ForestFormer3D trees are covered by two or more SegmentAnyTree instances, against
+10.5 % the other way round.
+
+![Instance agreement per km tile between ForestFormer3D and SegmentAnyTree](docs/benchmarks/assets/analytics/analytics_agreement.png)
+
+*Per km tile: the fraction of each method's trees with an IoU ≥ 0.5 counterpart (bars) and the
+median IoU of those pairs (black line); below, the fraction of each method's trees that the
+other method has split into two or more instances.*
+
+SegmentAnyTree reports **1.095x** as many trees overall, but the surplus is not noise — it is a
+block: ratio **1.20** in the Spandau forest (R13) against **0.97** in Tegel (R12). That the two
+forests behave differently is itself a finding; their stand structure differs.
+
+![Trees per km tile for both methods and their ratio](docs/benchmarks/assets/analytics/analytics_tile_grid.png)
+
+### 3. Three methods, three different ideas of what a tree is
+
+| method | km tiles | trees | trees / km² | points / tree (median) | height p10 / p50 / p90 (m) | crown area p50 (m²) |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ForestFormer3D | 44 | 1,107,126 | 25,162 | 285 | 4.9 / 18.6 / 28.8 | 26.2 |
+| SegmentAnyTree | 44 | 1,211,894 | 27,543 | 212 | 6.9 / 19.8 / 28.8 | 19.4 |
+| AMS3D (mean shift) | 44 | 655,726 | 14,903 | 302 | 10.8 / 21.6 / 29.9 | 36.6 |
+
+![Per-tree height, crown area and point-count distributions for all three methods](docs/benchmarks/assets/analytics/analytics_distributions_3way.png)
+
+*Normalised histograms (area 1) over the whole mosaic, one curve per method: height above
+ground, crown area (convex hull), points per instance.*
+
+Both learned methods produce a **bimodal** height distribution — a canopy mode near 26 m and a
+second mode at 4-7 m (understory, hedges, young garden trees). The classical mean-shift baseline
+has **no short mode at all**: its heights start around 10 m, it reports the fewest and largest
+instances, because a height-dependent bandwidth merges the understory into the canopy tree above
+it. Separating that layer is what the learned models add. SegmentAnyTree's smaller crowns (p50
+19.4 vs 26.2 m²) are the signature of the splitting seen above.
+
+### 4. Where an external reference exists, the predictions hold up
+
+* **Street and park trees.** Of 21,023 Berlin tree-cadastre trees inside the mosaic, **82 %**
+  have a ForestFormer3D tree top within 3 m (86 % for SegmentAnyTree), with no height bias
+  (0.15 m) and a mean absolute height difference of 4.2 m — the order of the cadastre's own
+  whole-metre inspection estimates.
+* **Forest inventory.** Per stand, the 90th percentile of predicted heights tracks the 2014
+  Forstbetriebskarte's canopy height by species (r = 0.62 over 554 stands), sitting 4.3 m above
+  it — roughly seven growing seasons, which is exactly the gap between the two datasets.
+  Predicted densities are 280-400 trees/ha under a pine-dominated canopy.
+
+![Predicted crowns over the 2021 leaf-off orthophoto](docs/benchmarks/assets/berlin-dop/berlin-dop-381-5829-zoom.png)
+
+### 5. Two domain artefacts need a post-filter
+
+The Berlin ALS has **no building class** (class 6 is absent; roof points sit in the vegetation
+bins 3/4/5), so the model happily segments roofs and roof vegetation as trees. Masking the
+official ALKIS footprints removes **3.5 %** of instances mosaic-wide, up to 40 % on the densest
+tile. The second artefact is flat, wide blobs — bare ground labelled as vegetation — which a
+minimum-height rule removes (the stitch's 2.0 m rule dropped 15,841 instances). Both are
+built into the pipeline (`ff3d_geo buildings`, the stitch height rule / `ff3d_geo filter`).
+Checked on tile 379_5826: 88.7 % of the points inside the 1,803 footprints there are class 5
+("high vegetation"), and the raw model marks 57.6 % of them as tree instances; the mask drops
+2,036 of 15,269 instances on that tile. The viewer carries both states, "ForestFormer3D" (masked,
+footprint points shown as semantic class 3, red) and "ForestFormer3D raw", so the effect of the
+mask can be inspected point by point. What neither rule catches: jetties and moored boats
+over water (no footprint, and the ground grid under water is interpolated from the shore, so
+they pass the height rule); a water-polygon mask would be the analogous fix.
+
+### What this does *not* establish
+
+**Which method is right inside the forest.** No per-tree ground truth exists there, so every
+method-to-method number above is *agreement*, not accuracy. The 974 hand-delineated WINMOL field
+circles in Revier 12 and 13 are the one species-labelled reference on these tiles and are the
+obvious next step; both survey footprints are now fully inside the mosaic.
+
+Further caveats are collected in
+[`docs/benchmarks/2026-10-05-discussion.md`](docs/benchmarks/2026-10-05-discussion.md): the model
+runs far from its training domain (the ForAINetV2 plots are 5-100x denser than this ALS — see the
+[density study](docs/benchmarks/2026-09-23-als-density-eval.md)), the references are coarse and
+dated, the mosaic edge has a one-sided halo, and inference is not bit-deterministic (run-to-run
+variation is below every difference reported here, but not zero).
+
+---
+
+## What this fork adds to the upstream code
+
+* **`ff3d_geo/`** — a pure-Python (no torch/CUDA) package that runs the model on georeferenced
+  LAS/LAZ tiles: `convert` → GPU inference in the container → `georef` back to LAS 1.4, plus
+  tree GeoPackage, crown polygons, GeoTIFF masks and a markdown/JSON report. Subcommands
+  `split` / `stitch` / `border-check` implement the halo tiling and the mosaic-wide merge;
+  `buildings` applies the ALKIS mask; `filter` the minimum instance height; `masks`
+  rasterises; `ams3d` is the baseline.
+* **`benchmark/`** — the reproducible pipeline: data fetch (`fetch_berlin_als.py`,
+  `fetch_berlin_dop.py`, `fetch_berlin_buildings.py`, `fetch_berlin_forest_stands.py`,
+  `fetch_berlin_trees.py`), the per-GPU queue and mosaic stitch (`berlin_run_gpu.sh`,
+  `berlin_stitch.sh`), the comparison methods (`sat_run_gpu.sh`, `ams3d_run_cpu.sh`), the
+  analytics (`berlin_analytics.py`), the QGIS project, the Potree viewer and this report.
+* **A CUDA 11.8 image** (`Dockerfile`, `forestformer3d:cu118`) for A100/L40/H100 hosts, with the
+  legacy 11.6 one kept as `Dockerfile.a100-cu116`.
+* **Robustness and speed fixes** in the inference path: degenerate cylinder regions are skipped
+  instead of aborting a whole km-tile batch, binary PLY output, the vectorised z-filter (the
+  former per-mask loop was 81 % of prediction time), cylinders batched through the sparse
+  backbone (`model.test_cfg.region_batch`, default 8: inference step 73 s -> 54 s per 100 m
+  sub-tile on an idle H100, results unchanged within the run-to-run noise), and a configurable
+  `model.test_cfg.region_step_factor` that trades cylinder overlap for a 3.7x speed-up (the
+  default stays at the paper's 0.25; see
+  [`docs/benchmarks/2026-09-23-inference-profile.md`](docs/benchmarks/2026-09-23-inference-profile.md)).
+* **Tests**: CPU tests in `tests/`, GPU tests in `tests/gpu/`, and `docker/smoke.sh`.
+  Deliberately-unfixed oddities are listed in [`docs/known-issues.md`](docs/known-issues.md).
+
+---
+## Running it yourself
+
+### Environment (CUDA 11.8 image)
 
 `Dockerfile` builds `forestformer3d:cu118`: PyTorch 2.0.1 / CUDA 11.8 with MinkowskiEngine,
 spconv, torch-scatter, torch-cluster, torch-points-kernels and the segmentator extension
@@ -76,7 +206,7 @@ python3 -m venv .venv-cpu && .venv-cpu/bin/pip install -r tests/requirements-cpu
 `pytest -m gpu tests/gpu` runs the GPU tests (model construction, tiling end to end, the
 smoke scenario below) and only works inside the image.
 
-### Bringing the image up on a GPU host
+#### Bringing the image up on a GPU host
 
 ```bash
 git clone -b fix/review-findings https://github.com/cwinkelmann/ForestFormer3D.git
@@ -88,7 +218,7 @@ docker/smoke.sh          # expect "2 passed"
 If the MinkowskiEngine layer fails with an nvcc error mentioning `sm_90`, rebuild with
 `--build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"`.
 
-### Geospatial inference on your own ALS tiles (`ff3d_geo`)
+#### Geospatial inference on your own ALS tiles (`ff3d_geo`)
 
 `ff3d_geo/` runs ForestFormer3D on real georeferenced ALS tiles (LAS/LAZ) instead of the
 ForAINetV2 benchmark plots, and turns the result back into a georeferenced LAS 1.4 file plus
@@ -121,8 +251,52 @@ host over SSH, running single tiles, and the split/batch/merge loop for km tiles
 
 ---
 
+<a id="original-project-readme"></a>
+
+# Original project README
+
+Everything below this line is the upstream ForestFormer3D documentation (paper, citation,
+dataset, the legacy CUDA 11.6 setup guide and the original data-preparation, training and
+testing instructions), kept unchanged for reference.
+
+---
+
+This is the official implementation of the paper:
+
+**"ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds"**
+
+(*Accepted as Oral at ICCV 2025 –  🏝️ Honolulu!* 🎉)
+
+- 🌐 [Project page](https://bxiang233.github.io/FF3D/)
+- 📄 [Paper on arXiv](https://www.arxiv.org/abs/2506.16991)
+- 📦 [Dataset & pre-trained model on zenodo](https://zenodo.org/records/16742708)
+
+---
+
+## 📚 Citation
+
+If you find this project helpful, please cite our paper:
+
+```bibtex
+@inproceedings{xiang2025forestformer3d,
+  title     = {ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds},
+  author    = {Binbin Xiang and Maciej Wielgosz and Stefano Puliti and Kamil Král and Martin Krůček and Azim Missarov and Rasmus Astrup},
+  booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+  year      = {2025}
+}
+```
+
+---
+
+🆕 📢 ## For a faster way to run ForestFormer3D inference on your own test data, please use the following instruction:
+[FF3D_inference – ff3d_forestsens](https://github.com/bxiang233/FF3D_inference/tree/main/ff3d_forestsens)
+
+This version uses 2 inference iterations by default. If your trees are not extremely densely distributed, you can set the number of iterations to 1 instead.
+
+---
+
 # ForestFormer3D environment setup (legacy CUDA 11.6 image)
-This guide provides step-by-step instructions to build and configure the Docker environment for ForestFormer3D, set up debugging in Visual Studio Code, and resolve common issues. It describes `Dockerfile.a100-cu116`; see "Environment (CUDA 11.8 image)" above for the current image.
+This guide provides step-by-step instructions to build and configure the Docker environment for ForestFormer3D, set up debugging in Visual Studio Code, and resolve common issues. It describes `Dockerfile.a100-cu116`; see "Running it yourself" above for the current image.
 
 At first, please download the dataset and pretrained model from Zenodo, and unzip and place them in the correct locations. Make sure the directory structure looks like:
 
