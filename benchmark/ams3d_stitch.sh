@@ -26,14 +26,29 @@ for T in "$@"; do
   case $R in ''|*[!0-9]*) R=0;; esac
   TOTAL=$((TOTAL + R))
 done
-echo "=== $(date +%FT%T) ams3d mosaic: stitch ($# tiles, runtime ${TOTAL}s) ==="
-python -m ff3d_geo stitch --manifest "${MANIFESTS[@]}" --results "${RESULTS[@]}" --out "$OUT" --runtime-s "$TOTAL" --min-height "$MIN_H" \
-  || { echo "!!! ams3d stitch failed"; exit 1; }
-echo "=== $(date +%FT%T) stitch done ==="
-for T in "$@"; do
-  echo "=== $(date +%FT%T) $T: border-check ==="
-  python -m ff3d_geo border-check --las "$OUT/$T.las" --json "$OUT/${T}_border.json" || echo "!!! $T border-check failed"
-  echo "=== $(date +%FT%T) $T: masks ==="
-  python -m ff3d_geo masks --las "$OUT/$T.las" --out "$OUT" --prefix "$T" || echo "!!! $T masks failed"
-done
+# Idempotent: a second invocation over the same tiles (a driver that re-runs the stage, or a
+# side job that started it early) waits for a running stitch, skips the mosaic merge when
+# every tile LAS and stitch.json exist, and skips a tile whose products exist.
+LOCK="$OUT/.stitch.lock"
+while [ -f "$LOCK" ]; do echo "=== $(date +%FT%T) waiting: another stitch holds $LOCK ==="; sleep 60; done
+complete=1; for T in "$@"; do [ -f "$OUT/$T.las" ] || complete=0; done; [ -f "$OUT/stitch.json" ] || complete=0
+if [ "$complete" = 1 ]; then
+  echo "=== $(date +%FT%T) ams3d mosaic: stitch already complete in $OUT, skipped ==="
+else
+  mkdir -p "$OUT"; date +%FT%T > "$LOCK"; trap 'rm -f "$LOCK"' EXIT
+  echo "=== $(date +%FT%T) ams3d mosaic: stitch ($# tiles, runtime ${TOTAL}s) ==="
+  python -m ff3d_geo stitch --manifest "${MANIFESTS[@]}" --results "${RESULTS[@]}" --out "$OUT" --runtime-s "$TOTAL" --min-height "$MIN_H" \
+    || { echo "!!! ams3d stitch failed"; exit 1; }
+  rm -f "$LOCK"
+  echo "=== $(date +%FT%T) stitch done ==="
+fi
+tile_products() {   # $1 = tile, $2 = mosaic dir; border-check + masks, skipped when both exist
+  if [ -f "$2/${1}_border.json" ] && [ -f "$2/${1}_instance_50cm.tif" ]; then echo "=== $(date +%FT%T) $1: products exist, skipped ==="; return 0; fi
+  echo "=== $(date +%FT%T) $1: border-check + masks ==="
+  python -m ff3d_geo border-check --las "$2/$1.las" --json "$2/${1}_border.json" || echo "!!! $1 border-check failed"
+  python -m ff3d_geo masks --las "$2/$1.las" --out "$2" --prefix "$1" || echo "!!! $1 masks failed"
+}
+export -f tile_products
+AMS3D_STITCH_JOBS="${AMS3D_STITCH_JOBS:-8}"   # tiles in parallel for the per-tile products
+printf '%s\n' "$@" | xargs -P "$AMS3D_STITCH_JOBS" -I{} bash -c 'tile_products "$1" "$2"' _ {} "$OUT"
 echo "=== $(date +%FT%T) ams3d mosaic finished ==="

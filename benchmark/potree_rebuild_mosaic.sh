@@ -123,14 +123,17 @@ EOF2
 fi
 
 # ---------------------------------------------------------------------------- octrees
+convert_one() {   # $1 = las dir, $2 = out dir name, $3 = tile
+  [ -f "$LOG/$2/$3/metadata.json" ] && return 0
+  [ -f "$1/$3.las" ] || { echo "!!! $2 $3: no $1/$3.las"; return 0; }
+  python3 benchmark/potree_convert_tile.py --las "$1/$3.las" \
+    --out "$LOG/$2/$3" --potree-converter "$PC" > "$LOG/conv_$2_$3.log" 2>&1 \
+    || echo "!!! $2 $3 conversion failed"
+}
+export -f convert_one; export LOG PC
+CONVERT_JOBS="${CONVERT_JOBS:-6}"   # converters per method set; four sets run side by side
 convert_all() {   # $1 = directory holding <T>.las, $2 = out dir name
-  for T in "${TILES[@]}"; do
-    [ -f "$LOG/$2/$T/metadata.json" ] && continue
-    [ -f "$1/$T.las" ] || { echo "!!! $2 $T: no $1/$T.las"; continue; }
-    python3 benchmark/potree_convert_tile.py --las "$1/$T.las" \
-      --out "$LOG/$2/$T" --potree-converter "$PC" > "$LOG/conv_$2_$T.log" 2>&1 \
-      || echo "!!! $2 $T conversion failed"
-  done
+  printf '%s\n' "${TILES[@]}" | xargs -P "$CONVERT_JOBS" -I{} bash -c 'convert_one "$1" "$2" "$3"' _ "$1" "$2" {}
 }
 # ForestFormer3D: the building-masked LAS (masked/) is the deliverable and becomes the
 # base "ff3d" octrees; the raw model output becomes the "ff3d_raw" variant so the viewer
