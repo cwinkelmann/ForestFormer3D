@@ -231,6 +231,16 @@ carrot `inputs/berlin_drone_2025/`, and drawn by `build_potree_site.py --drone20
 `drone2025` layer (between the two DOPs in `LAYER_DZ`); `write_dop_png` keeps an alpha band or
 the nodata value transparent, so a tile the footprint only touches is not painted black.
 
+**A tile whose overlay arrives later** (an orthophoto GeoTIFF copied to carrot after the site
+was built): `build_potree_site.py --site <live site> --ff3d-dir work_dirs/berlin-mosaic-<TAG>-by-tile
+--dop2021-dir ... --dop2025-dir ... --tiles <T>... --refresh --no-index --jobs 6`. `--refresh`
+rebuilds those tiles and merges their records into the existing `tiles.json`, keeping the other
+tiles and each rebuilt tile's `variants` (a base build does not write that block). Without it,
+`--tiles` rewrites the manifest with only the named tiles and `--skip-existing` skips exactly the
+tiles that are already in it. Back up `data/tiles.json` first; the script can run from a copy
+outside the checkout with `PYTHONPATH=<checkout>` (it imports `ff3d_geo.grid`), which is how the
+57-tile orthophotos were filled in on 2026-10-08 without pulling the production checkout.
+
 **Ready-made project over the whole Berlin mosaic:** `python benchmark/make_qgis_project.py
 --phase all` (plain Python + MacPorts GDAL, no PyQGIS; `METHODS` points at the
 `berlin_als_2021_{ff3d,sat,ams3d}_v4` dirs, the 57-tile mosaic of 2026-10-08 -- v3 is the

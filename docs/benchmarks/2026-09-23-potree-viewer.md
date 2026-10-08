@@ -11,7 +11,13 @@ Five segmentations are selectable: **ForestFormer3D** (the building-masked produ
 what the base build serves -- until 2026-10-08 the site showed the raw model output here,
 so roofs and the Tegeler See jetties appeared as trees), **ForestFormer3D raw (before the
 building mask)** as the `ff3d_raw` variant for exactly that comparison, SegmentAnyTree,
-AMS3D and PointTreeFormer. The masked product marks removed points as semantic class 3
+AMS3D and PointTreeFormer. All 57 tiles carry every overlay (CHM, DTM, instance raster,
+DOP 2021 leaf-off, DOP 2025 leaf-on): the thirteen new tiles reached the site without
+orthophotos, because the rebuild carries existing overlays over and their GeoTIFFs were not
+on carrot, and were filled in afterwards with `build_potree_site.py --refresh --tiles ...`,
+which rebuilds the named tiles and merges them back into `tiles.json` instead of replacing
+it (the other tiles and the rebuilt tiles' `variants` survive). The masked product marks
+removed points as semantic class 3
 (building, red in the semantic colouring, legend entry "building / masked"), so the
 difference between the two is visible point by point: on 379_5826, 13,233 trees masked
 against 15,117 raw. Since 2026-10-07 Stefan Reder's PointTreeFormer results (15 Tegel
