@@ -417,6 +417,24 @@ def build_tile(tile: str, args_dict: dict) -> dict:
     return rec
 
 
+def merge_records(old: list[dict], built: list[dict]) -> list[dict]:
+    """Merge freshly built per-tile records into the manifest's existing ones.
+
+    A rebuilt tile replaces its old record but keeps the keys a base build does not
+    produce -- the ``variants`` block that ``--variant`` runs attached -- so refreshing
+    one tile's overlays does not drop the other methods from it, and tiles that were not
+    rebuilt are carried over untouched.
+    """
+    by_tile = {r["tile"]: r for r in old}
+    for rec in built:
+        prev = by_tile.get(rec["tile"], {})
+        merged = dict(rec)
+        if "variants" in prev:
+            merged.setdefault("variants", prev["variants"])
+        by_tile[rec["tile"]] = merged
+    return sorted(by_tile.values(), key=lambda r: r["tile"])
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -438,6 +456,10 @@ def main() -> int:
     p.add_argument("--chm-cell", type=float, default=0.5)
     p.add_argument("--dtm-cell", type=float, default=2.0)
     p.add_argument("--jobs", type=int, default=4)
+    p.add_argument("--refresh", action="store_true",
+                   help="rebuild the --tiles that are already in the manifest and merge them "
+                        "back into it (keeps the other tiles and the rebuilt tiles' variants); "
+                        "this is how a tile gains an overlay whose GeoTIFF arrived later")
     p.add_argument("--skip-existing", action="store_true",
                    help="keep tiles already present in data/tiles.json")
     p.add_argument("--no-index", action="store_true",
@@ -460,13 +482,16 @@ def main() -> int:
         print(f"no tiles found under {pc_dir}", file=sys.stderr)
         return 1
 
+    if a.skip_existing and a.refresh:
+        p.error("--skip-existing and --refresh contradict each other")
     old = {}
-    if a.skip_existing and manifest_path.exists():
+    if (a.skip_existing or a.refresh) and manifest_path.exists():
         old = {t["tile"]: t for t in json.loads(manifest_path.read_text())["tiles"]}
-        tiles = [t for t in tiles if t not in old]
+        if a.skip_existing:
+            tiles = [t for t in tiles if t not in old]
 
     args_dict = vars(a)
-    recs = list(old.values())
+    built = []
     if tiles:
         print(f"building {len(tiles)} tile(s) with {a.jobs} job(s)")
         with ProcessPoolExecutor(max_workers=max(1, a.jobs)) as ex:
@@ -474,12 +499,12 @@ def main() -> int:
             for fut in as_completed(futs):
                 t = futs[fut]
                 try:
-                    recs.append(fut.result())
+                    built.append(fut.result())
                     print(f"  ok   {t}", flush=True)
                 except Exception as exc:  # noqa: BLE001
                     print(f"  FAIL {t}: {exc!r}", flush=True)
 
-    recs.sort(key=lambda r: r["tile"])
+    recs = merge_records(list(old.values()), built)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps({"crs": CRS, "tiles": recs}, indent=1))
     print(f"wrote {manifest_path} ({len(recs)} tiles)")

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmark"))
 
 from build_potree_site import (  # noqa: E402
     _round_coords,
+    merge_records,
     build_chm,
     tile_bounds_from_name,
     write_chm_png,
@@ -257,3 +258,25 @@ def test_png_writer_takes_the_format_from_the_suffix(tmp_path):
     w, p = Image.open(tmp_path / "a.webp"), Image.open(tmp_path / "a.png")
     assert w.format == "WEBP" and p.format == "PNG" and w.mode == "RGBA" and w.size == (16, 16)
     assert np.asarray(w)[:, :8, 3].max() == 0 and np.asarray(w)[:, 8:, 3].min() > 250   # alpha survives
+
+
+def test_merge_records_replaces_a_rebuilt_tile_and_keeps_its_variants():
+    """A tile whose overlays are rebuilt later (its orthophoto arrived after the site was
+    built) must keep the variants other runs attached, and the tiles not rebuilt must stay."""
+    old = [{"tile": "a", "layers": {"chm": 1}, "variants": {"sat": {}, "ptf": {}}},
+           {"tile": "b", "layers": {"chm": 1}}]
+    built = [{"tile": "a", "layers": {"chm": 1, "dop2021": {}}},
+             {"tile": "c", "layers": {"chm": 1}}]
+    out = merge_records(old, built)
+    assert [r["tile"] for r in out] == ["a", "b", "c"]
+    assert out[0]["layers"] == {"chm": 1, "dop2021": {}}        # the rebuilt layers win
+    assert out[0]["variants"] == {"sat": {}, "ptf": {}}          # the variants survive
+    assert out[1] == {"tile": "b", "layers": {"chm": 1}}         # untouched tile carried over
+    assert "variants" not in out[2]
+
+
+def test_merge_records_lets_a_rebuild_replace_its_own_variants():
+    """When the rebuild itself produced variants they are authoritative, not merged with."""
+    out = merge_records([{"tile": "a", "variants": {"sat": {"old": True}}}],
+                        [{"tile": "a", "variants": {"sat": {"old": False}}}])
+    assert out == [{"tile": "a", "variants": {"sat": {"old": False}}}]
