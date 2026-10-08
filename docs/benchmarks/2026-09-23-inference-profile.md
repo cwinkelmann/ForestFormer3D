@@ -554,3 +554,27 @@ What the table says:
   mean tile). `region_batch` and `batched_decoder` attack the same gap from the other side,
   by making one process use more of the card per cylinder.
 
+### What the batching is worth on a whole tile
+
+The same tile, the same GPU, the same quiet host, with `region_batch` = 8 and
+`batched_decoder` = True (`BENCH_METHODS=ff3d benchmark/speed_benchmark.sh 4
+3dm_33_381_5828_1_be`, 2026-10-09):
+
+| | before (`b0570a1`) | after (`b782243`) | |
+|---|---:|---:|---|
+| whole km tile, 100 sub-tiles | 10,430 s (2 h 54) | **3,600 s (1 h 00)** | **2.90x** |
+| per 100 m sub-tile | 104.3 s | 36.0 s | |
+| per million source points | 414 s | **143 s** | |
+| mosaic's mean tile (17.6 M points) | 2.02 h | **0.70 h** | |
+| GPU utilisation, mean / max | 21.4 % / 87 % | **79.8 % / 100 %** | |
+| GPU memory, max | 4.2 GB | 16.2 GB | |
+
+Two things are worth noting. The gain on a whole tile (2.9x) is much larger than the 1.4x
+the single-cylinder profile above suggested, because the profile measured the prediction
+step of one sub-tile while a tile's run also carries the per-sub-tile Python, collate and
+post-processing that the batch now amortises -- utilisation went from a fifth of the card to
+four fifths, which is where the extra factor comes from. And at 143 s per million points
+ForestFormer3D is now **faster than SegmentAnyTree** (164 s/M) on the same host, reversing
+the ranking the production runs reported. The memory cost is 16.2 GB of 80, so two queues
+still fit on one card comfortably.
+

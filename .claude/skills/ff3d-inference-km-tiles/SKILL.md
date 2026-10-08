@@ -168,6 +168,10 @@ cylinder batching): FF3D 414 s and SAT 164 s per million source points, i.e. ~2.
 ~0.8 h for an average 17.6 M-point km tile, AMS3D 21-69 s per million on 48 cores. One
 process uses only 21-38 % of an H100 and under 4.2 GB, which is why several queues per card
 pay off (1.5 GPU-h per tile in production against 2.0 h for a single process).
+**With `region_batch=8` and `batched_decoder=True` (since 2026-10-09) use 143 s per million
+points instead: 0.70 h for a mean tile, 1 h 00 for a 25 M-point tile, 80 % GPU utilisation
+and 16.2 GB** -- so two queues per card still fit, but the card is no longer idle enough for
+oversubscription to buy much.
 
 ```bash
 tail -5 work_dirs/logs/berlin-gpu5-*.log        # poll every few minutes, NOT in a tight loop

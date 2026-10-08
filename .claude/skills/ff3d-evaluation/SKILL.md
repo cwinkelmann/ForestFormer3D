@@ -240,3 +240,10 @@ million points** (2.0 h and 0.8 h for the mosaic's mean 17.6 M-point tile) -- wh
 is not (69 vs 21 s/M; it follows the tree count, 38.3 k vs 16.2 k). GPU utilisation of one
 process: FF3D 21-38 % mean (max 87-90 %), SAT 24-28 % (max 43-47 %), memory under 4.2 GB.
 Quote s/M points, never s/sub-tile, when comparing tiles.
+
+**Re-timed 2026-10-09 with `region_batch=8` + `batched_decoder=True`** (same tile, same GPU,
+same quiet host, `BENCH_METHODS=ff3d`): 381_5828 went 10,430 s -> **3,600 s**, 104.3 ->
+36.0 s/sub-tile, **414 -> 143 s per million points** (0.70 h for a mean tile), GPU
+utilisation 21.4 % -> 79.8 % mean (max 100 %), memory 4.2 -> 16.2 GB. That is **2.90x** end
+to end, far more than the 1.4x the single-cylinder profile showed, because a whole tile also
+carries the per-sub-tile Python the batch amortises. FF3D is now faster per point than SAT.

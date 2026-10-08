@@ -47,8 +47,11 @@ unlabelled points along the grid lines dropped from **6.3 to 0.115 percentage po
 | ![seamed result, 380 m across](docs/benchmarks/assets/seamless/before-treeid-381_5829-E381700-N5829400.jpg) | ![stitched result, 380 m across](docs/benchmarks/assets/seamless/after-treeid-381_5829-E381700-N5829400.jpg) |
 | ![seam closeup, the grey strip runs down the 100 m line](docs/benchmarks/assets/seamless/before-seam-closeup-E381700.png) | ![same place after stitching: crowns carry one id across the line](docs/benchmarks/assets/seamless/after-seam-closeup-E381700.png) |
 
-Cost: about **1.5 GPU-hours per km tile** on an H100 (SegmentAnyTree 1.9, AMS3D 22 CPU-minutes
-on 48 cores). See [`docs/benchmarks/2026-09-24-seamless-ids.md`](docs/benchmarks/2026-09-24-seamless-ids.md).
+Cost: about **1.5 GPU-hours per km tile** on an H100 as the mosaics were run (SegmentAnyTree
+1.9, AMS3D 22 CPU-minutes on 48 cores). Measured cleanly afterwards -- one process, one card,
+quiet host -- ForestFormer3D is **143 s per million points** since the cylinder batching
+(2.90x faster than the code that produced the mosaics: 1 h 00 instead of 2 h 54 for a 25 M
+point tile), SegmentAnyTree 164 s. See [`docs/benchmarks/2026-09-24-seamless-ids.md`](docs/benchmarks/2026-09-24-seamless-ids.md).
 
 ### 2. The two deep models largely agree — and disagree in one characteristic way
 
