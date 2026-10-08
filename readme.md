@@ -117,7 +117,10 @@ Checked on tile 379_5826: 88.7 % of the points inside the 1,803 footprints there
 footprint points shown as semantic class 3, red) and "ForestFormer3D raw", so the effect of the
 mask can be inspected point by point. What neither rule catches: jetties and moored boats
 over water (no footprint, and the ground grid under water is interpolated from the shore, so
-they pass the height rule); a water-polygon mask would be the analogous fix.
+they pass the height rule). The analogous fix is now built in but not yet applied to the
+mosaics: `ff3d_geo run --mask-polygons` keeps points inside ALKIS buildings, water and
+structure polygons (jetties, canopies, carports) away from the model before inference, so
+nothing has to be repaired afterwards.
 
 ### What this does *not* establish
 

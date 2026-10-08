@@ -275,8 +275,14 @@ def plan_run(
     repo=REPO_ROOT,
     gpu=DEFAULT_GPU,
     timings: dict[str, float] | None = None,
+    mask_polygons=None,
+    mask_buffer: float = 1.0,
 ) -> list[Step]:
     """Build the ordered step list for ``run`` without executing or writing anything.
+
+    ``mask_polygons`` (GeoPackage specs ``path[:layer]``, see :mod:`ff3d_geo.premask`)
+    keeps every point inside a polygon, buffered by ``mask_buffer`` metres, away from the
+    model; ``results_to_las`` restores them as semantic 3 without an instance.
 
     ``las`` is one tile (path) or several (list of paths). Several tiles share ONE
     ``preprocess`` and ONE ``inference`` step: the scan list simply gets one line per
@@ -353,7 +359,12 @@ def plan_run(
         for src, input_ply, sidecar, tile_origin in zip(
             las_paths, input_plys, sidecars, origins
         ):
-            las_to_ply(src, input_ply, sidecar, origin=tile_origin, epsg=epsg)
+            info = las_to_ply(src, input_ply, sidecar, origin=tile_origin, epsg=epsg,
+                              mask_polygons=mask_polygons, mask_buffer=mask_buffer)
+            if info.get("premask"):
+                pm = info["premask"]
+                print(f"{src.name}: {pm['n_masked']} of {info['n_points']} points inside "
+                      f"{pm['n_polygons']} mask polygons kept away from the model")
 
     def prepare_inputs() -> None:
         # las_to_ply normally creates <out> first; mkdir here too so this step can
@@ -423,8 +434,11 @@ def plan_run(
         per_tile_s = None if inference_s is None else inference_s / len(stems)
 
         def one(stem: str, out_las: Path, gpkg: Path, report_json: Path,
-                report_md: Path) -> None:
-            rep = build_report(out_las, gpkg, runtime_s=per_tile_s)
+                report_md: Path, sidecar: Path) -> None:
+            premask = None
+            if sidecar.is_file():
+                premask = json.loads(sidecar.read_text()).get("premask")
+            rep = build_report(out_las, gpkg, runtime_s=per_tile_s, premask=premask)
             write_report(rep, report_json, report_md)
             if len(stems) == 1:
                 print(report_markdown(rep))
@@ -436,9 +450,9 @@ def plan_run(
 
         try:
             _run_per_tile("report", [
-                (stem, partial(one, stem, out_las, gpkg, report_json, report_md))
-                for stem, out_las, gpkg, report_json, report_md in zip(
-                    stems, out_lass, gpkgs, report_jsons, report_mds)
+                (stem, partial(one, stem, out_las, gpkg, report_json, report_md, sidecar))
+                for stem, out_las, gpkg, report_json, report_md, sidecar in zip(
+                    stems, out_lass, gpkgs, report_jsons, report_mds, sidecars)
             ])
         finally:
             # Last step of the run: release the stem claims taken in prepare_inputs.
@@ -473,7 +487,9 @@ def plan_run(
         Step(name="las_to_ply", func=convert,
              name_detail=tiles.join(
                  f"{src} -> {input_ply} (+ sidecar {sidecar})"
-                 for src, input_ply, sidecar in zip(las_paths, input_plys, sidecars))),
+                 for src, input_ply, sidecar in zip(las_paths, input_plys, sidecars))
+             + (f"; mask polygons (buffer {mask_buffer} m): " + ", ".join(str(m) for m in mask_polygons)
+                if mask_polygons else "")),
         Step(name="prepare_inputs", func=prepare_inputs,
              name_detail=f"write {scan_list}, {empty_list}; rm " + paths.join(
                  f"{instance_dir}/{s}_*.npy" for s in stems)),
@@ -551,6 +567,14 @@ def execute(steps: list[Step], dry_run: bool, timings: dict[str, float] | None =
         ) from failures[0][1]
 
 
+def _add_mask_args(parser) -> None:
+    parser.add_argument("--mask-polygons", nargs="+", default=None, metavar="GPKG[:LAYER]",
+                        help="polygons whose points are kept away from the model (ALKIS "
+                             "buildings, water, structures); restored as semantic 3 afterwards")
+    parser.add_argument("--mask-buffer", type=float, default=1.0, metavar="M",
+                        help="buffer around the mask polygons in metres (default: %(default)s)")
+
+
 def _add_origin_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--origin", nargs=2, type=float, metavar=("E", "N"), default=None,
                         help="tile lower-left corner; default: parsed from the file name")
@@ -579,12 +603,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="physical GPU for ff3d_docker "
                           "(default: $FF3D_GPU, else %(default)s)")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
+    _add_mask_args(run)
     _add_origin_args(run)
 
     conv = sub.add_parser("convert", help="LAS -> input PLY + georeferencing sidecar")
     conv.add_argument("--las", required=True, type=Path)
     conv.add_argument("--ply", required=True, type=Path)
     conv.add_argument("--sidecar", required=True, type=Path)
+    _add_mask_args(conv)
     _add_origin_args(conv)
 
     geo = sub.add_parser("georef", help="result PLY -> LAS 1.4 (recovery after inference)")
@@ -780,14 +806,17 @@ def main(argv: list[str] | None = None) -> int:
         steps = plan_run(
             args.las, args.checkpoint, args.out, origin=origin, epsg=args.epsg,
             config=args.config, repo=args.repo, gpu=args.gpu, timings=timings,
+            mask_polygons=args.mask_polygons, mask_buffer=args.mask_buffer,
         )
         execute(steps, dry_run=args.dry_run, timings=timings)
         return 0
 
     if args.command == "convert":
         origin = tuple(args.origin) if args.origin else None
-        sidecar = las_to_ply(args.las, args.ply, args.sidecar, origin=origin, epsg=args.epsg)
-        print(f"wrote {args.ply} and {args.sidecar} ({sidecar['n_points']} points)")
+        sidecar = las_to_ply(args.las, args.ply, args.sidecar, origin=origin, epsg=args.epsg,
+                             mask_polygons=args.mask_polygons, mask_buffer=args.mask_buffer)
+        masked = f", {sidecar['premask']['n_masked']} masked" if sidecar.get("premask") else ""
+        print(f"wrote {args.ply} and {args.sidecar} ({sidecar['n_points']} points{masked})")
         return 0
 
     if args.command == "georef":

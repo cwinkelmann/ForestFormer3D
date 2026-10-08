@@ -881,3 +881,26 @@ def test_a_finished_run_releases_its_claims(tmp_path, monkeypatch, capsys):
     execute(steps[5:], dry_run=False, timings=timings)
     capsys.readouterr()
     assert _claimed_stems(instance_dir) == []
+
+
+def test_plan_run_threads_the_mask_polygons_into_the_convert_step(fake_repo, tmp_path):
+    from ff3d_geo.cli import plan_run
+
+    steps = plan_run(tmp_path / "tile_E381300_N5828300.las", repo=fake_repo, out=fake_repo / "work_dirs" / "o",
+                     mask_polygons=["/m/alkis_buildings.gpkg", "/m/alkis.gpkg:water"], mask_buffer=0.5)
+    detail = steps[0].name_detail
+    assert steps[0].name == "las_to_ply"
+    assert "mask polygons (buffer 0.5 m)" in detail and "alkis.gpkg:water" in detail
+    plain = plan_run(tmp_path / "tile_E381300_N5828300.las", repo=fake_repo, out=fake_repo / "work_dirs" / "o")
+    assert "mask polygons" not in plain[0].name_detail
+
+
+def test_parser_accepts_mask_polygons_on_run_and_convert():
+    from ff3d_geo.cli import build_parser
+
+    a = build_parser().parse_args(["run", "--las", "t.las", "--mask-polygons", "a.gpkg", "b.gpkg:water", "--mask-buffer", "2"])
+    assert a.mask_polygons == ["a.gpkg", "b.gpkg:water"] and a.mask_buffer == 2.0
+    b = build_parser().parse_args(["run", "--las", "t.las"])
+    assert b.mask_polygons is None and b.mask_buffer == 1.0
+    c = build_parser().parse_args(["convert", "--las", "t.las", "--ply", "t.ply", "--sidecar", "t.json", "--mask-polygons", "w.gpkg"])
+    assert c.mask_polygons == ["w.gpkg"]

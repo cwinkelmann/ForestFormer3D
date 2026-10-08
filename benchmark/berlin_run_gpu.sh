@@ -47,7 +47,11 @@ for T in "$@"; do
     || { echo "!!! $T split failed"; continue; }
   echo "=== $(date +%FT%T) $T: run ($(wc -l < work_dirs/logs/split-$T.txt) sub-tiles) ==="
   S=$(date +%s)
-  python -m ff3d_geo run --las inputs/berlin/sub/$T/*.las --checkpoint $CK --out work_dirs/berlin-$T --gpu $GPU || echo "!!! $T run reported failures (see above)"
+  # FF3D_MASK_POLYGONS="a.gpkg b.gpkg:layer" keeps roof/water points away from the model
+  # (ff3d_geo.premask); FF3D_MASK_BUFFER is the polygon buffer in metres (default 1).
+  python -m ff3d_geo run --las inputs/berlin/sub/$T/*.las --checkpoint $CK --out work_dirs/berlin-$T --gpu $GPU \
+    ${FF3D_MASK_POLYGONS:+--mask-polygons $FF3D_MASK_POLYGONS --mask-buffer ${FF3D_MASK_BUFFER:-1}} \
+    || echo "!!! $T run reported failures (see above)"
   R=$(( $(date +%s) - S ))
   echo "$R" >> work_dirs/logs/runtime-$T.txt
   echo "=== $(date +%FT%T) $T: tile done (run ${R}s) ==="

@@ -27,7 +27,8 @@ def _stats(values: np.ndarray) -> dict | None:
 
 
 def build_report(las_path, gpkg_path, runtime_s: float | None = None,
-                 buildings: dict | None = None, height_filter: dict | None = None) -> dict:
+                 buildings: dict | None = None, height_filter: dict | None = None,
+                 premask: dict | None = None) -> dict:
     """Build the ``<stem>_report.json`` content from a result LAS and its GeoPackage.
 
     ``buildings`` is the dict returned by :func:`ff3d_geo.buildings.mask_buildings`
@@ -35,6 +36,10 @@ def build_report(las_path, gpkg_path, runtime_s: float | None = None,
     report's ``buildings`` block and the markdown's "Buildings" row. ``height_filter``
     is the dict :mod:`ff3d_geo.filter` returns when instances below a minimum height
     were dropped; it becomes the ``height_filter`` block and a "Height filter" row.
+    ``premask`` is the sidecar's ``premask`` block when points were kept away from the
+    model by ``--mask-polygons`` (:mod:`ff3d_geo.premask`); it becomes the ``premask``
+    block and a "Pre-inference mask" row, and the semantic-3 points it produced are not
+    reported as a post-hoc building mask.
     """
     from ff3d_geo.buildings import SEMANTIC_BUILDING
 
@@ -88,7 +93,13 @@ def build_report(las_path, gpkg_path, runtime_s: float | None = None,
         "per_class_counts": per_class,
         "runtime_s": runtime_s,
     }
-    if buildings is not None or n_building_points:
+    if premask is not None:
+        block = dict(premask)
+        block.pop("npz", None)
+        block["n_points"] = int(len(semantic))
+        block["fraction"] = float(block.get("n_masked", 0)) / max(len(semantic), 1)
+        report["premask"] = block
+    if buildings is not None or (n_building_points and premask is None):
         block = dict(buildings or {})
         block["points_masked"] = block.get("points_masked", n_building_points)
         block["building_points_in_las"] = n_building_points
@@ -161,6 +172,13 @@ def report_markdown(report: dict) -> str:
         lines.append(
             f"| Buildings (ALKIS footprints) | {removed_str} instances removed, "
             f"{buildings.get('points_masked', 0)} points masked (semantic 3){partial_str} |"
+        )
+    pm = report.get("premask")
+    if pm:
+        lines.append(
+            f"| Pre-inference mask | {pm.get('n_masked', 0)} points ({100 * pm.get('fraction', 0):.1f} %) "
+            f"inside {pm.get('n_polygons', 0)} polygons (buffer {pm.get('buffer_m', 0)} m) kept away from "
+            f"the model (semantic 3): {', '.join(Path(str(p)).name for p in pm.get('polygons', []))} |"
         )
     hf = report.get("height_filter")
     if hf:

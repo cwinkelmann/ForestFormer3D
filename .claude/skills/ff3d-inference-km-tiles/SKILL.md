@@ -23,6 +23,21 @@ nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv   # pick i
 ls work_dirs/clean_forestformer/epoch_3000_fix.pth
 ```
 
+## Pre-inference polygon mask (implemented 2026-10-08, not yet used for a mosaic)
+
+`FF3D_MASK_POLYGONS="<buildings.gpkg> <water.gpkg:water> <structures.gpkg:structures>"`
+(optional `FF3D_MASK_BUFFER`, default 1 m) makes `berlin_run_gpu.sh` pass `--mask-polygons`
+to `ff3d_geo run`: points inside the polygons never reach the model and come back as
+semantic 3 without an instance (`ff3d_geo/premask.py`). Fetch the water and structure
+polygons with `benchmark/fetch_berlin_buildings.py --service alkis --typename
+alkis:tatsaechlichenutzungflaechen --keep-fields all --where bezeich=AX_Fliessgewaesser,
+AX_StehendesGewaesser,AX_Hafenbecken,AX_Meer --layer-name water` and
+`--typename alkis:bauwerkeflaechen --where "bezbwf=Landebrücke,Überdachung,Carport,Brücke"
+--layer-name structures`. A mosaic produced this way needs no post-hoc `buildings` step
+(it stays harmless). The 44/57-tile mosaics predate it; a re-run of all tiles is a night on
+five GPUs with `region_batch` 8 and was deliberately postponed until the benchmarks and
+optimisations are done.
+
 ## 1. Copy the tiles in
 
 From the Mac (tiles live on the 2TB volume, see `ff3d-als-download`):

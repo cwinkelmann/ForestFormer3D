@@ -103,3 +103,21 @@ def test_fetch_tiles_writes_both_layers_and_skips_on_a_rerun(tmp_path):
     tiles = gpd.read_file(str(out), layer=bld.TILES_LAYER)
     assert set(tiles["tile"]) == {"381_5829", "382_5829", "383_5829"}
     assert len(gpd.read_file(str(out), layer=bld.BUILDINGS_LAYER)) == 4
+
+
+def test_feature_rows_keep_all_fields_and_apply_the_where_filter():
+    feats = [
+        {"id": "a", "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+         "properties": {"uuid": "u1", "bezeich": "AX_Fliessgewaesser", "bezfkt": "Fluß"}},
+        {"id": "b", "geometry": {"type": "Polygon", "coordinates": [[[2, 2], [3, 2], [3, 3], [2, 2]]]},
+         "properties": {"uuid": "u2", "bezeich": "AX_Wald", "bezfkt": ""}},
+    ]
+    rows, geoms = bld.feature_rows(feats, "379_5826", keep_fields="all",
+                                   where=bld.parse_where("bezeich=AX_Fliessgewaesser,AX_StehendesGewaesser"))
+    assert len(rows) == 1 and len(geoms) == 1
+    assert rows[0]["bezeich"] == "AX_Fliessgewaesser" and rows[0]["bezfkt"] == "Fluß" and rows[0]["tile"] == "379_5826"
+    rows, _ = bld.feature_rows(feats, None)          # default: the building fields only
+    assert set(rows[0]) == set(bld.KEEP_FIELDS) | {"tile"}
+    assert bld.parse_where(None) is None
+    with pytest.raises(ValueError):
+        bld.parse_where("nonsense")

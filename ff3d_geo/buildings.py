@@ -27,7 +27,7 @@ import numpy as np
 
 # The result LAS ``semantic`` extra dim is 0 ground / 1 wood / 2 leaf / 255 nodata
 # (see ff3d_geo.convert).  3 is free, and unlike 255 it is a real class, not nodata.
-SEMANTIC_BUILDING = 3
+SEMANTIC_BUILDING = 3   # == ff3d_geo.convert.SEMANTIC_MASKED (the pre-inference mask)
 BUILDINGS_LAYER = "buildings"
 # Points are tested against the footprint index in chunks: shapely.points() on a
 # whole 25 M point km tile would allocate ~2.5 GB of geometry objects at once.

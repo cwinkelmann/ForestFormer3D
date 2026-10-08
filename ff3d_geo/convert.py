@@ -24,6 +24,9 @@ _PLY_INPUT_DTYPE = [
 
 # Value written to the ``semantic`` extra dim for points the model left unlabelled (-1).
 SEMANTIC_UNLABELLED = 255
+# Points removed before inference by a polygon mask (ff3d_geo.premask) and points inside
+# ALKIS footprints after it (ff3d_geo.buildings.SEMANTIC_BUILDING) share this class.
+SEMANTIC_MASKED = 3
 
 # The three extra dimensions of a result LAS, with their descriptions. laspy compares
 # point formats dimension by dimension and a DimensionInfo carries its description, so
@@ -64,8 +67,15 @@ def las_to_ply(
     sidecar_path,
     origin: tuple[float, float] | None = None,
     epsg: int = 25833,
+    mask_polygons=None,
+    mask_buffer: float = 1.0,
 ) -> dict:
     """Write an unlabeled ForestFormer3D input PLY plus a georeferencing sidecar.
+
+    ``mask_polygons`` (GeoPackage specs, see :mod:`ff3d_geo.premask`) leaves every point
+    inside a polygon (buffered by ``mask_buffer`` metres) OUT of the PLY; the mask and the
+    masked points' coordinates go to ``<las stem>_premask.npz`` next to the sidecar, and the
+    sidecar's ``premask`` block says so, so that :func:`results_to_las` can put them back.
 
     The PLY keeps the LAS coordinates exactly as stored (local tile coordinates);
     the pipeline centers them itself and records the shift in ``<scan>_offsets.npy``.
@@ -85,11 +95,35 @@ def las_to_ply(
 
     las = laspy.read(str(las_path))
     n_points = int(las.header.point_count)
+    x = np.asarray(las.x, dtype=np.float64)
+    y = np.asarray(las.y, dtype=np.float64)
+    z = np.asarray(las.z, dtype=np.float64)
 
-    vertex = np.empty(n_points, dtype=_PLY_INPUT_DTYPE)
-    vertex["x"] = np.asarray(las.x, dtype=np.float64)
-    vertex["y"] = np.asarray(las.y, dtype=np.float64)
-    vertex["z"] = np.asarray(las.z, dtype=np.float64)
+    premask = None
+    keep = slice(None)
+    if mask_polygons:
+        from ff3d_geo.premask import load_mask_polygons, mask_points
+
+        bbox = (float(x.min()), float(y.min()), float(x.max()), float(y.max())) if n_points else None
+        geoms = load_mask_polygons(mask_polygons, bbox=bbox, buffer_m=mask_buffer)
+        masked = mask_points(x, y, geoms)
+        keep = ~masked
+        premask_npz = sidecar_path.parent / f"{las_path.stem}_premask.npz"
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(premask_npz, mask=masked, x=x[masked], y=y[masked], z=z[masked])
+        premask = {
+            "npz": str(premask_npz.resolve()),
+            "polygons": [str(spec) for spec in mask_polygons],
+            "n_polygons": int(len(geoms)),
+            "buffer_m": float(mask_buffer),
+            "n_masked": int(masked.sum()),
+        }
+
+    n_inference = int(x[keep].shape[0])
+    vertex = np.empty(n_inference, dtype=_PLY_INPUT_DTYPE)
+    vertex["x"] = x[keep]
+    vertex["y"] = y[keep]
+    vertex["z"] = z[keep]
 
     ply_path.parent.mkdir(parents=True, exist_ok=True)
     PlyData([PlyElement.describe(vertex, "vertex")], text=False, byte_order="<").write(
@@ -109,9 +143,12 @@ def las_to_ply(
         "source_point_format": int(las.header.point_format.id),
         "source_version": str(las.header.version),
         "n_points": n_points,
+        "n_points_inference": n_inference,
         "classification_npy": str(classification_npy.resolve()),
         "source_las": str(las_path.resolve()),
     }
+    if premask is not None:
+        sidecar["premask"] = premask
     sidecar_path.write_text(json.dumps(sidecar, indent=2))
     return sidecar
 
@@ -147,23 +184,51 @@ def results_to_las(result_ply, sidecar_path, offsets_npy, out_las) -> None:
 
     vertex = PlyData.read(str(result_ply))["vertex"].data
     n_points = len(vertex)
-    if n_points != sidecar["n_points"]:
+    premask = sidecar.get("premask")
+    n_total = int(sidecar["n_points"])
+    n_expected = n_total - (int(premask["n_masked"]) if premask else 0)
+    if n_points != n_expected:
         raise ValueError(
             f"{result_ply} has {n_points} points but sidecar {sidecar_path} "
-            f"records {sidecar['n_points']} points; point order would not match"
+            f"records {n_expected} points{' after the pre-inference mask' if premask else ''}; "
+            "point order would not match"
         )
 
     classification = np.load(sidecar["classification_npy"])
-    if len(classification) != n_points:
+    if len(classification) != n_total:
         raise ValueError(
             f"classification has {len(classification)} entries but "
-            f"{result_ply} has {n_points} points"
+            f"{sidecar_path} records {n_total} points"
         )
 
     origin_e, origin_n = sidecar["origin"]
     x = vertex["x"].astype(np.float64) + offsets[0] + origin_e
     y = vertex["y"].astype(np.float64) + offsets[1] + origin_n
     z = vertex["z"].astype(np.float64) + offsets[2]
+    tree_id = vertex["instance_pred"].astype(np.int32)
+    semantic_pred = vertex["semantic_pred"].astype(np.int64)
+    semantic = np.where(semantic_pred < 0, SEMANTIC_UNLABELLED, semantic_pred).astype(np.uint8)
+    score = vertex["score"].astype(np.float32)
+
+    if premask:
+        # Put the pre-masked points back where they were: the model never saw them, so
+        # they carry the masked class, no instance and no score.
+        pm = np.load(premask["npz"])
+        mask = np.asarray(pm["mask"], dtype=bool)
+        if mask.shape[0] != n_total or int(mask.sum()) != int(premask["n_masked"]):
+            raise ValueError(f"{premask['npz']} does not match the sidecar's point counts")
+        def _full(values, fill, dtype):
+            full = np.full(n_total, fill, dtype=dtype)
+            full[~mask] = values
+            return full
+        # the npz holds the source LAS values (local tile coordinates, like the PLY),
+        # so the masked points get the same origin shift as the inference points
+        x = _full(x, 0.0, np.float64); x[mask] = pm["x"] + origin_e
+        y = _full(y, 0.0, np.float64); y[mask] = pm["y"] + origin_n
+        z = _full(z, 0.0, np.float64); z[mask] = pm["z"]
+        tree_id = _full(tree_id, -1, np.int32)
+        semantic = _full(semantic, SEMANTIC_MASKED, np.uint8)
+        score = _full(score, -1.0, np.float32)
 
     header = result_point_header(
         int(sidecar["epsg"]),
@@ -176,12 +241,9 @@ def results_to_las(result_ply, sidecar_path, offsets_npy, out_las) -> None:
     las.y = y
     las.z = z
     las.classification = classification.astype(np.uint8)
-    las.treeID = vertex["instance_pred"].astype(np.int32)
-    semantic_pred = vertex["semantic_pred"].astype(np.int64)
-    las.semantic = np.where(
-        semantic_pred < 0, SEMANTIC_UNLABELLED, semantic_pred
-    ).astype(np.uint8)
-    las.score = vertex["score"].astype(np.float32)
+    las.treeID = tree_id
+    las.semantic = semantic
+    las.score = score
 
     out_las = Path(out_las)
     out_las.parent.mkdir(parents=True, exist_ok=True)

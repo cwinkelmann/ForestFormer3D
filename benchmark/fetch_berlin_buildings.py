@@ -20,6 +20,20 @@ Attributes kept (see DescribeFeatureType): ``uuid`` (ALKIS identifier), ``gfk`` 
 ``bezgfk`` (Gebäudefunktion, e.g. 1010 "Wohnhaus"), ``bat`` / ``bezbat`` (Bauart),
 ``baw`` / ``bezbaw`` (Bauweise), ``nam`` and ``shape_area``.
 
+The same script fetches the other ALKIS polygon sets the pre-inference mask uses
+(``ff3d_geo run --mask-polygons``), from the ``alkis`` service::
+
+    # water: rivers, lakes, harbour basins (land use polygons)
+    python benchmark/fetch_berlin_buildings.py --tiles tegel --service alkis \
+        --typename alkis:tatsaechlichenutzungflaechen --keep-fields all \
+        --where bezeich=AX_Fliessgewaesser,AX_StehendesGewaesser,AX_Hafenbecken,AX_Meer \
+        --layer-name water --out .../alkis_water.gpkg
+    # structures: jetties, canopies, carports, bridges
+    python benchmark/fetch_berlin_buildings.py --tiles tegel --service alkis \
+        --typename alkis:bauwerkeflaechen --keep-fields all \
+        --where "bezbwf=Landebrücke,Überdachung,Carport,Brücke" \
+        --layer-name structures --out .../alkis_structures.gpkg
+
 One GeoPackage per run holds everything: layer ``buildings`` (the footprints,
 deduplicated by ``uuid``, EPSG:25833) and layer ``tiles`` (one row per km tile
 already fetched, so a re-run skips it).  Delete the GeoPackage to force a refetch.
@@ -158,8 +172,24 @@ def fetch_bbox(bbox, root: str = WFS_ROOT, service: str = DEFAULT_SERVICE,
     return features
 
 
-def feature_rows(features: list[dict], tile: str | None) -> tuple[list[dict], list]:
-    """GeoJSON features -> (attribute rows, shapely geometries), dropping empties."""
+def parse_where(text: str | None) -> tuple[str, set[str]] | None:
+    """``FIELD=VAL1,VAL2`` -> (field, {values}); the client-side attribute filter."""
+    if not text:
+        return None
+    if "=" not in text:
+        raise ValueError(f"--where expects FIELD=VALUE[,VALUE...], got {text!r}")
+    field, values = text.split("=", 1)
+    return field.strip(), {v.strip() for v in values.split(",") if v.strip()}
+
+
+def feature_rows(features: list[dict], tile: str | None, keep_fields=None,
+                 where: tuple[str, set[str]] | None = None) -> tuple[list[dict], list]:
+    """GeoJSON features -> (attribute rows, shapely geometries), dropping empties.
+
+    ``keep_fields`` defaults to the building attributes (:data:`KEEP_FIELDS`); ``"all"``
+    keeps every property (other feature types such as land use or structures).
+    ``where`` keeps only features whose attribute is one of the given values.
+    """
     from shapely.geometry import shape
 
     rows, geoms = [], []
@@ -167,11 +197,14 @@ def feature_rows(features: list[dict], tile: str | None) -> tuple[list[dict], li
         geometry = feature.get("geometry")
         if not geometry:
             continue
+        props = feature.get("properties", {}) or {}
+        if where is not None and str(props.get(where[0])) not in where[1]:
+            continue
         geom = shape(geometry)
         if geom.is_empty:
             continue
-        props = feature.get("properties", {}) or {}
-        row = {field: props.get(field) for field in KEEP_FIELDS}
+        fields = list(props) if keep_fields == "all" else list(keep_fields or KEEP_FIELDS)
+        row = {field: props.get(field) for field in fields}
         if row.get("uuid") in (None, ""):
             row["uuid"] = str(feature.get("id", ""))
         row["tile"] = tile or ""
@@ -194,7 +227,8 @@ def _read_layer(gpkg: Path, layer: str):
 def fetch_tiles(tiles: list[str], out_gpkg: Path, root: str = WFS_ROOT,
                 service: str = DEFAULT_SERVICE, typename: str = DEFAULT_TYPENAME,
                 page_size: int = 5000, force: bool = False, bounds=None,
-                fetch=http_get, log=print) -> dict:
+                fetch=http_get, log=print, layer: str = BUILDINGS_LAYER,
+                keep_fields=None, where: tuple[str, set[str]] | None = None) -> dict:
     """Fetch every tile's footprints into one GeoPackage; skip tiles already in it.
 
     Returns ``{"fetched": {tile: n}, "skipped": [...], "n_buildings": int}``; the
@@ -212,7 +246,7 @@ def fetch_tiles(tiles: list[str], out_gpkg: Path, root: str = WFS_ROOT,
     out_gpkg = Path(out_gpkg)
     out_gpkg.parent.mkdir(parents=True, exist_ok=True)
 
-    existing = _read_layer(out_gpkg, BUILDINGS_LAYER)
+    existing = _read_layer(out_gpkg, layer)
     done = _read_layer(out_gpkg, TILES_LAYER)
     covered = set() if force or done is None else set(done["tile"].astype(str))
 
@@ -228,7 +262,7 @@ def fetch_tiles(tiles: list[str], out_gpkg: Path, root: str = WFS_ROOT,
         log(f"  {tile}: bbox {bbox[0]:.0f} {bbox[1]:.0f} {bbox[2]:.0f} {bbox[3]:.0f}")
         features = fetch_bbox(bbox, root=root, service=service, typename=typename,
                               page_size=page_size, fetch=fetch, log=log)
-        rows, geoms = feature_rows(features, tile)
+        rows, geoms = feature_rows(features, tile, keep_fields=keep_fields, where=where)
         log(f"  {tile}: {len(rows)} footprints")
         result["fetched"][tile] = len(rows)
         if rows:
@@ -253,7 +287,7 @@ def fetch_tiles(tiles: list[str], out_gpkg: Path, root: str = WFS_ROOT,
         merged = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=f"EPSG:{EPSG}")
         # A footprint straddling a tile border comes back for both tiles.
         merged = merged.drop_duplicates(subset="uuid", keep="first").reset_index(drop=True)
-        merged.to_file(str(out_gpkg), driver="GPKG", layer=BUILDINGS_LAYER)
+        merged.to_file(str(out_gpkg), driver="GPKG", layer=layer)
         result["n_buildings"] = len(merged)
 
     # The coverage layer carries the tile square as its geometry, so "which tiles
@@ -291,7 +325,15 @@ def main(argv=None) -> int:
                         help="features per GetFeature request (default: %(default)s)")
     parser.add_argument("--force", action="store_true",
                         help="refetch tiles already recorded in the GeoPackage")
+    parser.add_argument("--layer-name", default=BUILDINGS_LAYER,
+                        help="output layer in the GeoPackage (default: %(default)s)")
+    parser.add_argument("--keep-fields", nargs="+", default=None, metavar="FIELD",
+                        help="attributes to keep (default: the building fields; 'all' keeps every property)")
+    parser.add_argument("--where", default=None, metavar="FIELD=VAL[,VAL...]",
+                        help="keep only features whose attribute is one of the values, e.g. "
+                             "bezeich=AX_Fliessgewaesser,AX_StehendesGewaesser,AX_Hafenbecken")
     args = parser.parse_args(argv)
+    keep = "all" if args.keep_fields == ["all"] else args.keep_fields
 
     if args.bbox is not None:
         key = "bbox_%.0f_%.0f_%.0f_%.0f" % tuple(args.bbox)
@@ -302,7 +344,8 @@ def main(argv=None) -> int:
     print(f"{len(tiles)} tile(s) -> {args.out}")
     info = fetch_tiles(tiles, args.out, root=args.root, service=args.service,
                        typename=args.typename, page_size=args.page_size,
-                       force=args.force, bounds=bounds)
+                       force=args.force, bounds=bounds, layer=args.layer_name,
+                       keep_fields=keep, where=parse_where(args.where))
     total = sum(info["fetched"].values())
     print(f"fetched {total} footprints for {len(info['fetched'])} tile(s), "
           f"{len(info['skipped'])} skipped; {info['n_buildings']} unique in {args.out}")
