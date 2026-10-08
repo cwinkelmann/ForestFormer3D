@@ -96,7 +96,8 @@ def tile_effect(las_path, specs, buffer_m: float = 1.0, min_fraction: float = 0.
     for spec in specs:
         geoms = load_mask_polygons([spec], bbox=bbox, buffer_m=buffer_m)
         n_polygons[spec] = len(geoms)
-        masks[spec] = mask_points(x, y, geoms) if geoms else np.zeros(x.size, dtype=bool)
+        # load_mask_polygons returns a GeoSeries, whose truth value is ambiguous
+        masks[spec] = mask_points(x, y, geoms)      # itself returns all-False for no polygons
 
     rec = {"las": str(las_path), "n_points": int(x.size), "buffer_m": buffer_m,
            "min_fraction": min_fraction, "layers": {}}
