@@ -11,45 +11,18 @@ Usage example: python ./batch_load_ForAINetV2_data.py
 """
 import argparse
 import datetime
+import functools
 import os
+import sys
 from os import path as osp
-import importlib
 
-import torch
-import segmentator
-import open3d as o3d
 import numpy as np
 from load_forainetv2_data import export
-from plyutils import read_ply
-from scipy.spatial import Delaunay
 
 DONOTCARE_CLASS_IDS = np.array([])
 
 FORAINETV2_OBJ_CLASS_IDS = np.array(
     [1])
-
-def create_ply_with_superpoints(points, superpoints, filename):
-    # Combine points and superpoints into a single array
-    points_with_superpoints = np.hstack((points, superpoints[:, np.newaxis]))
-
-    # Define the ply header
-    header = f"""ply
-            format ascii 1.0
-            element vertex {points.shape[0]}
-            property float x
-            property float y
-            property float z
-            property float superpoint
-            end_header
-            """
-    # Open file and write header
-    with open(filename, 'w') as f:
-        f.write(header)
-        # Write points and superpoints
-        for point, sp in zip(points, superpoints):
-            f.write(f"{point[0]} {point[1]} {point[2]} {sp}\n")
-    
-    print(f"Point cloud saved to {filename}")
 
 def export_one_scan(scan_name,
                     output_filename_prefix,
@@ -63,7 +36,7 @@ def export_one_scan(scan_name,
             ply_file, None, test_mode)
 
     if not test_mode:
-        mask = np.logical_not(np.in1d(semantic_labels, DONOTCARE_CLASS_IDS))
+        mask = np.logical_not(np.isin(semantic_labels, DONOTCARE_CLASS_IDS))
         mesh_vertices = mesh_vertices[mask, :]
         semantic_labels = semantic_labels[mask]
         instance_labels = instance_labels[mask]
@@ -73,9 +46,9 @@ def export_one_scan(scan_name,
 
         OBJ_CLASS_IDS = FORAINETV2_OBJ_CLASS_IDS
 
-        bbox_mask = np.in1d(unaligned_bboxes[:, -1], OBJ_CLASS_IDS)
+        bbox_mask = np.isin(unaligned_bboxes[:, -1], OBJ_CLASS_IDS)
         unaligned_bboxes = unaligned_bboxes[bbox_mask, :]
-        bbox_mask = np.in1d(aligned_bboxes[:, -1], OBJ_CLASS_IDS)
+        bbox_mask = np.isin(aligned_bboxes[:, -1], OBJ_CLASS_IDS)
         aligned_bboxes = aligned_bboxes[bbox_mask, :]
         assert unaligned_bboxes.shape[0] == aligned_bboxes.shape[0]
         print(f'Num of care instances: {unaligned_bboxes.shape[0]}')
@@ -109,16 +82,20 @@ def batch_export(max_num_point,
                  scan_names_file,
                  forainetv2_dir,
                  export_func,
-                 test_mode=False
-                 ):
-    if test_mode and not os.path.exists(forainetv2_dir):
-        # test data preparation is optional
-        return
+                 test_mode=False):
+    """Export every scan in ``scan_names_file``. Returns the names that failed."""
+    if not osp.isfile(scan_names_file):
+        print(f'skipping: list file {scan_names_file} does not exist')
+        return []
+    if not osp.isdir(forainetv2_dir):
+        print(f'skipping: data directory {forainetv2_dir} does not exist')
+        return []
     if not os.path.exists(output_folder):
         print(f'Creating new data folder: {output_folder}')
         os.mkdir(output_folder)
 
-    scan_names = [line.rstrip() for line in open(scan_names_file)]
+    failed = []
+    scan_names = [line.rstrip() for line in open(scan_names_file) if line.strip()]
     for scan_name in scan_names:
         print('-' * 20 + 'begin')
         print(datetime.datetime.now())
@@ -131,18 +108,20 @@ def batch_export(max_num_point,
         try:
             export_one_scan(scan_name, output_filename_prefix, max_num_point,
                             forainetv2_dir, export_func, test_mode)
-        except Exception:
-            print(f'Failed export scan: {scan_name}')
+        except Exception as exc:
+            print(f'Failed export scan: {scan_name}: {exc!r}')
+            failed.append(scan_name)
         print('-' * 20 + 'done')
+    return failed
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--loader',
-        default='orig',
-        choices=['orig', 'fast'],
-        help='Version of data loader to use.')
+        '--unlabeled',
+        action='store_true',
+        help='write constant labels (semantic 0 = ground, instance -1) for '
+             'scans whose PLY has no semantic_seg/treeID fields')
     parser.add_argument(
         '--max_num_point',
         default=None,
@@ -171,36 +150,18 @@ def main():
         help='The path of the file that stores the test scan names.')
     args = parser.parse_args()
 
-    if args.loader == 'orig':
-        loader_module = importlib.import_module('load_forainetv2_data')
-    else:
-        loader_module = importlib.import_module('load_forainetv2_data_fast')
-    export_func = loader_module.export
+    export_func = functools.partial(export, unlabeled=args.unlabeled)
 
-    batch_export(
-        args.max_num_point,
-        args.output_folder,
-        args.train_scan_names_file,
-        args.train_forainetv2_dir,
-        export_func,
-        test_mode=False
-        )
-    batch_export(
-        args.max_num_point,
-        args.output_folder,
-        args.val_scan_names_file,
-        args.train_forainetv2_dir,
-        export_func,
-        test_mode=False
-        )
-    batch_export(
-        args.max_num_point,
-        args.output_folder,
-        args.test_scan_names_file,
-        args.test_forainetv2_dir,
-        export_func,
-        test_mode=False
-        )
+    failed = []
+    for names_file, data_dir in [
+            (args.train_scan_names_file, args.train_forainetv2_dir),
+            (args.val_scan_names_file, args.train_forainetv2_dir),
+            (args.test_scan_names_file, args.test_forainetv2_dir)]:
+        failed += batch_export(args.max_num_point, args.output_folder, names_file,
+                               data_dir, export_func, test_mode=False)
+    if failed:
+        print(f'{len(failed)} scan(s) failed: {failed}', file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

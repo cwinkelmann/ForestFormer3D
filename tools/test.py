@@ -9,6 +9,8 @@ from mmengine.runner import Runner
 
 from mmdet3d.utils import replace_ceph_backend
 
+from tools.runner_options import resolve_output_dir
+
 
 # TODO: support fuse_conv_bn and format_only
 def parse_args():
@@ -119,33 +121,14 @@ def main():
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
 
-    print('Applying spconv checkpoint fix in-memory...')
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    cfg.load_from = args.checkpoint
 
-    key_to_fix = 'state_dict'
-    if key_to_fix not in checkpoint:
-        raise KeyError(f"Could not find a state dictionary ('state_dict') in the checkpoint: {args.checkpoint}")
-
-    checkpoint_to_fix = checkpoint[key_to_fix]
-
-    for layer in list(checkpoint_to_fix.keys()):
-        if (layer.startswith('unet') or layer.startswith('input_conv')) \
-            and layer.endswith('weight') \
-            and len(checkpoint_to_fix[layer].shape) == 5:
-            checkpoint_to_fix[layer] = checkpoint_to_fix[layer].permute(1, 2, 3, 4, 0)
-    
-    import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_checkpoint_file:
-        torch.save(checkpoint, tmp_checkpoint_file.name)
-        cfg.load_from = tmp_checkpoint_file.name
-    print(f'Spconv checkpoint fix applied. Using temporary checkpoint: {cfg.load_from}')
-
-    # "Modify the output_path in the function 'predict'"
-    # Fix is toinject the work_dir into the model's test_cfg to avoid hardcoded paths for saving predictions.
+    # Checkpoints are converted once with tools/fix_spconv_checkpoint.py;
+    # nothing is permuted here. Result .ply files go to test_cfg.output_dir,
+    # which defaults to the work dir.
     if cfg.model.get('test_cfg') is None:
         cfg.model.test_cfg = ConfigDict()
-    cfg.model.test_cfg['output_dir'] = cfg.work_dir
-
+    cfg.model.test_cfg['output_dir'] = resolve_output_dir(cfg.model.test_cfg, cfg.work_dir)
 
     if args.show or args.show_dir:
         cfg = trigger_visualization_hook(cfg, args)
