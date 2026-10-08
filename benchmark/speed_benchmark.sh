@@ -15,13 +15,16 @@
 # record to work_dirs/logs/bench/speed-<TS>.json: method, tile, sub-tiles, seconds, seconds
 # per sub-tile, mean/max GPU utilisation, host load before and after.
 #
-# Environment: FF3D_ROOT, GEO_VENV, BENCH_WAIT (1 = wait for a quiet host, default), BENCH_WORKERS (48).
+# Environment: FF3D_ROOT, GEO_VENV, BENCH_WAIT (1 = wait for a quiet host, default),
+# BENCH_WORKERS (48), BENCH_METHODS ("ff3d sat ams3d"; a subset re-times one method, e.g.
+# BENCH_METHODS=ff3d after a ForestFormer3D optimisation, against the same tile's old row).
 set -uo pipefail
 GPU="${1:?usage: speed_benchmark.sh <gpu> <tile stem>...}"; shift
 [ "$#" -gt 0 ] || { echo "no tiles given" >&2; exit 2; }
 FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
 GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
 BENCH_WORKERS="${BENCH_WORKERS:-48}"
+BENCH_METHODS="${BENCH_METHODS:-ff3d sat ams3d}"
 cd "$FF3D_ROOT" || exit 1
 source "$GEO_VENV/bin/activate"
 CK=work_dirs/clean_forestformer/epoch_3000_fix.pth
@@ -29,6 +32,10 @@ TS=$(date +%Y%m%d-%H%M%S)
 LOG=work_dirs/logs/bench; mkdir -p "$LOG"
 REC="$LOG/speed-$TS.json"; echo "[]" > "$REC"
 log() { echo "=== $(date +%FT%T) $*"; }
+want() { case " $BENCH_METHODS " in *" $1 "*) return 0 ;; esac; return 1; }
+for m in $BENCH_METHODS; do
+  case $m in ff3d|sat|ams3d) ;; *) echo "unknown method in BENCH_METHODS: $m" >&2; exit 2 ;; esac
+done
 
 quiet() {   # none of our production queues/chains alive
   for p in berlin_run_gpu sat_run_gpu ams3d_run_cpu berlin_extend_mosaic potree_rebuild_mosaic add_ptf berlin_stitch ams3d_stitch; do
@@ -39,7 +46,7 @@ quiet() {   # none of our production queues/chains alive
 if [ "${BENCH_WAIT:-1}" = "1" ]; then
   until quiet; do log "host busy with our own queues, waiting"; sleep 600; done
 fi
-log "benchmark on GPU $GPU, tiles: $*; host load $(cut -d' ' -f1-3 /proc/loadavg)"
+log "benchmark on GPU $GPU, methods: $BENCH_METHODS, tiles: $*; host load $(cut -d' ' -f1-3 /proc/loadavg)"
 
 sample_gpu() {   # background sampler -> file with one utilisation value per 10 s
   while true; do nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits -i "$GPU" >> "$1"; sleep 10; done
@@ -69,13 +76,16 @@ for T in "$@"; do
   [ "$N" -gt 0 ] || { echo "!!! $T: no haloed split under inputs/berlin/sub/$T"; continue; }
 
   # --- ForestFormer3D: one process, this GPU
+  if want ff3d; then
   log "$T ff3d ($N sub-tiles)"; S=$LOG/gpu-$TS-ff3d-$T.csv; sample_gpu "$S" & SP=$!
   t0=$(date +%s)
   python -m ff3d_geo run --las inputs/berlin/sub/$T/*.las --checkpoint $CK --out work_dirs/bench-$T-ff3d --gpu "$GPU" \
     > "$LOG/ff3d-$T-$TS.log" 2>&1 || echo "!!! $T ff3d reported failures"
   kill $SP 2>/dev/null; record ff3d "$T" "$N" $(( $(date +%s) - t0 )) "$S"
+  fi
 
   # --- SegmentAnyTree: one container, this GPU (SAT_STITCH=1 keeps the per-sub-tile contract LAS)
+  if want sat; then
   log "$T sat"; S=$LOG/gpu-$TS-sat-$T.csv; sample_gpu "$S" & SP=$!
   t0=$(date +%s)
   SAT_STITCH=1 SAT_OUT_PREFIX=work_dirs/bench-sat- bash benchmark/sat_run_gpu.sh "$GPU" "$T" > "$LOG/sat-$T-$TS.log" 2>&1 || echo "!!! $T sat failed"
@@ -83,13 +93,16 @@ for T in "$@"; do
   R=$(grep -h "tile done (run" "$LOG/sat-$T-$TS.log" | sed "s/.*run //;s/s).*//" | tail -1)
   record sat "$T" "$N" "${R:-$(( $(date +%s) - t0 ))}" "$S"
   mv "work_dirs/bench-sat-$T" "work_dirs/bench-$T-sat" 2>/dev/null
+  fi
 
   # --- AMS3D: CPU only, 48 workers, GPU idle
+  if want ams3d; then
   log "$T ams3d"; t0=$(date +%s)
   AMS3D_WORKERS=$BENCH_WORKERS AMS3D_OUT_PREFIX=work_dirs/bench-ams3d- bash benchmark/ams3d_run_cpu.sh "$T" > "$LOG/ams3d-$T-$TS.log" 2>&1 || echo "!!! $T ams3d failed"
   R=$(grep -h "tile done (run" "$LOG/ams3d-$T-$TS.log" | sed "s/.*run //;s/s,.*//" | tail -1)
   record ams3d "$T" "$N" "${R:-$(( $(date +%s) - t0 ))}" /dev/null
   mv "work_dirs/bench-ams3d-$T" "work_dirs/bench-$T-ams3d" 2>/dev/null
+  fi
 done
 log "benchmark done -> $REC"
 python3 - "$REC" <<'EOF'
