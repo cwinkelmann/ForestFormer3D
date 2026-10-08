@@ -41,6 +41,9 @@ def _write_result(input_ply, offsets_npy, result_ply, semantic, instance, score)
     PlyData([PlyElement.describe(v, "vertex")], text=False, byte_order="<").write(str(result_ply))
 
 
+ORIGIN = np.array([381300.0, 5828300.0])      # the E<int>_N<int> token of the test LAS names
+
+
 def _polygon_around(path, x, y, half=0.2, layer="water"):
     gpd = pytest.importorskip("geopandas")
     from shapely.geometry import box
@@ -53,7 +56,9 @@ def _polygon_around(path, x, y, half=0.2, layer="water"):
 def test_premask_round_trip_restores_every_point_in_order(tmp_path):
     pytest.importorskip("geopandas")
     las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
-    spec = _polygon_around(tmp_path / "mask.gpkg", XYZ[1, 0], XYZ[1, 1])      # point 1 is inside
+    # the polygon sits at the point's GEOREFERENCED position: the LAS holds local
+    # coordinates and the origin comes from its name, so masking in local space finds nothing
+    spec = _polygon_around(tmp_path / "mask.gpkg", XYZ[1, 0] + ORIGIN[0], XYZ[1, 1] + ORIGIN[1])
     ply_path = tmp_path / "tile.ply"; sidecar_path = tmp_path / "tile.sidecar.json"
 
     info = las_to_ply(las_path, ply_path, sidecar_path, mask_polygons=[spec], mask_buffer=0.0)
@@ -82,7 +87,7 @@ def test_premask_round_trip_restores_every_point_in_order(tmp_path):
 def test_results_to_las_rejects_a_result_that_ignores_the_mask(tmp_path):
     pytest.importorskip("geopandas")
     las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
-    spec = _polygon_around(tmp_path / "mask.gpkg", XYZ[1, 0], XYZ[1, 1])
+    spec = _polygon_around(tmp_path / "mask.gpkg", XYZ[1, 0] + ORIGIN[0], XYZ[1, 1] + ORIGIN[1])
     ply_path = tmp_path / "tile.ply"; sidecar_path = tmp_path / "tile.sidecar.json"
     las_to_ply(las_path, ply_path, sidecar_path, mask_polygons=[spec], mask_buffer=0.0)
     # a result with all three points (as if the mask had not been applied) must not be georeferenced
@@ -96,7 +101,7 @@ def test_results_to_las_rejects_a_result_that_ignores_the_mask(tmp_path):
 def test_no_polygon_hits_leaves_the_ply_complete_and_records_zero(tmp_path):
     pytest.importorskip("geopandas")
     las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
-    spec = _polygon_around(tmp_path / "mask.gpkg", 999.0, 999.0)
+    spec = _polygon_around(tmp_path / "mask.gpkg", 999.0, 999.0)        # nowhere near the tile
     info = las_to_ply(las_path, tmp_path / "t.ply", tmp_path / "t.sidecar.json", mask_polygons=[spec])
     assert info["premask"]["n_masked"] == 0 and info["n_points_inference"] == 3
     assert json.loads((tmp_path / "t.sidecar.json").read_text())["premask"]["buffer_m"] == 1.0
@@ -116,3 +121,16 @@ def test_report_carries_the_premask_block(tmp_path):
     assert "buildings" not in rep                     # no post-hoc building block invented from semantic 3
     md = report_markdown(rep)
     assert "Pre-inference mask" in md and "alkis_water.gpkg" in md
+
+
+def test_a_polygon_at_the_local_coordinates_masks_nothing(tmp_path):
+    """The regression this file was written for: a polygon placed at the LAS's local
+    coordinates (not at origin + local) must find no points. The first run of the 57-tile
+    mask reported `n_polygons: 0, n_masked: 0` on the most built-up tile of the mosaic
+    because the bbox query and the point test used the sub-tile's local metres."""
+    pytest.importorskip("geopandas")
+    las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
+    spec = _polygon_around(tmp_path / "local.gpkg", XYZ[1, 0], XYZ[1, 1])
+    info = las_to_ply(las_path, tmp_path / "t.ply", tmp_path / "t.sidecar.json",
+                      mask_polygons=[spec], mask_buffer=0.0)
+    assert info["premask"]["n_polygons"] == 0 and info["premask"]["n_masked"] == 0

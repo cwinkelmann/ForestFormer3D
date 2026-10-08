@@ -104,9 +104,14 @@ def las_to_ply(
     if mask_polygons:
         from ff3d_geo.premask import load_mask_polygons, mask_points
 
-        bbox = (float(x.min()), float(y.min()), float(x.max()), float(y.max())) if n_points else None
+        # The LAS holds LOCAL tile coordinates (the origin is in its name, see parse_origin)
+        # while the polygons are in the CRS of the data, so both the bbox query and the
+        # point-in-polygon test must run on origin + local, not on the local values.
+        gx = x + origin[0]
+        gy = y + origin[1]
+        bbox = (float(gx.min()), float(gy.min()), float(gx.max()), float(gy.max())) if n_points else None
         geoms = load_mask_polygons(mask_polygons, bbox=bbox, buffer_m=mask_buffer)
-        masked = mask_points(x, y, geoms)
+        masked = mask_points(gx, gy, geoms)
         keep = ~masked
         premask_npz = sidecar_path.parent / f"{las_path.stem}_premask.npz"
         sidecar_path.parent.mkdir(parents=True, exist_ok=True)
