@@ -231,3 +231,12 @@ and AMS3D (48 workers) strictly in sequence on one GPU, sampling `nvidia-smi` ev
 sub-tile, GPU utilisation mean/max, memory). Production results are never touched
 (`SAT_OUT_PREFIX`, `AMS3D_OUT_PREFIX`). The methods chapter quotes the clean figures; the
 production ones are "throughput as run".
+
+**Measured 2026-10-08** (GPU 4, idle host, commit `b0570a1`, i.e. before `region_batch` and
+`batched_decoder`), tiles 381_5828 (25.2 M points) and 379_5829 (15.1 M): FF3D 104.3 and
+72.7 s per sub-tile, SAT 41.2 and 28.9 s, AMS3D 17.3 and 3.7 s. Normalise by the tile's
+points and the deep methods are linear to the third digit -- **FF3D 414 s, SAT 164 s per
+million points** (2.0 h and 0.8 h for the mosaic's mean 17.6 M-point tile) -- while AMS3D
+is not (69 vs 21 s/M; it follows the tree count, 38.3 k vs 16.2 k). GPU utilisation of one
+process: FF3D 21-38 % mean (max 87-90 %), SAT 24-28 % (max 43-47 %), memory under 4.2 GB.
+Quote s/M points, never s/sub-tile, when comparing tiles.

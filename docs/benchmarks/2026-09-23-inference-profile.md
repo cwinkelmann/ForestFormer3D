@@ -513,3 +513,44 @@ Per-scene outputs agree with the per-scene decoder to 2e-3 (test), the training 
 untouched. A/B of the whole `tools/test.py` run on the same host, two repeats each:
 `batched_decoder=False` 67 s / 73 s, `True` 55 s / 60 s. Random-start fps makes every run
 of either path a different sample, so results compare only within the noise floor.
+
+## Clean per-method speed benchmark (2026-10-08)
+
+Every runtime figure quoted before this section comes from production runs that shared the
+host: five to seven inference queues across the eight H100s, two SegmentAnyTree containers
+per GPU, AMS3D pools next to them. `benchmark/speed_benchmark.sh <gpu> <tiles>...` measures
+the other thing -- what one process alone does with one card on a quiet host. It waits until
+none of our queues or chains is running, then runs the three methods strictly in sequence
+per tile, sampling `nvidia-smi` every 10 s, and never touches the production products.
+
+Two Berlin tiles, GPU 4 of an otherwise idle carrot, the code as of `b0570a1` (that is
+**before** `region_batch` and `batched_decoder`, so this is the baseline those options are
+measured against):
+
+| method | tile | M points | sub-tiles | total | s / sub-tile | s / M points | GPU util mean / max | GPU mem max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| ForestFormer3D | 381_5828 | 25.2 | 100 | 2 h 54 | 104.3 | 414 | 21 % / 87 % | 4.2 GB |
+| SegmentAnyTree | 381_5828 | 25.2 | 100 | 1 h 09 | 41.2 | 164 | 24 % / 43 % | 3.6 GB |
+| AMS3D (48 cores) | 381_5828 | 25.2 | 100 | 29 min | 17.3 | 69 | -- | -- |
+| ForestFormer3D | 379_5829 | 15.1 | 86 | 1 h 44 | 72.7 | 414 | 38 % / 90 % | 4.1 GB |
+| SegmentAnyTree | 379_5829 | 15.1 | 86 | 41 min | 28.9 | 165 | 28 % / 47 % | 2.7 GB |
+| AMS3D (48 cores) | 379_5829 | 15.1 | 86 | 5 min | 3.7 | 21 | -- | -- |
+
+What the table says:
+
+* **Both deep methods are linear in the source point count**, and that is the figure to
+  quote: 414 s per million points for ForestFormer3D, 164 for SegmentAnyTree -- the two
+  tiles differ by 1.4x in points and agree to the third digit. Per 100 m sub-tile the cost
+  therefore depends on the tile, which is why "seconds per sub-tile" alone cannot be
+  compared across tiles. On the mosaic's mean tile (17.6 M points) one process needs
+  **2.0 h for ForestFormer3D and 0.8 h for SegmentAnyTree**.
+* **AMS3D is not point-linear** (69 against 21 s per million points): its cost follows the
+  vegetation it has to cluster, and 381_5828 holds 38.3 k trees against 16.2 k on 379_5829.
+* **One process leaves the card idle**: 21-38 % mean utilisation and under 4.2 GB of 80 GB
+  for ForestFormer3D, 24-28 % for SegmentAnyTree. This is the measurement behind the
+  observation that production VRAM never exceeded 5 GB, and the reason the production runs
+  put several queues on one card: oversubscribing converts that idle time into throughput
+  (the 33-tile run came out at 1.5 GPU-h per tile against the 2.0 h one process needs for a
+  mean tile). `region_batch` and `batched_decoder` attack the same gap from the other side,
+  by making one process use more of the card per cylinder.
+

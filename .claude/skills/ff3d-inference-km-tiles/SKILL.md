@@ -162,7 +162,12 @@ the seam two-sided at ~1 GPU-h per tile.
 the repo root) turns the queue logs of all three methods into one per-tile table -- start,
 GPU, sub-tiles, run time, seconds per sub-tile, running/abandoned/done -- plus a per-method
 summary; the 44-tile mosaic measured FF3D 61 s, SAT 73 s and AMS3D 11 s per 100 m sub-tile
-(medians; FF3D and SAT on shared H100s).
+(medians; FF3D and SAT on shared H100s). For planning use the clean per-point figures
+instead (`benchmark/speed_benchmark.sh`, 2026-10-08, one process on an idle H100 before the
+cylinder batching): FF3D 414 s and SAT 164 s per million source points, i.e. ~2.0 h and
+~0.8 h for an average 17.6 M-point km tile, AMS3D 21-69 s per million on 48 cores. One
+process uses only 21-38 % of an H100 and under 4.2 GB, which is why several queues per card
+pay off (1.5 GPU-h per tile in production against 2.0 h for a single process).
 
 ```bash
 tail -5 work_dirs/logs/berlin-gpu5-*.log        # poll every few minutes, NOT in a tight loop
