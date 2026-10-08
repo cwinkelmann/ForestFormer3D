@@ -3,13 +3,13 @@
 This is a fork of the official [ForestFormer3D](https://bxiang233.github.io/FF3D/) (ICCV 2025
 oral) implementation. The upstream code trains and evaluates on dense forest-plot scans; this
 fork adds the tooling to run it **unchanged, without retraining, on real georeferenced
-airborne laser scanning (ALS) tiles** and ran it over 44 km² of Berlin's open 2021 ALS
+airborne laser scanning (ALS) tiles** and ran it over 57 km² of Berlin's open 2021 ALS
 covering the Tegel and Spandau forests.
 
 > The original project README — paper, citation, dataset, and the upstream setup, training and
 > testing instructions — is kept in full at the [bottom of this file](#original-project-readme).
 
-**Result: one seamless mosaic of 1,107,126 tree instances** over ~580 million points, each with
+**Result: one seamless mosaic of 1,427,107 tree instances** over 1.00 billion points, each with
 a position, top height, crown polygon, point count and confidence score, delivered as LAS point
 clouds, GeoPackage tree tables, GeoTIFF rasters, a QGIS project and a web viewer. Two other
 methods were run on exactly the same points through exactly the same tiling and merging:
@@ -22,7 +22,7 @@ model) and AMS3D (a classical adaptive mean-shift baseline); a fourth, PointTree
 [`docs/inference-pipeline.md`](docs/inference-pipeline.md) · runbook:
 [`docs/benchmarks/RUNBOOK-tegel.md`](docs/benchmarks/RUNBOOK-tegel.md)
 
-![The study area: 44 km tiles over the Tegel and Spandau forests](docs/benchmarks/assets/analytics/analytics_study_area.png)
+![The study area: 57 km tiles over the Tegel and Spandau forests](docs/benchmarks/assets/analytics/analytics_study_area.png)
 
 *The study area in EPSG:25833. Green: forest stands of the Berlin Forstbetriebskarte 2014; grey:
 ALKIS building footprints; squares: the 1 km ALS tiles; thick outlines: the WINMOL 2025 survey
@@ -52,11 +52,11 @@ on 48 cores). See [`docs/benchmarks/2026-09-24-seamless-ids.md`](docs/benchmarks
 
 ### 2. The two deep models largely agree — and disagree in one characteristic way
 
-Compared on **778,681,715 identical points**: 637,325 tree pairs overlap at IoU ≥ 0.5 (57.0 % of
-ForestFormer3D's trees, 52.2 % of SegmentAnyTree's), and those matches are tight (median IoU
-**0.742**). Where the two differ, SegmentAnyTree has usually **cut one crown into several**:
-28.8 % of ForestFormer3D trees are covered by two or more SegmentAnyTree instances, against
-10.5 % the other way round.
+Compared on **1,003,586,865 identical points**: 819,179 tree pairs overlap at IoU ≥ 0.5 (56.9 % of
+ForestFormer3D's trees, 52.3 % of SegmentAnyTree's), and those matches are tight (median IoU
+**0.744**). Where the two differ, SegmentAnyTree has usually **cut one crown into several**:
+28.7 % of ForestFormer3D trees are covered by two or more SegmentAnyTree instances, against
+10.4 % the other way round.
 
 ![Instance agreement per km tile between ForestFormer3D and SegmentAnyTree](docs/benchmarks/assets/analytics/analytics_agreement.png)
 
@@ -64,7 +64,7 @@ ForestFormer3D's trees, 52.2 % of SegmentAnyTree's), and those matches are tight
 median IoU of those pairs (black line); below, the fraction of each method's trees that the
 other method has split into two or more instances.*
 
-SegmentAnyTree reports **1.095x** as many trees overall, but the surplus is not noise — it is a
+SegmentAnyTree reports **1.090x** as many trees overall, but the surplus is not noise — it is a
 block: ratio **1.20** in the Spandau forest (R13) against **0.97** in Tegel (R12). That the two
 forests behave differently is itself a finding; their stand structure differs.
 
@@ -74,9 +74,9 @@ forests behave differently is itself a finding; their stand structure differs.
 
 | method | km tiles | trees | trees / km² | points / tree (median) | height p10 / p50 / p90 (m) | crown area p50 (m²) |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ForestFormer3D | 44 | 1,107,126 | 25,162 | 285 | 4.9 / 18.6 / 28.8 | 26.2 |
-| SegmentAnyTree | 44 | 1,211,894 | 27,543 | 212 | 6.9 / 19.8 / 28.8 | 19.4 |
-| AMS3D (mean shift) | 44 | 655,726 | 14,903 | 302 | 10.8 / 21.6 / 29.9 | 36.6 |
+| ForestFormer3D | 57 | 1,427,107 | 25,037 | 285 | 4.8 / 18.4 / 28.6 | 26.1 |
+| SegmentAnyTree | 57 | 1,555,522 | 27,290 | 212 | 6.8 / 19.7 / 28.6 | 19.4 |
+| AMS3D (mean shift) | 57 | 836,106 | 14,669 | 305 | 10.7 / 21.5 / 29.8 | 36.6 |
 
 ![Per-tree height, crown area and point-count distributions for all three methods](docs/benchmarks/assets/analytics/analytics_distributions_3way.png)
 
@@ -88,18 +88,18 @@ second mode at 4-7 m (understory, hedges, young garden trees). The classical mea
 has **no short mode at all**: its heights start around 10 m, it reports the fewest and largest
 instances, because a height-dependent bandwidth merges the understory into the canopy tree above
 it. Separating that layer is what the learned models add. SegmentAnyTree's smaller crowns (p50
-19.4 vs 26.2 m²) are the signature of the splitting seen above.
+19.4 vs 26.1 m²) are the signature of the splitting seen above.
 
 ### 4. Where an external reference exists, the predictions hold up
 
-* **Street and park trees.** Of 21,023 Berlin tree-cadastre trees inside the mosaic, **82 %**
+* **Street and park trees.** Of 21,029 Berlin tree-cadastre trees inside the mosaic, **82 %**
   have a ForestFormer3D tree top within 3 m (86 % for SegmentAnyTree), with no height bias
   (0.15 m) and a mean absolute height difference of 4.2 m — the order of the cadastre's own
   whole-metre inspection estimates.
 * **Forest inventory.** Per stand, the 90th percentile of predicted heights tracks the 2014
-  Forstbetriebskarte's canopy height by species (r = 0.62 over 554 stands), sitting 4.3 m above
+  Forstbetriebskarte's canopy height by species (r = 0.62 over 557 stands), sitting 4.3 m above
   it — roughly seven growing seasons, which is exactly the gap between the two datasets.
-  Predicted densities are 280-400 trees/ha under a pine-dominated canopy.
+  Predicted densities are 340-405 trees/ha under a pine-dominated canopy.
 
 ![Predicted crowns over the 2021 leaf-off orthophoto](docs/benchmarks/assets/berlin-dop/berlin-dop-381-5829-zoom.png)
 
@@ -107,11 +107,12 @@ it. Separating that layer is what the learned models add. SegmentAnyTree's small
 
 The Berlin ALS has **no building class** (class 6 is absent; roof points sit in the vegetation
 bins 3/4/5), so the model happily segments roofs and roof vegetation as trees. Masking the
-official ALKIS footprints removes **3.5 %** of instances mosaic-wide, up to 40 % on the densest
+official ALKIS footprints removes **3.9 %** of instances mosaic-wide, up to 41 % on the densest
 tile. The second artefact is flat, wide blobs — bare ground labelled as vegetation — which a
-minimum-height rule removes (the stitch's 2.0 m rule dropped 15,841 instances). Both are
+minimum-height rule removes (the stitch's 2.0 m rule dropped 21,447 instances on this mosaic,
+and no flat blob survives it). Both are
 built into the pipeline (`ff3d_geo buildings`, the stitch height rule / `ff3d_geo filter`).
-Checked on tile 379_5826: 88.7 % of the points inside the 1,803 footprints there are class 5
+Checked on tile 379_5826: 88.7 % of the points inside the 1,810 footprints there are class 5
 ("high vegetation"), and the raw model marks 57.6 % of them as tree instances; the mask drops
 2,036 of 15,269 instances on that tile. The viewer carries both states, "ForestFormer3D" (masked,
 footprint points shown as semantic class 3, red) and "ForestFormer3D raw", so the effect of the

@@ -32,15 +32,18 @@ import numpy as np
 
 EPSG = 25833
 # key -> (label, result dir under --als-data, agreement dir under --als-data/berlin_agreement)
-# v3 = the 44-tile mosaics of 2026-10-06 (2 m height filter); the 33-tile sets stay as
-# berlin_als_2021_ff3d_v2 / berlin_als_2021_sat / berlin_als_2021_ams3d.
+# v4 = the 57-tile mosaics of 2026-10-08 (2 m height filter); v3 is the 44-tile set of
+# 2026-10-06 and the 33-tile sets stay as berlin_als_2021_ff3d_v2 / _sat / _ams3d.
 METHODS = {
-    "ff3d": ("ForestFormer3D", "berlin_als_2021_ff3d_v3"),
-    "sat": ("SegmentAnyTree", "berlin_als_2021_sat_v3"),
-    "ams3d": ("AMS3D", "berlin_als_2021_ams3d_v3"),
+    "ff3d": ("ForestFormer3D", "berlin_als_2021_ff3d_v4"),
+    "sat": ("SegmentAnyTree", "berlin_als_2021_sat_v4"),
+    "ams3d": ("AMS3D", "berlin_als_2021_ams3d_v4"),
     "ptf": ("PointTreeFormer", "berlin_als_2021_ptf"),      # S. Reder's results, 15 Tegel tiles (benchmark/ptf_to_ff3d.py)
 }
-AGREEMENT_TAG = "44"      # berlin_agreement/<a>_vs_<b>_<tag>/ from the carrot driver
+AGREEMENT_TAG = "57"      # berlin_agreement/<a>_vs_<b>_<tag>/ from the carrot driver
+# A pair the current driver did not recompute keeps an older tag: PointTreeFormer ran on the
+# 15 Tegel tiles only, and those tiles' per-point labels are the same in both mosaics.
+AGREEMENT_TAG_FALLBACK = {"ff3d_vs_ptf": "44"}
 COLOURS = {"ff3d": "#1f5fbf", "sat": "#b4267a", "ams3d": "#e08a1e", "ptf": "#2e8b57"}
 FLAT_H, FLAT_AREA = 2.0, 50.0        # a "tree" under 2 m tall over 50 m2 of crown is ground labelled leaf
 SMALL_POINTS = 20                    # instances with fewer points than this are noise-sized
@@ -148,6 +151,24 @@ def load_json_per_tile(root: Path, suffix: str) -> dict[str, dict]:
 
 def load_agreement(dirpath: Path) -> list[dict]:
     return [json.loads(f.read_text()) for f in real(sorted(dirpath.glob("*.json")))] if dirpath.is_dir() else []
+
+
+def agreement_pairs(root: Path) -> dict[tuple[str, str], Path]:
+    """(method a, method b) -> the directory with that pair's per-tile agreement JSONs.
+
+    `AGREEMENT_TAG` is the mosaic the report describes; `AGREEMENT_TAG_FALLBACK` names the
+    pairs that keep an earlier tag, so a method run on a subset of the tiles is not dropped
+    from the chapter when the mosaic grows.
+    """
+    out: dict[tuple[str, str], Path] = {}
+    for tag in dict.fromkeys([AGREEMENT_TAG, *AGREEMENT_TAG_FALLBACK.values()]):
+        for d in sorted(root.glob(f"*_vs_*_{tag}")):
+            pair = d.name[: -len(f"_{tag}")]
+            if AGREEMENT_TAG_FALLBACK.get(pair, AGREEMENT_TAG) != tag:
+                continue
+            a_key, b_key = pair.split("_vs_")
+            out.setdefault((a_key, b_key), d)
+    return out
 
 
 # ----------------------------------------------------------------------------- figures
@@ -760,13 +781,13 @@ def main(argv=None) -> int:
             fig_distributions(trees, a.assets / "analytics_distributions_3way.png", tiles=three, title_suffix=f" on the {len(three)} tiles all methods cover")
 
     print("== agreement")
-    agr = load_agreement(als / "berlin_agreement" / f"ff3d_vs_sat_{AGREEMENT_TAG}")
+    dirs = agreement_pairs(als / "berlin_agreement")
+    agr = load_agreement(dirs[("ff3d", "sat")]) if ("ff3d", "sat") in dirs else []
     if agr:
         S["agreement"] = {"ff3d_sat": pooled_agreement(agr)}
         fig_agreement(agr, a.assets / "analytics_agreement.png", labels["ff3d"], labels["sat"])
         pairs = {}
-        for d in sorted((als / "berlin_agreement").glob(f"*_vs_*_{AGREEMENT_TAG}")):
-            a_key, b_key = d.name[: -len(f"_{AGREEMENT_TAG}")].split("_vs_")
+        for (a_key, b_key), d in sorted(dirs.items()):
             if (a_key, b_key) == ("ff3d", "sat") or a_key not in labels or b_key not in labels:
                 continue
             recs = load_agreement(d)

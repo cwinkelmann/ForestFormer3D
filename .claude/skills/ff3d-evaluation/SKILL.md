@@ -215,7 +215,7 @@ detection rate + height residual against the tree cadastre (nearest predicted to
 3 m: ~82 % FF3D, ~86 % SAT, bias ~0, MAE ~4 m, r ~0.5). Output is the report chapter
 `berlin-analytics` (see `ff3d-pdf-report`) plus `assets/analytics/analytics.json`. Agreement
 needs identical points in identical order: the 3-tile AMS3D set from the old un-haloed run
-cannot be compared that way (the 44-tile run computes all three pairs on carrot).
+cannot be compared that way (the 44- and 57-tile runs compute all three pairs on carrot; `berlin_analytics.py`'s `AGREEMENT_TAG` selects the mosaic, `AGREEMENT_TAG_FALLBACK` keeps a pair that ran on fewer tiles, e.g. PointTreeFormer's 15).
 
 ## 9. Speed: throughput under sharing vs a clean benchmark
 

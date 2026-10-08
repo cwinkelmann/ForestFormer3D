@@ -52,8 +52,10 @@ individual crowns in closed forest.
 * **References are coarse and dated.** The stand map is a 2014 management inventory with
   1-20 ha polygons; the cadastre height is an inspection estimate in whole metres.
 * **The mosaic edge is one-sided.** Sub-tiles on the outer edge of the mosaic have a thinner
-  halo; the same holds for the border between the first 33 tiles and the eleven added
-  later, whose neighbours were split before those tiles existed.
+  halo; the same holds for the borders between the three batches (33 tiles, eleven on
+  2026-10-06, thirteen on 2026-10-08), whose neighbours were split before the later tiles
+  existed. Each extension turns a former outer edge into an interior one, which is part of
+  why the thirteen tiles of the last batch were worth processing.
 * **Nondeterminism.** Run-to-run variation of the model is below the differences reported
   here (appendix), but not zero.
 
@@ -62,8 +64,13 @@ individual crowns in closed forest.
 1. Use the WINMOL field circles as reference: match predicted crowns to the 974 delineated
    ones, by species, and report precision and recall per method -- the first accuracy
    figure on these tiles.
-3. Post-filters for production use: drop instances under 2 m with crowns over 50 m², apply
-   the building mask by default, and decide a minimum instance size from the field data.
+2. Re-run the mosaic with the **pre-inference mask** (methods chapter): the ALKIS
+   footprints, water bodies and `alkis:bauwerkeflaechen` structures are prepared, and
+   keeping those points away from the model is the only handle on the jetties over the
+   Tegeler See, which carry no building footprint and pass the height rule because the
+   ground grid under water is interpolated from the shore.
+3. Decide the remaining production filters from the field data: the 2 m height rule and the
+   building mask are applied by default now, a minimum instance size is not.
 4. A species layer: the stand map gives expected species shares per stand; the summer
    orthophoto and the leaf-off/leaf-on pair give per-crown spectral evidence to assign
    species to individual predicted trees and check them against the cadastre's species.

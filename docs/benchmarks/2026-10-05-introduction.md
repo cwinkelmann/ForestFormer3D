@@ -24,9 +24,10 @@ The map explains the shape of the mosaic: the processed block covers the Tegel f
 
 The area is the Tegel and Spandau forest complex in north-western Berlin, chosen because
 the WINMOL project surveyed two districts there in 2025 with drones and field circles:
-Revier 12 Tegelsee (515 ha) and Revier 13 Spandau (1,034 ha). Forty-four km tiles of
-the Berlin ALS 2021 were processed -- 33 in a first batch and the eleven that complete the
-R13 footprint on 2026-10-06 -- so both survey areas lie entirely inside the mosaic. The tiles run from closed
+Revier 12 Tegelsee (515 ha) and Revier 13 Spandau (1,034 ha). Fifty-seven km tiles of
+the Berlin ALS 2021 were processed -- 33 in a first batch, the eleven that complete the
+R13 footprint on 2026-10-06 and thirteen more on 2026-10-08 that square off the mosaic's
+southern and eastern edges -- so both survey areas lie entirely inside the mosaic. The tiles run from closed
 pine-oak forest in the west through lakeshore and park to the dense housing of Tegel in
 the east, so the same mosaic exercises the model on forest, parkland, gardens and roofs.
 
@@ -41,7 +42,7 @@ points/m² over forest.
 | input | source | used for |
 |---|---|---|
 | Berlin ALS 2021, {{methods.ff3d.tiles}} km tiles | GDI Berlin ATOM feed, dl-de/zero-2-0 | the segmentation |
-| ALKIS building footprints (18,271 for 44 tiles) | GDI Berlin WFS | masking roof "trees" |
+| ALKIS building footprints (24,888 for 57 tiles) | GDI Berlin WFS | masking roof "trees" |
 | Forstbetriebskarte 2014, 740 stands | Umweltatlas WFS | species and inventory height per stand |
 | Baumbestand (tree cadastre), 21,452 trees | GDI Berlin WFS | detection and height check outside the forest |
 | DOP 2021 (leaf-off) and TrueDOP 2025 summer orthophotos | GDI Berlin WMS | visual checks, viewer, QGIS |

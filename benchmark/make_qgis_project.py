@@ -49,14 +49,14 @@ CRS_DESC = "ETRS89 / UTM zone 33N"
 PROJ4 = "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
 
 # method key -> (display name, result dir relative to ALS_Data, stitch.json for max id)
-# v3 = the 44-tile mosaics (2026-10-06, 2 m height filter); v2 / the unsuffixed dirs are the
+# v4 = the 57-tile mosaics (2026-10-08, 2 m height filter); v3 is the 44-tile set, v2 / the unsuffixed dirs are the
 # 33-tile sets and stay on disk.
 METHODS = {
-    "ff3d": ("ForestFormer3D", "berlin_als_2021_ff3d_v3", "berlin_als_2021_ff3d_v3/stitch.json"),
-    "ff3d_masked": ("ForestFormer3D, buildings masked", "berlin_als_2021_ff3d_v3/masked",
-                    "berlin_als_2021_ff3d_v3/stitch.json"),
-    "sat": ("SegmentAnyTree", "berlin_als_2021_sat_v3", "berlin_als_2021_sat_v3/stitch.json"),
-    "ams3d": ("AMS3D", "berlin_als_2021_ams3d_v3", "berlin_als_2021_ams3d_v3/stitch.json"),
+    "ff3d": ("ForestFormer3D", "berlin_als_2021_ff3d_v4", "berlin_als_2021_ff3d_v4/stitch.json"),
+    "ff3d_masked": ("ForestFormer3D, buildings masked", "berlin_als_2021_ff3d_v4/masked",
+                    "berlin_als_2021_ff3d_v4/stitch.json"),
+    "sat": ("SegmentAnyTree", "berlin_als_2021_sat_v4", "berlin_als_2021_sat_v4/stitch.json"),
+    "ams3d": ("AMS3D", "berlin_als_2021_ams3d_v4", "berlin_als_2021_ams3d_v4/stitch.json"),
 }
 PRODUCTS = ("_instance_50cm.tif", "_semantic_50cm.tif", "_crowns.gpkg", "_trees.gpkg")
 

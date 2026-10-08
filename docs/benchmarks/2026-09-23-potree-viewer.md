@@ -1,11 +1,21 @@
 # Potree web viewer for the Berlin ALS 2021 tiles (2026-09-23)
 
-**Status 2026-10-06.** The production site on carrot (`http://10.188.1.1:8080/`, last
-section) carries the 44-tile mosaic for all three methods, rebuilt by
-`benchmark/potree_rebuild_mosaic.sh` after the re-stitch (octrees for every tile and method,
-base build plus the two variants, swap, HTTP checks; the 33-tile site is kept beside it).
-Since 2026-10-07 Stefan Reder's PointTreeFormer results (15 Tegel tiles) are a fourth method
-(`ptf`, `benchmark/ptf_to_ff3d.py`, `--variant ptf`). Since 2026-10-06 the WINMOL 2025 drone orthomosaics of R12 and R13 are a further drape
+**Status 2026-10-08.** The production site on carrot (`http://10.188.1.1:8080/`, last
+section) carries the 57-tile mosaic, rebuilt by `benchmark/potree_rebuild_mosaic.sh` after
+the re-stitch (octrees for every tile and method, base build plus the variants, swap, HTTP
+checks; the 44-tile site is kept beside it as `berlin_potree_v2_44tiles`). The octree
+conversion and the per-tile stitch now run six at a time (`CONVERT_JOBS`,
+`AMS3D_STITCH_JOBS`), which turns the rebuild from hours into minutes.
+
+Five segmentations are selectable: **ForestFormer3D** (the building-masked product, which is
+what the base build serves -- until 2026-10-08 the site showed the raw model output here,
+so roofs and the Tegeler See jetties appeared as trees), **ForestFormer3D raw (before the
+building mask)** as the `ff3d_raw` variant for exactly that comparison, SegmentAnyTree,
+AMS3D and PointTreeFormer. The masked product marks removed points as semantic class 3
+(building, red in the semantic colouring, legend entry "building / masked"), so the
+difference between the two is visible point by point: on 379_5826, 13,233 trees masked
+against 15,117 raw. Since 2026-10-07 Stefan Reder's PointTreeFormer results (15 Tegel
+tiles) are the fifth method (`ptf`, `benchmark/ptf_to_ff3d.py`, `--variant ptf`). Since 2026-10-06 the WINMOL 2025 drone orthomosaics of R12 and R13 are a further drape
 (`drone2025`, where the survey flew; `--drone2025-dir`). The rest of this chapter is the
 2026-09-23/25 write-up.
 

@@ -16,7 +16,7 @@ given; the fetch scripts named here are the record of exactly what was requested
 | Licence | Datenlizenz Deutschland – Zero – 2.0 (dl-de/zero-2-0) |
 | Flight | 24/25 February and 2 March 2021 -- **leaf-off** |
 | CRS | ETRS89 / UTM 33N (EPSG:25833), heights DHHN2016; the LAS headers carry no CRS, the code sets it |
-| Tiles | 1 km squares named `3dm_33_<E>_<N>_1_be.las`; 44 used here (Tegel and Spandau; 33 on 2026-09-24, eleven more on 2026-10-06), 4-27 M points each (18 M on average; forest tiles 20-27 M, the lake tile 381_5827 3.6 M) |
+| Tiles | 1 km squares named `3dm_33_<E>_<N>_1_be.las`; 57 used here (Tegel and Spandau; 33 on 2026-09-24, eleven more on 2026-10-06, thirteen more on 2026-10-08), 1.00 billion points in total, 3.6-27 M each (17.6 M on average; forest tiles 20-27 M, the lake tile 381_5827 3.6 M) |
 | Density | ~10 pts/m² averaged over a km tile (much of it water, roofs, streets); 20-30 pts/m² over forested 100 m sub-tiles |
 | Classes present | 2 (ground), 3/4/5 (vegetation by height), 7 (noise), 32 -- **no class 6 (building)**: roof points sit in 3/4/5 |
 | Fetch | `benchmark/fetch_berlin_als.py` (skill `ff3d-als-download`); copies on the 2TB volume `ALS_Data/berlin_als_2021/` and on carrot `inputs/berlin/` |
@@ -60,17 +60,19 @@ data infrastructure.
 | Licence | Datenlizenz Deutschland – Zero – 2.0 (dl-de/zero-2-0), "keine Zugriffsbeschränkungen" -- stated in the capabilities document |
 | Catalogue | the same dataset is listed in the national catalogue geoportal.de (records there mirror the GDI Berlin metadata); the data itself was taken from the GDI Berlin service above, never from a catalogue download |
 | Fetch | `benchmark/fetch_berlin_buildings.py`, one request per km-tile bounding box, paged; result `ALS_Data/berlin_buildings/alkis_buildings.gpkg` with layers `buildings` and `tiles` (which km boxes were fetched) |
-| Coverage | **16,257 footprints over all 33 tiles** since 2026-10-05 (`alkis_buildings_44tiles.gpkg` adds the 2,014 of the eleven R13 tiles now in processing, 18,271 rows). The first fetch (2026-09-23) covered 23 tiles; the ten others were added on 2026-10-05 and the building mask re-run for them. Five tiles genuinely contain no building (376_5827, 376_5828, 377_5827, 377_5828, 381_5828). |
+| Coverage | **24,888 footprints over all 57 tiles** (`alkis_buildings_57tiles.gpkg`, fetched 2026-10-08; `alkis_buildings_44tiles.gpkg` with 18,271 rows is the 44-tile state, 16,257 the 33-tile one). The first fetch (2026-09-23) covered 23 tiles; the ten others followed on 2026-10-05 and the building mask was re-run for them. Ten of the 57 tiles genuinely contain no building (376_5827, 376_5828, 377_5827, 377_5828, 381_5828 among them). |
+| Water and structures | Two more ALKIS layers were fetched on 2026-10-08 for the pre-inference mask (section "Pre-inference mask" of the methods chapter): `alkis_water_57tiles.gpkg` (210 polygons, `alkis:tatsaechlichenutzungflaechen` where `bezeich` is one of AX_Fliessgewaesser, AX_StehendesGewaesser, AX_Hafenbecken, AX_Meer) and `alkis_structures_57tiles.gpkg` (5,314 polygons, `alkis:bauwerkeflaechen` where `bezbwf` is Landebrücke, Überdachung, Carport or Brücke -- the jetties and canopies that carry no ALKIS building footprint but do carry tree-like points). Neither is applied to the products of this report. |
 | Use | `ff3d_geo buildings`: every predicted point inside a buffered footprint becomes class "building", an instance mostly inside footprints is dropped (`--min-roof-fraction`), surviving ids are not renumbered |
 
-With all 33 tiles covered, the mask removes **35,480 of the 832,130 ForestFormer3D trees
-(4.26 %)**, leaving 796,650 -- counted as distinct tree ids across the mosaic. Count ids,
-not table rows: the stitched per-tile tree tables list a tree straddling a km border once,
-in the tile holding most of it, whereas the mask step regenerates each tile's table from
-that tile's own LAS and lists such a tree on both sides (7,134 double-listed rows). The
-densest built-up tiles lose the most: 383_5827 40 % of its "trees" (5,330 instances),
-383_5826 3,982, 380_5830 3,800. Any "buildings masked" figure quoted before 2026-10-05
-was computed with ten tiles unmasked and is superseded by these numbers.
+On the 57-tile mosaic the mask removes **55,442 of the 1,439,822 instances the per-tile
+tables list (3.85 %)** and re-labels 38.1 million points as building. Mind the two ways of
+counting: the mosaic-wide stitch reports 1,427,107 distinct ForestFormer3D tree ids,
+because a tree straddling a km border is listed once, in the tile holding most of it,
+whereas the mask step regenerates each tile's table from that tile's own LAS and lists such
+a tree on both sides. The densest built-up tiles lose the most: 383_5827 41 % of its
+"trees", 384_5826 30 %, 383_5826 23 %; the forest tiles lose nothing. The 33-tile figures
+(35,480 of 832,130, 4.26 %) are superseded, and any "buildings masked" figure quoted before
+2026-10-05 was computed with ten tiles unmasked.
 
 ## 3b. What grows inside the forest: the Berlin forest stand map
 
@@ -105,8 +107,13 @@ Spandau only to 56 %**: 454 of its 1,034 ha lay in eleven km tiles that were dow
 never processed (375_5826 and 376_5826 entirely inside the footprint, 376_5825, 377_5826,
 378_5827, 378_5826, 377_5825, 374_5826, 375_5825, 375_5829, 374_5825). Those eleven were
 processed with all three methods and the mosaic re-stitched on 2026-10-06, so both
-footprints are now complete (44 tiles). Reviere 11 and 15, north and south of the mosaic,
-remain outside the download extent; the project's coverage layer draws them in red.
+footprints are complete since then. Thirteen further tiles were processed on 2026-10-08
+(378_5828, 380_5825, 381_5825, 382_5825, 383_5825, 384_5825, 384_5826, 384_5829, 384_5830
+and the northern row 381_5831, 382_5831, 383_5831, 384_5831), which squares off the
+mosaic's southern and eastern edges at 57 tiles; they add no Revier coverage, they remove
+the open mosaic border those tiles' neighbours had. Reviere 11 and 15, north and south of
+the mosaic, remain outside the download extent; the project's coverage layer draws them in
+red.
 
 The 974 Probekreis crowns of section 5 tell the opposite story -- beech 70 %, pine 12 %,
 birch 7 % -- and their median polygon is under 1 m²: they are the regeneration layer under

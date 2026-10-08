@@ -218,7 +218,7 @@ DOP overlays (`benchmark/plot_berlin_dop_overlays.py`) are covered in
 **PointTreeFormer variant (2026-10-07):** Stefan Reder's results live on carrot at
 `/storage/sreder/projects/ALS_Berlin/PointTreeFormer/clipped_<T>.laz` (15 Tegel tiles, 20 m buffer,
 `instance_id_prediction` / `classification_prediction` 0 ground 1 wood 2 leaf, no CRS record).
-`benchmark/ptf_to_ff3d.py --laz ... --out work_dirs/ptf-mosaic/<T> --order-like work_dirs/berlin-mosaic-44/<T>.las --min-height 2`
+`benchmark/ptf_to_ff3d.py --laz ... --out work_dirs/ptf-mosaic/<T> --order-like work_dirs/berlin-mosaic-57/<T>.las --min-height 2`
 writes the contract (core only, in OUR point order so `instance_agreement.py` works, 2 m rule);
 `work_dirs/logs/potree/add_ptf.sh` on carrot converts all tiles, builds `out_ptf` octrees, links
 `pointclouds_ptf/`, runs `--variant ptf` and the FF3D-vs-PTF agreement (`work_dirs/logs/agreement-ptf/`).
@@ -232,7 +232,9 @@ carrot `inputs/berlin_drone_2025/`, and drawn by `build_potree_site.py --drone20
 the nodata value transparent, so a tile the footprint only touches is not painted black.
 
 **Ready-made project over the whole Berlin mosaic:** `python benchmark/make_qgis_project.py
---phase all` (plain Python + MacPorts GDAL, no PyQGIS) writes
+--phase all` (plain Python + MacPorts GDAL, no PyQGIS; `METHODS` points at the
+`berlin_als_2021_{ff3d,sat,ams3d}_v4` dirs, the 57-tile mosaic of 2026-10-08 -- v3 is the
+44-tile state) writes
 `/Volumes/2TB/winmol/ALS_Data/berlin_qgis/berlin_als_2021.qgz` -- one group per method
 (ForestFormer3D, SegmentAnyTree, AMS3D, ForestFormer3D building-masked), each with the
 crowns, tree tops (size = height), instance ids and semantic classes mosaicked into ONE layer

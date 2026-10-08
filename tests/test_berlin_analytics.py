@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmark"))
 
 from berlin_analytics import (  # noqa: E402
     FLAT_AREA,
+    agreement_pairs,
     FLAT_H,
     flat_blob_mask,
     fmt,
@@ -94,3 +95,20 @@ def test_load_trees_dedupes_only_mosaic_wide_ids(tmp_path):
     ptf = ba.load_trees(als, "ptf", log=lambda m: None)
     assert len(ff3d) == 3 and ff3d[ff3d.tree_id == 1].tile.tolist() == ["3dm_33_380_5828_1_be"]   # kept where it has most points
     assert len(ptf) == 4
+
+
+def test_agreement_pairs_prefers_the_current_tag_and_keeps_the_fallback_pair(tmp_path, monkeypatch):
+    """The report's mosaic tag wins per pair; a method that ran on a subset of the tiles
+    (PointTreeFormer) keeps the tag of the mosaic its agreement was computed on."""
+    import berlin_analytics as ba
+
+    for name in ("ff3d_vs_sat_44", "ff3d_vs_sat_57", "sat_vs_ams3d_57", "ff3d_vs_ptf_44",
+                 "ff3d_vs_sat_33", "ams3d_3tiles"):
+        (tmp_path / name).mkdir()
+    monkeypatch.setattr(ba, "AGREEMENT_TAG", "57")
+    monkeypatch.setattr(ba, "AGREEMENT_TAG_FALLBACK", {"ff3d_vs_ptf": "44"})
+    assert {k: v.name for k, v in ba.agreement_pairs(tmp_path).items()} == {
+        ("ff3d", "sat"): "ff3d_vs_sat_57",
+        ("sat", "ams3d"): "sat_vs_ams3d_57",
+        ("ff3d", "ptf"): "ff3d_vs_ptf_44",
+    }
