@@ -753,6 +753,24 @@ def build_parser() -> argparse.ArgumentParser:
     ams.add_argument("--keep-subtiles", action="store_true",
                      help="keep <out>/ams3d_subtiles_{in,out}/ after the merge")
 
+    pms = sub.add_parser("premask-split",
+                         help="masked copy of a haloed split, for SegmentAnyTree / AMS3D")
+    pms.add_argument("--sub", required=True, type=Path,
+                     help="a split directory with the sub-tile <stem>.las files")
+    pms.add_argument("--out", required=True, type=Path,
+                     help="directory for the masked sub-tiles and their _premask.npz")
+    _add_mask_args(pms)
+
+    pmr = sub.add_parser("premask-restore",
+                         help="put the masked points back into a method's sub-tile results")
+    pmr.add_argument("--results", required=True, type=Path,
+                     help="directory with the method's per-sub-tile result <stem>.las")
+    pmr.add_argument("--premask-dir", required=True, type=Path,
+                     help="the premask-split output directory holding the _premask.npz")
+    pmr.add_argument("--out", required=True, type=Path,
+                     help="directory for the restored full-count sub-tile results")
+    pmr.add_argument("--epsg", type=int, default=DEFAULT_EPSG)
+
     msk = sub.add_parser("masks", help="result LAS -> instance/semantic GeoTIFFs + crown polygons")
     msk.add_argument("--las", required=True, type=Path, help="a georeferenced result LAS")
     msk.add_argument("--out", required=True, type=Path,
@@ -883,6 +901,28 @@ def main(argv: list[str] | None = None) -> int:
                               min_points=args.min_points, prefix=args.prefix,
                               buffer_m=args.buffer, neighbours=list(args.neighbours)):
             print(path)
+        return 0
+
+    if args.command == "premask-split":
+        from ff3d_geo.premask import write_premasked_subtiles
+
+        info = write_premasked_subtiles(args.sub, args.out, args.mask_polygons,
+                                        buffer_m=args.mask_buffer)
+        print(f"{args.sub} -> {args.out}: {info['sub_tiles']} sub-tiles, "
+              f"{info['n_masked']:,} of {info['n_points']:,} points masked "
+              f"({info['fraction'] * 100:.1f} %)")
+        if info["fully_masked"]:
+            print(f"  {len(info['fully_masked'])} sub-tile(s) fully masked, no input written: "
+                  + ", ".join(info["fully_masked"][:5])
+                  + ("..." if len(info["fully_masked"]) > 5 else ""))
+        return 0
+
+    if args.command == "premask-restore":
+        from ff3d_geo.premask import restore_premasked_dir
+
+        info = restore_premasked_dir(args.results, args.premask_dir, args.out, epsg=args.epsg)
+        print(f"{args.results} + {args.premask_dir} -> {args.out}: {info['written']} sub-tiles "
+              f"({info['restored']} restored, {info['fully_masked']} fully masked)")
         return 0
 
     if args.command == "stitch":
