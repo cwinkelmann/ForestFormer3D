@@ -74,7 +74,7 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from ff3d_geo.convert import las_to_ply, results_to_las
+from ff3d_geo.convert import las_to_ply, masked_only_to_las, results_to_las
 from ff3d_geo.origin import parse_origin
 
 DEFAULT_CONFIG = "configs/oneformer3d_qs_radius16_qp300_2many.py"
@@ -106,6 +106,7 @@ class Step:
     env: dict[str, str] = field(default_factory=dict)
     func: Callable[[], object] | None = None
     name_detail: str = ""
+    skip_if: Callable[[], str | None] = None       # a reason string skips the step
 
     def render(self) -> str:
         if self.argv is None:
@@ -265,6 +266,12 @@ def _release_stems(instance_dir: Path, stems: list[str]) -> None:
             path.unlink(missing_ok=True)
 
 
+def _skippable(step: Step, skip_if) -> Step:
+    """Return ``step`` with a skip predicate attached (dataclasses are not frozen here)."""
+    step.skip_if = skip_if
+    return step
+
+
 def plan_run(
     las,
     checkpoint=DEFAULT_CHECKPOINT,
@@ -353,11 +360,25 @@ def plan_run(
     report_mds = [out / f"{s}_report.md" for s in stems]
     if timings is None:
         timings = {}
+    # Scans the pre-inference mask empties completely: they never reach the model (an
+    # empty PLY kills the whole batch's preprocess step) and are georeferenced straight
+    # from the mask's npz instead. Filled by convert(), read by the later steps.
+    fully_masked: set[str] = set()
+
+    def active_stems() -> list[str]:
+        return [s for s in stems if s not in fully_masked]
+
+    def no_scans_left() -> str | None:
+        if active_stems():
+            return None
+        return (f"the pre-inference mask removed every point of all {len(stems)} scan(s), "
+                "so there is nothing to infer")
 
     def convert() -> None:
         out.mkdir(parents=True, exist_ok=True)
-        for src, input_ply, sidecar, tile_origin in zip(
-            las_paths, input_plys, sidecars, origins
+        fully_masked.clear()
+        for stem, src, input_ply, sidecar, tile_origin in zip(
+            stems, las_paths, input_plys, sidecars, origins
         ):
             info = las_to_ply(src, input_ply, sidecar, origin=tile_origin, epsg=epsg,
                               mask_polygons=mask_polygons, mask_buffer=mask_buffer)
@@ -365,6 +386,9 @@ def plan_run(
                 pm = info["premask"]
                 print(f"{src.name}: {pm['n_masked']} of {info['n_points']} points inside "
                       f"{pm['n_polygons']} mask polygons kept away from the model")
+                if info["n_points_inference"] == 0:
+                    fully_masked.add(stem)
+                    print(f"{src.name}: fully masked, skipping inference for this scan")
 
     def prepare_inputs() -> None:
         # las_to_ply normally creates <out> first; mkdir here too so this step can
@@ -374,7 +398,7 @@ def plan_run(
         # a second concurrent run over the same stems fails here instead of silently
         # corrupting both runs' exports (see _claim_stems).
         _claim_stems(instance_dir, stems, out)
-        scan_list.write_text("".join(f"{s}\n" for s in stems))
+        scan_list.write_text("".join(f"{s}\n" for s in active_stems()))
         empty_list.write_text("")
         # batch_load skips a scan whose _vert.npy already exists: drop stale exports
         # so a re-run really re-exports this tile.
@@ -394,7 +418,11 @@ def plan_run(
         # "no test scans with preprocessed data, skipping ..." and writes nothing, so
         # without these checks a preprocessing miss would only surface hours later,
         # after the GPU step, as a missing result PLY.
-        for path in preprocess_artefacts:
+        if not active_stems():
+            return                      # nothing was inferred, nothing to check
+        required = [instance_dir / f"{s}_{kind}.npy"
+                    for s in active_stems() for kind in ("vert", "offsets")] + [info_pkl]
+        for path in required:
             if not path.is_file():
                 raise RuntimeError(
                     f"preprocessing did not produce {path}; see the container output above"
@@ -407,7 +435,9 @@ def plan_run(
 
     def georeference() -> None:
         _run_per_tile("results_to_las", [
-            (stem, partial(results_to_las, result_ply, sidecar, offsets_npy, out_las))
+            (stem,
+             partial(masked_only_to_las, sidecar, out_las) if stem in fully_masked
+             else partial(results_to_las, result_ply, sidecar, offsets_npy, out_las))
             for stem, result_ply, sidecar, offsets_npy, out_las in zip(
                 stems, result_plys, sidecars, offsets_npys, out_lass)
         ])
@@ -493,10 +523,10 @@ def plan_run(
         Step(name="prepare_inputs", func=prepare_inputs,
              name_detail=f"write {scan_list}, {empty_list}; rm " + paths.join(
                  f"{instance_dir}/{s}_*.npy" for s in stems)),
-        _docker_step("preprocess", preprocess_inner, repo, gpu),
+        _skippable(_docker_step("preprocess", preprocess_inner, repo, gpu), no_scans_left),
         Step(name="check_preprocess", func=check_preprocess,
              name_detail="require " + paths.join(str(p) for p in preprocess_artefacts)),
-        _docker_step("inference", inference_inner, repo, gpu),
+        _skippable(_docker_step("inference", inference_inner, repo, gpu), no_scans_left),
         Step(name="results_to_las", func=georeference,
              name_detail=tiles.join(
                  f"{result_ply} + {offsets_npy} -> {out_las}"
@@ -535,6 +565,10 @@ def execute(steps: list[Step], dry_run: bool, timings: dict[str, float] | None =
     for step in steps:
         print(step.render(), flush=True)
         if dry_run:
+            continue
+        reason = step.skip_if() if step.skip_if is not None else None
+        if reason:
+            print(f"step {step.name!r} skipped: {reason}", flush=True)
             continue
         started = time.monotonic()
         if step.argv is not None:

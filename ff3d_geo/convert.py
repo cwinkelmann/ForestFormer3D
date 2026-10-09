@@ -158,6 +158,59 @@ def las_to_ply(
     return sidecar
 
 
+def masked_only_to_las(sidecar_path, out_las) -> None:
+    """Write the LAS of a scan whose every point was removed by the pre-inference mask.
+
+    Such a scan never reaches the model -- a PLY with no vertices makes
+    ``load_forainetv2_data.export`` fail ("zero-size array to reduction operation
+    minimum") and takes the whole batch's preprocess step down with it -- so the
+    pipeline skips it and this function produces its result directly from the mask's
+    npz: every point back in its source position, class ``SEMANTIC_MASKED``, no
+    instance, no score. The output is a normal result LAS, so stitch, trees, masks and
+    report treat it like any other (empty) tile.
+    """
+    sidecar = json.loads(Path(sidecar_path).read_text())
+    premask = sidecar.get("premask")
+    if not premask:
+        raise ValueError(f"{sidecar_path} has no premask block; nothing was masked")
+    n_total = int(sidecar["n_points"])
+    if int(premask["n_masked"]) != n_total:
+        raise ValueError(
+            f"{sidecar_path}: {premask['n_masked']} of {n_total} points are masked, so this "
+            "scan does have points for the model; use results_to_las"
+        )
+    pm = np.load(premask["npz"])
+    mask = np.asarray(pm["mask"], dtype=bool)
+    if mask.shape[0] != n_total or not mask.all():
+        raise ValueError(f"{premask['npz']} does not mark every point as masked")
+
+    origin_e, origin_n = sidecar["origin"]
+    x = np.asarray(pm["x"], dtype=np.float64) + origin_e
+    y = np.asarray(pm["y"], dtype=np.float64) + origin_n
+    z = np.asarray(pm["z"], dtype=np.float64)
+    classification = np.load(sidecar["classification_npy"])
+    if len(classification) != n_total:
+        raise ValueError(
+            f"classification has {len(classification)} entries but "
+            f"{sidecar_path} records {n_total} points"
+        )
+
+    header = result_point_header(
+        int(sidecar["epsg"]),
+        sidecar["source_scale"],
+        np.floor([x.min(), y.min(), z.min()]) if n_total else np.zeros(3),
+    )
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = x, y, z
+    las.classification = classification.astype(np.uint8)
+    las.treeID = np.full(n_total, -1, dtype=np.int32)
+    las.semantic = np.full(n_total, SEMANTIC_MASKED, dtype=np.uint8)
+    las.score = np.full(n_total, -1.0, dtype=np.float32)
+    out_las = Path(out_las)
+    out_las.parent.mkdir(parents=True, exist_ok=True)
+    las.write(str(out_las))
+
+
 def results_to_las(result_ply, sidecar_path, offsets_npy, out_las) -> None:
     """Georeference a ``tools/test.py`` result PLY into a LAS 1.4 / point format 6 file.
 

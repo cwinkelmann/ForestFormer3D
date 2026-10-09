@@ -15,7 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import laspy  # noqa: E402
 from plyfile import PlyData  # noqa: E402
 
-from ff3d_geo.convert import SEMANTIC_MASKED, las_to_ply, results_to_las  # noqa: E402
+from ff3d_geo.convert import (  # noqa: E402
+    SEMANTIC_MASKED,
+    las_to_ply,
+    masked_only_to_las,
+    results_to_las,
+)
 from ff3d_geo.premask import parse_polygon_spec  # noqa: E402
 from test_geo_convert import CLASSIFICATION, XYZ, write_fake_result_ply, write_three_point_las  # noqa: E402,F401
 
@@ -134,3 +139,66 @@ def test_a_polygon_at_the_local_coordinates_masks_nothing(tmp_path):
     info = las_to_ply(las_path, tmp_path / "t.ply", tmp_path / "t.sidecar.json",
                       mask_polygons=[spec], mask_buffer=0.0)
     assert info["premask"]["n_polygons"] == 0 and info["premask"]["n_masked"] == 0
+
+
+def _polygon_over_everything(path, layer="water"):
+    gpd = pytest.importorskip("geopandas")
+    from shapely.geometry import box
+
+    g = gpd.GeoDataFrame({"name": ["lake"]},
+                         geometry=[box(ORIGIN[0] - 10, ORIGIN[1] - 10, ORIGIN[0] + 200, ORIGIN[1] + 200)],
+                         crs="EPSG:25833")
+    g.to_file(path, driver="GPKG", layer=layer)
+    return f"{path}:{layer}"
+
+
+def test_a_fully_masked_scan_writes_no_ply_vertices_and_is_flagged(tmp_path):
+    """A sub-tile completely inside the mask (a jetty box over the Tegeler See) must not be
+    sent to the model: an empty PLY makes load_forainetv2_data.export fail with
+    "zero-size array to reduction operation minimum", which took the whole batch's
+    preprocess step down in the first 57-tile re-run."""
+    pytest.importorskip("geopandas")
+    las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
+    spec = _polygon_over_everything(tmp_path / "lake.gpkg")
+    info = las_to_ply(las_path, tmp_path / "t.ply", tmp_path / "t.sidecar.json",
+                      mask_polygons=[spec], mask_buffer=0.0)
+    assert info["n_points"] == 3 and info["n_points_inference"] == 0
+    assert info["premask"]["n_masked"] == 3
+    assert len(PlyData.read(str(tmp_path / "t.ply"))["vertex"].data) == 0
+
+
+def test_masked_only_to_las_restores_every_point_as_masked(tmp_path):
+    pytest.importorskip("geopandas")
+    las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
+    spec = _polygon_over_everything(tmp_path / "lake.gpkg")
+    sidecar = tmp_path / "t.sidecar.json"
+    las_to_ply(las_path, tmp_path / "t.ply", sidecar, mask_polygons=[spec], mask_buffer=0.0)
+
+    out_las = tmp_path / "out.las"
+    masked_only_to_las(sidecar, out_las)
+    out = laspy.read(str(out_las))
+    assert out.header.point_count == 3
+    expected = XYZ + np.array([381300.0, 5828300.0, 0.0])
+    assert np.abs(np.column_stack([out.x, out.y, out.z]) - expected).max() <= 0.01
+    np.testing.assert_array_equal(out.classification, CLASSIFICATION)
+    np.testing.assert_array_equal(out.treeID, [-1, -1, -1])
+    np.testing.assert_array_equal(out.semantic, [SEMANTIC_MASKED] * 3)
+    np.testing.assert_allclose(out.score, [-1.0] * 3, atol=1e-6)
+
+
+def test_masked_only_to_las_refuses_a_scan_that_kept_points(tmp_path):
+    pytest.importorskip("geopandas")
+    las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
+    spec = _polygon_around(tmp_path / "mask.gpkg", XYZ[1, 0] + ORIGIN[0], XYZ[1, 1] + ORIGIN[1])
+    sidecar = tmp_path / "t.sidecar.json"
+    las_to_ply(las_path, tmp_path / "t.ply", sidecar, mask_polygons=[spec], mask_buffer=0.0)
+    with pytest.raises(ValueError, match="does have points for the model"):
+        masked_only_to_las(sidecar, tmp_path / "out.las")
+
+
+def test_masked_only_to_las_needs_a_premask_block(tmp_path):
+    las_path = write_three_point_las(tmp_path / "tile_E381300_N5828300.las")
+    sidecar = tmp_path / "t.sidecar.json"
+    las_to_ply(las_path, tmp_path / "t.ply", sidecar)
+    with pytest.raises(ValueError, match="no premask block"):
+        masked_only_to_las(sidecar, tmp_path / "out.las")

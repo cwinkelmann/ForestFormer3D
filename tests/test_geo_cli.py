@@ -904,3 +904,30 @@ def test_parser_accepts_mask_polygons_on_run_and_convert():
     assert b.mask_polygons is None and b.mask_buffer == 1.0
     c = build_parser().parse_args(["convert", "--las", "t.las", "--ply", "t.ply", "--sidecar", "t.json", "--mask-polygons", "w.gpkg"])
     assert c.mask_polygons == ["w.gpkg"]
+
+
+def test_fully_masked_scans_leave_the_docker_steps_skippable_and_shrink_the_scan_list(tmp_path, monkeypatch):
+    """The plan gives preprocess and inference a skip predicate, so a batch whose scans the
+    mask empties completely does not run the container at all (and `execute` says so)."""
+    from ff3d_geo.cli import execute, plan_run
+
+    steps = plan_run(tmp_path / "t_E1_N2.las", out=tmp_path / "out", repo=tmp_path,
+                     mask_polygons=["m.gpkg"])
+    by_name = {s.name: s for s in steps}
+    assert by_name["preprocess"].skip_if is not None and by_name["inference"].skip_if is not None
+    # nothing masked yet -> no reason to skip
+    assert by_name["preprocess"].skip_if() is None
+
+    calls = []
+    for name in ("preprocess", "inference"):
+        st = by_name[name]
+        st.argv = None
+        st.func = lambda name=name: calls.append(name)
+        st.skip_if = lambda: "everything masked"
+    for name in ("las_to_ply", "prepare_inputs", "check_preprocess", "results_to_las",
+                 "trees_to_gpkg", "report"):
+        by_name[name].func = lambda name=name: calls.append(name)
+    execute(steps, dry_run=False)
+    assert "preprocess" not in calls and "inference" not in calls
+    assert calls == ["las_to_ply", "prepare_inputs", "check_preprocess", "results_to_las",
+                     "trees_to_gpkg", "report"]
