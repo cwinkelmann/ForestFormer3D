@@ -162,3 +162,27 @@ def test_restore_dir_refuses_a_missing_result_for_a_kept_subtile(tmp_path):
     write_premasked_subtiles(sub, out, [spec], buffer_m=0.0)
     with pytest.raises(FileNotFoundError, match="kept points but have no result"):
         restore_premasked_dir(tmp_path / "empty", out, tmp_path / "restored")
+
+
+def test_npz_out_keeps_the_sidecars_out_of_the_input_dir_and_copies_the_manifest(tmp_path):
+    """SegmentAnyTree's run_inference.sh copies EVERY file of its input directory into its
+    workspace, and AMS3D checks for split_manifest.json before it starts."""
+    pytest.importorskip("geopandas")
+    sub = tmp_path / "sub"; sub.mkdir()
+    _write_subtile(sub / "t_E381300_N5828300_100m.las")
+    (sub / "split_manifest.json").write_text('{"size_m": 100}')
+    spec = _roof_polygon(tmp_path / "alkis.gpkg")
+
+    out, npz = tmp_path / "sub-pm", tmp_path / "sub-pm-npz"
+    write_premasked_subtiles(sub, out, [spec], buffer_m=0.0, npz_dir=npz)
+    assert sorted(p.name for p in out.iterdir()) == ["split_manifest.json",
+                                                     "t_E381300_N5828300_100m.las"]
+    assert [p.name for p in npz.iterdir()] == ["t_E381300_N5828300_100m_premask.npz"]
+    assert (out / "split_manifest.json").read_text() == '{"size_m": 100}'
+
+    # and the restore reads the sidecars from wherever they were put
+    results = tmp_path / "results"; results.mkdir()
+    _method_result(results / "t_E381300_N5828300_100m.las", SUB_XYZ[2:], SUB_CLASS[2:],
+                   tree_id=[3, 3], semantic=[2, 2], score=[0.4, 0.4])
+    info = restore_premasked_dir(results, npz, tmp_path / "restored")
+    assert info == {"written": 1, "restored": 1, "fully_masked": 0}

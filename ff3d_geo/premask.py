@@ -84,7 +84,7 @@ def mask_local_points(x, y, origin, specs, buffer_m: float = 1.0):
     return mask_points(gx, gy, geoms), len(geoms)
 
 
-def write_premasked_subtiles(sub_dir, out_dir, specs, buffer_m: float = 1.0) -> dict:
+def write_premasked_subtiles(sub_dir, out_dir, specs, buffer_m: float = 1.0, npz_dir=None) -> dict:
     """Write a masked copy of a haloed split, for a method that is not ``ff3d_geo run``.
 
     ``ff3d_geo run`` applies the mask itself (``las_to_ply``), but SegmentAnyTree and
@@ -94,9 +94,16 @@ def write_premasked_subtiles(sub_dir, out_dir, specs, buffer_m: float = 1.0) -> 
     * ``<out_dir>/<stem>.las`` -- the points OUTSIDE the polygons, in source order, with
       the input's point format, scales and extra dimensions preserved; omitted entirely
       when every point is masked, because the segmenters cannot read an empty cloud,
-    * ``<out_dir>/<stem>_premask.npz`` -- ``mask`` over all source points plus the masked
-      points' ``x``, ``y``, ``z`` and ``classification``, which
-      :func:`restore_premasked_las` puts back once the method has run.
+    * ``<npz_dir>/<stem>_premask.npz`` (default ``<out_dir>``) -- ``mask`` over all source
+      points plus the masked points' ``x``, ``y``, ``z`` and ``classification``, which
+      :func:`restore_premasked_las` puts back once the method has run. Point it OUTSIDE
+      ``out_dir`` for SegmentAnyTree: its ``run_inference.sh`` copies every file of the
+      input directory into its own workspace, npz sidecars included.
+
+    ``split_manifest.json`` is copied over when the source split has one, because
+    ``benchmark/ams3d_run_cpu.sh`` uses its presence as the "this is a haloed split"
+    check. It still describes the UNMASKED point counts, which is also what
+    ``ff3d_geo stitch`` needs once the results are restored.
 
     Returns a summary dict (sub-tiles, points, masked points, fully masked stems).
     """
@@ -107,6 +114,11 @@ def write_premasked_subtiles(sub_dir, out_dir, specs, buffer_m: float = 1.0) -> 
     if not lass:
         raise FileNotFoundError(f"no sub-tile LAS under {sub_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
+    npz_dir = Path(npz_dir) if npz_dir is not None else out_dir
+    npz_dir.mkdir(parents=True, exist_ok=True)
+    manifest = sub_dir / "split_manifest.json"
+    if manifest.is_file():
+        (out_dir / manifest.name).write_text(manifest.read_text())
     n_points = n_masked = 0
     empty = []
     for las_path in lass:
@@ -114,7 +126,7 @@ def write_premasked_subtiles(sub_dir, out_dir, specs, buffer_m: float = 1.0) -> 
         x = np.asarray(las.x, dtype=np.float64)
         y = np.asarray(las.y, dtype=np.float64)
         masked, _ = mask_local_points(x, y, parse_origin(las_path.name), specs, buffer_m)
-        np.savez(out_dir / f"{las_path.stem}_premask.npz", mask=masked,
+        np.savez(npz_dir / f"{las_path.stem}_premask.npz", mask=masked,
                  x=x[masked], y=y[masked], z=np.asarray(las.z, dtype=np.float64)[masked],
                  classification=np.asarray(las.classification)[masked].astype(np.uint8))
         n_points += x.size

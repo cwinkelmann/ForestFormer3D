@@ -758,7 +758,11 @@ def build_parser() -> argparse.ArgumentParser:
     pms.add_argument("--sub", required=True, type=Path,
                      help="a split directory with the sub-tile <stem>.las files")
     pms.add_argument("--out", required=True, type=Path,
-                     help="directory for the masked sub-tiles and their _premask.npz")
+                     help="directory for the masked sub-tiles (what the method reads)")
+    pms.add_argument("--npz-out", type=Path, default=None,
+                     help="directory for the _premask.npz sidecars (default: --out); keep "
+                          "them out of --out for SegmentAnyTree, whose run_inference.sh "
+                          "copies every file of the input directory")
     _add_mask_args(pms)
 
     pmr = sub.add_parser("premask-restore",
@@ -907,7 +911,7 @@ def main(argv: list[str] | None = None) -> int:
         from ff3d_geo.premask import write_premasked_subtiles
 
         info = write_premasked_subtiles(args.sub, args.out, args.mask_polygons,
-                                        buffer_m=args.mask_buffer)
+                                        buffer_m=args.mask_buffer, npz_dir=args.npz_out)
         print(f"{args.sub} -> {args.out}: {info['sub_tiles']} sub-tiles, "
               f"{info['n_masked']:,} of {info['n_points']:,} points masked "
               f"({info['fraction'] * 100:.1f} %)")

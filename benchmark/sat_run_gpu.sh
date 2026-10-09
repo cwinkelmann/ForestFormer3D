@@ -28,6 +28,9 @@
 #     Both methods then share the split, the halo, the core ownership and the stitch, so only
 #     the segmentation model differs.
 #
+# SAT_OUT_PREFIX moves BOTH the host output dir and the container's, so a side run
+# (speed benchmark, a premasked re-run) cannot overwrite the production results.
+#
 # Environment: SAT_ROOT (SegmentAnyTree checkout with model_file/PointGroup-PAPER.pt),
 # SAT_IMAGE, FF3D_ROOT, GEO_VENV, SAT_SUB, SAT_STITCH, SAT_KEEP=1 keeps the intermediate files.
 set -uo pipefail
@@ -63,12 +66,15 @@ for T in "$@"; do
         -e NUMBA_CACHE_DIR=/tmp/numba -e OMP_NUM_THREADS=16 --shm-size=64g \
         -v "$SAT_ROOT":/home/nibio/mutable-outside-world \
         -v "$FF3D_ROOT/inputs":/inputs -v "$FF3D_ROOT/work_dirs":/work_dirs \
-        --entrypoint bash "$SAT_IMAGE" run_inference.sh "/inputs/$SAT_SUB/$T" "/work_dirs/sat-$T/sat_raw"
+        --entrypoint bash "$SAT_IMAGE" run_inference.sh "/inputs/$SAT_SUB/$T" "/${RAW#"$FF3D_ROOT/"}"
     rc=$?
     R=$(( $(date +%s) - start ))
     M=$(ls "$RAW"/final_results/*_out.la? 2>/dev/null | wc -l)
     if [ "$rc" -ne 0 ] || [ "$M" -ne "$N" ]; then
-        echo "!!! $T sat run failed (rc=$rc, $M of $N result files) after ${R}s"; continue
+        # name the directory: with SAT_OUT_PREFIX set, "0 of N" used to mean the results
+        # were written elsewhere (the container path ignored the prefix), not that
+        # SegmentAnyTree had failed.
+        echo "!!! $T sat run failed (rc=$rc, $M of $N result files in $RAW/final_results) after ${R}s"; continue
     fi
     echo "=== $(date -Is) $T: convert ($M files, run ${R}s) ==="
     "$GEO_VENV/bin/python" "$FF3D_ROOT/benchmark/sat_to_ff3d.py" \
