@@ -50,7 +50,10 @@ def test_rows_and_summary_report_rates_and_running_tiles(tmp_path):
     s = summary(table)
     assert s["ff3d"] == {"tiles": 1, "hours_total": 0.5, "s_per_subtile_median": 60.0, "s_per_subtile_min": 60.0,
                          "s_per_subtile_max": 60.0, "running": 1}
-    assert rows(collect(tmp_path), running_only=True)[0]["tile"] == "3dm_33_380_5825_1_be"
+    # the same fixed `now`: without it the fake log's start (2026-10-07 16:26) crosses
+    # ABANDONED_AFTER_S as real time passes and the row disappears from running_only
+    running = rows(collect(tmp_path), now=datetime(2026, 10, 7, 16, 36, 0), running_only=True)
+    assert [r["tile"] for r in running] == ["3dm_33_380_5825_1_be"]
 
 
 def test_latest_start_wins_and_stale_starts_are_abandoned(tmp_path):
