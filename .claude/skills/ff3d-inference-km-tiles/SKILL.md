@@ -170,8 +170,17 @@ process uses only 21-38 % of an H100 and under 4.2 GB, which is why several queu
 pay off (1.5 GPU-h per tile in production against 2.0 h for a single process).
 **With `region_batch=8` and `batched_decoder=True` (since 2026-10-09) use 143 s per million
 points instead: 0.70 h for a mean tile, 1 h 00 for a 25 M-point tile, 80 % GPU utilisation
-and 16.2 GB** -- so two queues per card still fit, but the card is no longer idle enough for
-oversubscription to buy much.
+and 16.2 GB.**
+
+**One queue per card, not two.** Measured on the 2026-10-09 premask re-run, which ran two
+queues on each of seven cards: each queue needed 307 s per million points instead of 143,
+i.e. a card delivered 153 s/M against 143 s/M with a single queue -- the second queue costs
+about 7 % instead of buying anything. Oversubscription was right for the pre-batching code
+(one process used 21-38 % of a card); with the batched path one process holds 80 % and a
+co-tenant only adds contention. Per-tile phase split, from file mtimes of a 27 M-point tile:
+las_to_ply with the pre-inference mask 62 s, preprocess 5 s, **inference 8,321 s**,
+results_to_las 5 s, trees_to_gpkg 28 s, report 10 s -- inference is 96 % of a tile's wall
+time, so a queue that is not on the GPU is nearly always in its last minute of host work.
 
 ```bash
 tail -5 work_dirs/logs/berlin-gpu5-*.log        # poll every few minutes, NOT in a tight loop

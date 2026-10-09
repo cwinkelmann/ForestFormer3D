@@ -575,6 +575,15 @@ step of one sub-tile while a tile's run also carries the per-sub-tile Python, co
 post-processing that the batch now amortises -- utilisation went from a fifth of the card to
 four fifths, which is where the extra factor comes from. And at 143 s per million points
 ForestFormer3D is now **faster than SegmentAnyTree** (164 s/M) on the same host, reversing
-the ranking the production runs reported. The memory cost is 16.2 GB of 80, so two queues
-still fit on one card comfortably.
+the ranking the production runs reported. The memory cost is 16.2 GB of 80.
+
+It also changes how a mosaic should be queued. Production ran five to seven queues across
+the cards because one process left an H100 at 21-38 %; the re-run of 2026-10-09 put two
+queues on each of seven cards and each queue then needed **307 s per million points**, so a
+card delivered 153 s/M where a single queue delivers 143 -- the second queue costs about
+7 % rather than buying anything. One queue per card is now the right setting. The phase
+split of a tile explains why there is nothing left to overlap: of the 8,431 s a 27 M-point
+tile took, `las_to_ply` with the pre-inference mask was 62 s, the container's preprocess
+5 s, `results_to_las` 5 s, `trees_to_gpkg` 28 s and the report 10 s -- **inference is 96 %
+of the wall time**.
 
