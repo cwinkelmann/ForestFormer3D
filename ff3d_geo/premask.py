@@ -126,9 +126,11 @@ def write_premasked_subtiles(sub_dir, out_dir, specs, buffer_m: float = 1.0, npz
         x = np.asarray(las.x, dtype=np.float64)
         y = np.asarray(las.y, dtype=np.float64)
         masked, _ = mask_local_points(x, y, parse_origin(las_path.name), specs, buffer_m)
+        origin = parse_origin(las_path.name)
         np.savez(npz_dir / f"{las_path.stem}_premask.npz", mask=masked,
                  x=x[masked], y=y[masked], z=np.asarray(las.z, dtype=np.float64)[masked],
-                 classification=np.asarray(las.classification)[masked].astype(np.uint8))
+                 classification=np.asarray(las.classification)[masked].astype(np.uint8),
+                 origin=np.asarray(origin, dtype=np.float64))
         n_points += x.size
         n_masked += int(masked.sum())
         if masked.all():
@@ -141,7 +143,8 @@ def write_premasked_subtiles(sub_dir, out_dir, specs, buffer_m: float = 1.0, npz
             "fraction": (n_masked / n_points) if n_points else 0.0}
 
 
-def restore_premasked_las(result_las, npz_path, out_las, epsg: int = 25833) -> int:
+def restore_premasked_las(result_las, npz_path, out_las, epsg: int = 25833,
+                          origin=None, result_absolute: bool = True) -> int:
     """Put the masked points back into one method's per-sub-tile result.
 
     ``result_las`` is what the method produced for the masked sub-tile (same point count
@@ -153,6 +156,14 @@ def restore_premasked_las(result_las, npz_path, out_las, epsg: int = 25833) -> i
 
     ``result_las`` may be ``None`` for a sub-tile that was fully masked (no input was
     written for it); the output is then all-masked. Returns the point count written.
+
+    The npz stores x/y in LOCAL tile coordinates (that is what the split's sub-tiles hold)
+    while both SegmentAnyTree and AMS3D georeference their contract LAS, so with
+    ``result_absolute`` (the default) the masked points are shifted by ``origin`` -- taken
+    from the npz when it carries one, else parsed from its file name. Mixing the two spaces
+    does not merely misplace points: at UTM magnitudes with a 0.001 m scale it overflows
+    the LAS int32 X/Y, which is how it was found. ``z`` is absolute in both spaces and is
+    never shifted.
     """
     import laspy
 
@@ -162,6 +173,10 @@ def restore_premasked_las(result_las, npz_path, out_las, epsg: int = 25833) -> i
     mask = np.asarray(pm["mask"], dtype=bool)
     n_total = mask.shape[0]
     n_kept = n_total - int(mask.sum())
+    if origin is None:
+        origin = (tuple(np.asarray(pm["origin"], dtype=np.float64))
+                  if "origin" in pm.files else parse_origin(Path(npz_path).name))
+    shift = np.asarray(origin, dtype=np.float64) if result_absolute else np.zeros(2)
 
     if result_las is None:
         if n_kept:
@@ -185,8 +200,8 @@ def restore_premasked_las(result_las, npz_path, out_las, epsg: int = 25833) -> i
             out[mask] = masked_values
         return out
 
-    x = full(np.asarray(kept.x) if kept else None, 0.0, np.float64, pm["x"])
-    y = full(np.asarray(kept.y) if kept else None, 0.0, np.float64, pm["y"])
+    x = full(np.asarray(kept.x) if kept else None, 0.0, np.float64, pm["x"] + shift[0])
+    y = full(np.asarray(kept.y) if kept else None, 0.0, np.float64, pm["y"] + shift[1])
     z = full(np.asarray(kept.z) if kept else None, 0.0, np.float64, pm["z"])
     classification = full(np.asarray(kept.classification) if kept else None, 0, np.uint8,
                           pm["classification"])
@@ -210,7 +225,8 @@ def restore_premasked_las(result_las, npz_path, out_las, epsg: int = 25833) -> i
     return n_total
 
 
-def restore_premasked_dir(results_dir, premask_dir, out_dir, epsg: int = 25833) -> dict:
+def restore_premasked_dir(results_dir, premask_dir, out_dir, epsg: int = 25833,
+                          result_absolute: bool = True) -> dict:
     """:func:`restore_premasked_las` over a whole sub-tile directory.
 
     Every ``*_premask.npz`` of ``premask_dir`` must be matched by a result LAS of the same
@@ -233,10 +249,12 @@ def restore_premasked_dir(results_dir, premask_dir, out_dir, epsg: int = 25833) 
             if not np.asarray(mask, dtype=bool).all():
                 missing.append(stem)
                 continue
-            restore_premasked_las(None, npz, out_dir / f"{stem}.las", epsg=epsg)
+            restore_premasked_las(None, npz, out_dir / f"{stem}.las", epsg=epsg,
+                                  result_absolute=result_absolute)
             synthesised += 1
         else:
-            restore_premasked_las(result, npz, out_dir / f"{stem}.las", epsg=epsg)
+            restore_premasked_las(result, npz, out_dir / f"{stem}.las", epsg=epsg,
+                                  result_absolute=result_absolute)
             restored += 1
         written += 1
     if missing:

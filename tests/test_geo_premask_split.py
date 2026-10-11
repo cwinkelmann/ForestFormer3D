@@ -51,9 +51,18 @@ def _roof_polygon(path, half=5.0, layer="buildings"):
     return f"{path}:{layer}"
 
 
-def _method_result(path, xyz, classification, tree_id, semantic, score):
-    """What SegmentAnyTree / AMS3D hand back: the contract LAS for the points they saw."""
-    header = result_point_header(25833, [0.01] * 3, np.floor(xyz.min(axis=0)))
+def _method_result(path, xyz, classification, tree_id, semantic, score, absolute=True):
+    """What SegmentAnyTree / AMS3D hand back: the contract LAS for the points they saw.
+
+    Both georeference their output (``x`` around 383,000 for Berlin), while the split's
+    sub-tiles and the premask npz are in local tile coordinates -- the mismatch that
+    overflowed the LAS int32 X/Y on every tile with masked points.
+    """
+    xyz = np.asarray(xyz, dtype=np.float64).copy()
+    if absolute:
+        xyz[:, 0] += ORIGIN[0]
+        xyz[:, 1] += ORIGIN[1]
+    header = result_point_header(25833, [0.001] * 3, np.floor(xyz.min(axis=0)))
     las = laspy.LasData(header)
     las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     las.classification = classification
@@ -127,7 +136,9 @@ def test_restore_puts_the_masked_points_back_in_source_order(tmp_path):
     assert n == 4
     back = laspy.read(str(tmp_path / "restored.las"))
     assert back.header.point_count == 4
-    assert np.abs(np.column_stack([back.x, back.y, back.z]) - SUB_XYZ).max() <= 0.01
+    # the masked points come back in the result's space: local npz + the sub-tile origin
+    expected = SUB_XYZ + np.array([ORIGIN[0], ORIGIN[1], 0.0])
+    assert np.abs(np.column_stack([back.x, back.y, back.z]) - expected).max() <= 0.01
     np.testing.assert_array_equal(back.classification, SUB_CLASS)
     np.testing.assert_array_equal(back.treeID, [-1, -1, 7, 7])
     np.testing.assert_array_equal(back.semantic, [SEMANTIC_MASKED, SEMANTIC_MASKED, 2, 1])
@@ -186,3 +197,33 @@ def test_npz_out_keeps_the_sidecars_out_of_the_input_dir_and_copies_the_manifest
                    tree_id=[3, 3], semantic=[2, 2], score=[0.4, 0.4])
     info = restore_premasked_dir(results, npz, tmp_path / "restored")
     assert info == {"written": 1, "restored": 1, "fully_masked": 0}
+
+
+def test_restore_keeps_local_coordinates_when_the_method_output_is_local(tmp_path):
+    """`result_absolute=False` for a method whose contract LAS is in tile coordinates."""
+    pytest.importorskip("geopandas")
+    sub = tmp_path / "sub"; sub.mkdir()
+    _write_subtile(sub / "t_E381300_N5828300_100m.las")
+    spec = _roof_polygon(tmp_path / "alkis.gpkg")
+    out = tmp_path / "sub-pm"
+    write_premasked_subtiles(sub, out, [spec], buffer_m=0.0)
+    results = tmp_path / "results"; results.mkdir()
+    _method_result(results / "t_E381300_N5828300_100m.las", SUB_XYZ[2:], SUB_CLASS[2:],
+                   tree_id=[7, 7], semantic=[2, 1], score=[0.8, 0.8], absolute=False)
+    restore_premasked_las(results / "t_E381300_N5828300_100m.las",
+                          out / "t_E381300_N5828300_100m_premask.npz",
+                          tmp_path / "local.las", result_absolute=False)
+    back = laspy.read(str(tmp_path / "local.las"))
+    assert np.abs(np.column_stack([back.x, back.y, back.z]) - SUB_XYZ).max() <= 0.01
+
+
+def test_restore_reads_the_origin_from_the_npz(tmp_path):
+    """New npz files carry their origin, so a renamed sidecar still restores correctly."""
+    pytest.importorskip("geopandas")
+    sub = tmp_path / "sub"; sub.mkdir()
+    _write_subtile(sub / "t_E381300_N5828300_100m.las")
+    spec = _roof_polygon(tmp_path / "alkis.gpkg")
+    out = tmp_path / "sub-pm"
+    write_premasked_subtiles(sub, out, [spec], buffer_m=0.0)
+    pm = np.load(out / "t_E381300_N5828300_100m_premask.npz")
+    assert pm["origin"].tolist() == [ORIGIN[0], ORIGIN[1]]
