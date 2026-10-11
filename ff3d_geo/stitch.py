@@ -774,7 +774,7 @@ def _write_tree_table(rows: list[dict], crs, gpkg_path: Path) -> int:
 
 def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
            min_shared: int = 20, runtime_s: float | None = None,
-           epsg: int = EPSG, min_height: float = 0.0) -> dict:
+           epsg: int = EPSG, min_height: float = 0.0, premask_polygons=None) -> dict:
     """Unify sub-tile instances over their halo overlaps and rewrite the km tiles.
 
     ``manifests`` are ``split_manifest.json`` paths, ``results_dirs`` the directories
@@ -791,6 +791,14 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
     of a mosaic concatenate to exactly ``n_trees`` rows and the per-tile reports count
     each tree once. ``stitch.json``'s ``n_cross_km_trees`` says how many trees have
     points in more than one km tile.
+
+    ``premask_polygons`` (the ``--mask-polygons`` specs of the run that produced the
+    sub-tile results) only changes the REPORTS: each tile gets a ``premask`` block naming
+    the polygons and counting its semantic-3 points, instead of the ``buildings`` block
+    that :func:`ff3d_geo.report.build_report` otherwise infers from those points. Without
+    it a mosaic produced with the pre-inference mask reads as though the post-hoc ALKIS
+    building mask had been applied -- the same point count, a different provenance, and
+    the water and jetty points attributed to building footprints they are not inside.
 
     Only the sources that OWN at least one sub-tile are written. ``Mosaic.sources`` also
     holds the km tiles that merely supplied halo points to somebody else's split
@@ -938,8 +946,18 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
         out_gpkg = Path(tile["gpkg"])
         tile["n_trees_in_tile"] = _write_tree_table(
             rows_by_tile[source_stem], crs_by_tile[source_stem], out_gpkg)
+        premask = None
+        if premask_polygons:
+            from ff3d_geo.convert import SEMANTIC_MASKED
+
+            sem = np.asarray(laspy.read(str(out_las)).semantic)
+            n_masked = int((sem == SEMANTIC_MASKED).sum())
+            premask = {"polygons": [str(spec) for spec in premask_polygons],
+                       "n_masked": n_masked, "n_points": int(sem.size),
+                       "applied": "before inference"}
         report = build_report(out_las, out_gpkg, runtime_s=runtime_s,
-                              height_filter=filter_by_tile.get(source_stem))
+                              height_filter=filter_by_tile.get(source_stem),
+                              premask=premask)
         # build_report counts the distinct treeIDs in the LAS, which counts a km-border
         # tree in BOTH of the tiles it reaches into. The tree table is the authority
         # here, so the report reports the trees this tile OWNS (the mosaic's per-tile

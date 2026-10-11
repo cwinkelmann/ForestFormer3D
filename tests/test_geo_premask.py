@@ -202,3 +202,25 @@ def test_masked_only_to_las_needs_a_premask_block(tmp_path):
     las_to_ply(las_path, tmp_path / "t.ply", sidecar)
     with pytest.raises(ValueError, match="no premask block"):
         masked_only_to_las(sidecar, tmp_path / "out.las")
+
+
+def test_report_row_states_only_what_a_mosaic_level_premask_block_holds(tmp_path):
+    """ff3d_geo stitch --premask-polygons knows the specs and the point counts but not how
+    many polygons were clipped per sub-tile, and must not print "0 polygons (buffer 0 m)"."""
+    pytest.importorskip("geopandas")
+    from geo_fixtures import write_two_cone_las
+    from ff3d_geo.report import build_report, report_markdown
+    from ff3d_geo.trees import trees_to_gpkg
+
+    las = tmp_path / "two.las"; write_two_cone_las(las, with_predictions=True)
+    gpkg = tmp_path / "two_trees.gpkg"; trees_to_gpkg(las, gpkg)
+    rep = build_report(las, gpkg, premask={"polygons": ["/x/alkis_water.gpkg:water"],
+                                           "n_masked": 25, "applied": "before inference"})
+    # build_report always measures the share against ITS OWN LAS, whatever the block said
+    assert rep["premask"]["n_points"] == rep["n_points"]
+    share = 100 * 25 / rep["n_points"]
+    md = report_markdown(rep)
+    row = next(line for line in md.splitlines() if "Pre-inference mask" in line)
+    assert f"25 points ({share:.1f} %)" in row and "alkis_water.gpkg:water" in row
+    assert "polygons" not in row.split("kept away")[0]       # nothing invented
+    assert "buffer" not in row

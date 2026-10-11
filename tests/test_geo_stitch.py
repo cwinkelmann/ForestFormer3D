@@ -468,3 +468,25 @@ def test_stitch_refuses_a_result_whose_points_were_reordered(tmp_path):
     las.write(str(res / f"{stem}.las"))
     with pytest.raises(ValueError, match="not in its split sub-tile's point order"):
         stitch([manifest], [res], tmp_path / "out")
+
+
+def test_premask_polygons_put_a_premask_block_in_the_reports(tmp_path):
+    """A mosaic produced with the pre-inference mask must not report a post-hoc buildings
+    block: same semantic-3 points, different provenance, and the water and jetty points
+    are not inside any building footprint."""
+    pytest.importorskip("geopandas")
+    manifest, res, xyz, tree = _mosaic(tmp_path)
+
+    plain = stitch([manifest], [res], tmp_path / "plain")
+    rep_plain = json.loads((tmp_path / "plain" / "3dm_33_381_5829_1_be_report.json").read_text())
+
+    out = tmp_path / "pm"
+    stitch([manifest], [res], out,
+           premask_polygons=["alkis_buildings.gpkg", "alkis_water.gpkg:water"])
+    rep = json.loads((out / "3dm_33_381_5829_1_be_report.json").read_text())
+    assert rep["premask"]["polygons"] == ["alkis_buildings.gpkg", "alkis_water.gpkg:water"]
+    assert rep["premask"]["applied"] == "before inference"
+    assert rep["premask"]["n_points"] == len(xyz)
+    assert "buildings" not in rep                  # not inferred from the semantic-3 points
+    assert plain["n_trees"] == 3                   # the mosaic itself is unchanged
+    assert rep["n_trees"] == rep_plain["n_trees"]

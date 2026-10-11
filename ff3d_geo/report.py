@@ -175,10 +175,25 @@ def report_markdown(report: dict) -> str:
         )
     pm = report.get("premask")
     if pm:
+        # A per-sub-tile block (from the sidecar) knows how many polygons it clipped and
+        # the buffer; a mosaic-level one (ff3d_geo stitch --premask-polygons) knows only
+        # the specs and the point counts, so say only what the block actually holds.
+        n_masked = pm.get("n_masked", 0)
+        frac = pm.get("fraction")
+        if frac is None and pm.get("n_points"):
+            frac = n_masked / pm["n_points"]
+        share = f" ({100 * frac:.1f} %)" if frac is not None else ""
+        where = ""
+        if pm.get("n_polygons") is not None:
+            where = f" inside {pm['n_polygons']} polygons"
+            if pm.get("buffer_m") is not None:
+                where += f" (buffer {pm['buffer_m']} m)"
+        elif pm.get("buffer_m") is not None:
+            where = f" (buffer {pm['buffer_m']} m)"
         lines.append(
-            f"| Pre-inference mask | {pm.get('n_masked', 0)} points ({100 * pm.get('fraction', 0):.1f} %) "
-            f"inside {pm.get('n_polygons', 0)} polygons (buffer {pm.get('buffer_m', 0)} m) kept away from "
-            f"the model (semantic 3): {', '.join(Path(str(p)).name for p in pm.get('polygons', []))} |"
+            f"| Pre-inference mask | {n_masked} points{share}{where} kept away from "
+            f"the model before inference (semantic 3): "
+            f"{', '.join(Path(str(spec)).name for spec in pm.get('polygons', []))} |"
         )
     hf = report.get("height_filter")
     if hf:

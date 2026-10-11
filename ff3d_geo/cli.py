@@ -688,6 +688,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "(searched in the order given)")
     sti.add_argument("--out", required=True, type=Path,
                      help="directory for the km-tile LAS/GeoPackage/report set")
+    sti.add_argument("--premask-polygons", nargs="+", default=None, metavar="GPKG[:LAYER]",
+                     help="the --mask-polygons specs the results were produced with; the "
+                          "per-tile reports then carry a premask block instead of a "
+                          "buildings block inferred from the semantic-3 points")
     sti.add_argument("--iou", type=float, default=0.5,
                      help="halo-overlap IoU an instance pair must reach to be unified "
                           "(default: %(default)s)")
@@ -935,7 +939,8 @@ def main(argv: list[str] | None = None) -> int:
 
         info = stitch(args.manifest, args.results, args.out, iou_threshold=args.iou,
                       min_shared=args.min_shared, runtime_s=args.runtime_s,
-                      epsg=args.epsg, min_height=args.min_height)
+                      epsg=args.epsg, min_height=args.min_height,
+                      premask_polygons=args.premask_polygons)
         if args.min_height > 0:
             print(f"height filter < {args.min_height} m: {info['n_short_removed']} instances dropped")
         for stem, tile in info["tiles"].items():
