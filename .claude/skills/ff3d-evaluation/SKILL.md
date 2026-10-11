@@ -248,7 +248,8 @@ utilisation 21.4 % -> 79.8 % mean (max 100 %), memory 4.2 -> 16.2 GB. That is **
 to end, far more than the 1.4x the single-cylinder profile showed, because a whole tile also
 carries the per-sub-tile Python the batch amortises. FF3D is now faster per point than SAT.
 
-That also ends the oversubscription era: two queues on one card each took 307 s/M on the
+The full cost table, clean and as-run for all three methods, is
+`docs/benchmarks/2026-10-11-throughput.md`. That also ends the oversubscription era: two queues on one card each took 307 s/M on the
 premask re-run, so the card delivered 153 s/M against 143 s/M with one queue -- the second
 queue costs ~7 %. Inference is 96 % of a tile's wall time (62 s las_to_ply including the
 mask, 5 s preprocess, 43 s for the LAS/trees/report tail), so "the GPUs look idle" during a

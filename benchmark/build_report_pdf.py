@@ -51,6 +51,7 @@ MAIN = [
 APPENDIX = [
     "carrot-ff3d",             # the released model reproduced on the H100 host
     "inference-profile",       # where inference time goes, region_step_factor
+    "throughput",              # what one km tile costs per method, clean and as run
     "als-density-eval",        # thinning study: what ALS density the model tolerates
     "tegel-als",               # first real ALS plots (r12, r13)
     "tegel-berlin-2021",       # Berlin ALS 2021 km tiles around Tegel

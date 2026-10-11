@@ -182,6 +182,14 @@ las_to_ply with the pre-inference mask 62 s, preprocess 5 s, **inference 8,321 s
 results_to_las 5 s, trees_to_gpkg 28 s, report 10 s -- inference is 96 % of a tile's wall
 time, so a queue that is not on the GPU is nearly always in its last minute of host work.
 
+**Per-tile cost, measured (`docs/benchmarks/2026-10-11-throughput.md`):** FF3D 143 s per
+million points per card (one queue; 0.70 h for a mean 17.6 M tile), SAT 200 s/M per card
+with **three containers** (its own 3-6 GB leaves room, and three reach 97 % utilisation;
+two cost 245 s/M), AMS3D 58 s/M on four CPU queues of 32 workers, ~16 min per tile. Add
+45-47 min for the ONE mosaic-wide stitch per method, ~45 s per tile for border-check/masks,
+2 min per agreement pair. The 57-tile premask re-runs: FF3D 6 h 49 on 7 cards (2 queues),
+SAT 30 h on one card (3 containers), AMS3D 4 h 47.
+
 ```bash
 tail -5 work_dirs/logs/berlin-gpu5-*.log        # poll every few minutes, NOT in a tight loop
 grep -h 'tile done\|!!!' work_dirs/logs/berlin-gpu*.log
