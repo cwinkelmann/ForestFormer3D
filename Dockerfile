@@ -1,136 +1,204 @@
-FROM pytorch/pytorch:1.13.1-cuda11.6-cudnn8-devel
+# ForestFormer3D runtime image: PyTorch 2.0.1 / CUDA 11.8, extensions compiled for
+# compute 8.0 (A100), 8.6 (A10/A40), 8.9 (L4/L40) and 9.0 (H100).
+# The previous CUDA 11.6 image is kept unchanged as Dockerfile.a100-cu116.
+#
+# Base image: pytorch/pytorch only ships a 2.0.1-cuda11.8-cudnn8-devel tag starting at
+# torch 2.1.0 (the 2.0.1 tags stop at CUDA 11.7). We instead build on the official
+# nvidia/cuda 11.8 devel image (Ubuntu 22.04, Python 3.10) and install the torch 2.0.1
+# / torchvision 0.15.2 wheels for cu118 directly from the PyTorch wheel index.
+#
+# Build (checkout root):  docker build -t forestformer3d:cu118 .
+# Run:  docker run --rm --gpus all --shm-size=64g -v "$PWD":/workspace forestformer3d:cu118 <cmd>
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
-# 更新和安装必要的依赖
-RUN apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/3bf863cc.pub \
-    && apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/machine-learning/repos/ubuntu1804/x86_64/7fa2af80.pub \
-    && apt-get update \
-    && apt-get install -y ffmpeg libsm6 libxext6 git ninja-build libglib2.0-0 libxrender-dev cmake \
-    && apt-get install -y build-essential software-properties-common \
-    && add-apt-repository ppa:ubuntu-toolchain-r/test \
-    && apt-get update \
-    && apt-get install -y gcc-9 g++-9 \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 60 \
-    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 60 \
-    && apt-get install -y python3-dev python3-pip \
-    && apt-get install -y --no-install-recommends libopenblas-dev nvidia-utils-530
+# Override with --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX" if MinkowskiEngine
+# fails to compile for 9.0 (design spec section 8). Naming a single arch that matches the
+# host GPU (e.g. "8.9" for an RTX 4080) cuts the extension builds to a quarter of the work,
+# at the cost of an image that only runs on that arch.
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+# Parallel nvcc invocations in the extension builds below. Each one can take a GB or more,
+# so lower it (--build-arg MAX_JOBS=4) on a host with little free RAM or few cores.
+ARG MAX_JOBS=16
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    MAX_JOBS=${MAX_JOBS} \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
+    PYTHONPATH=/workspace \
+    DEBIAN_FRONTEND=noninteractive
 
-# 设置环境变量以确保 CUDA 工具的可用性
-ENV PATH=/usr/local/cuda/bin:$PATH
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-
-# 安装调试工具
-RUN pip install debugpy
-
-# 安装 OpenMMLab 项目
-RUN pip install --no-deps \
-    mmengine==0.7.3 \
-    mmdet==3.0.0 \
-    mmsegmentation==1.0.0 \
-    git+https://github.com/open-mmlab/mmdetection3d.git@22aaa47fdb53ce1870ff92cb7e3f96ae38d17f61
-RUN pip install mmcv==2.0.0 -f https://download.openmmlab.com/mmcv/dist/cu116/torch1.13.0/index.html --no-deps
-
-# 安装 MinkowskiEngine
+# Compilers and CMake for the CUDA extensions, OpenBLAS for MinkowskiEngine,
+# GL/X runtime libraries for the open3d and opencv wheels, and Python 3.10 itself (this
+# base has no conda environment). Ubuntu 22.04 ships gcc 11, which CUDA 11.8 supports, so
+# no toolchain PPA is needed.
 RUN apt-get update \
-    && apt-get -y install libopenblas-dev nvidia-cuda-dev
-#RUN TORCH_CUDA_ARCH_LIST="6.1 7.0 8.6" \  A10
-#A100
-RUN TORCH_CUDA_ARCH_LIST="8.0" \ 
-    pip install git+https://github.com/NVIDIA/MinkowskiEngine.git@02fc608bea4c0549b0a7b00ca1bf15dee4a0b228 -v --no-deps \
-    --install-option="--blas=openblas" \
-    --install-option="--force_cuda"
+    && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build git rsync \
+        libopenblas-dev \
+        libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
+        python3 python3-dev python3-pip python3-venv python-is-python3 \
+    && rm -rf /var/lib/apt/lists/*
 
-# 手动编译 torch-scatter，确保 CUDA 支持
-RUN git clone https://github.com/rusty1s/pytorch_scatter.git \
-    && cd pytorch_scatter \
-    && git checkout tags/2.0.9 -b v2.0.9 \
-    && TORCH_CUDA_ARCH_LIST="6.1;7.0;8.0" FORCE_CUDA=1 pip install .
+# pip<24.1 so --index-url resolution and the modern torch/torchvision wheels below behave
+# the same way the previous conda-based pip did; Ubuntu's python3-pip is otherwise too old.
+RUN python3 -m pip install --no-cache-dir --upgrade "pip<24.1"
 
-# 单独安装 ScanNet superpoint segmentator
-RUN git clone https://github.com/Karbo123/segmentator.git segmentator \
-    && cd segmentator/csrc \
+# torch 2.0.1 / torchvision 0.15.2 for CUDA 11.8, from the official wheel index (no
+# pytorch/pytorch:2.0.1-cuda11.8-cudnn8-devel tag exists — see the header comment).
+RUN pip install --no-cache-dir torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
+
+# Pins every later build step must see: numpy 1.24 (numba 0.57 / mmdet3d ceiling) and a
+# setuptools that still runs `python setup.py install` for MinkowskiEngine.
+RUN pip install --no-cache-dir numpy==1.24.1 "setuptools==67.8.0" wheel
+
+# OpenMMLab stack. --no-deps: the numeric pins are installed explicitly further down.
+RUN pip install --no-cache-dir --no-deps \
+        mmengine==0.7.3 \
+        mmdet==3.0.0 \
+        mmsegmentation==1.0.0 \
+        git+https://github.com/open-mmlab/mmdetection3d.git@22aaa47fdb53ce1870ff92cb7e3f96ae38d17f61 \
+    && pip install --no-cache-dir --no-deps mmcv==2.0.1 \
+        -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html
+
+# spconv for CUDA 11.8 with its matching cumm build (spconv 2.3.6 needs cumm-cu118 >=0.4.5,<0.5).
+RUN pip install --no-cache-dir spconv-cu118==2.3.6 cumm-cu118==0.4.11 \
+    && python -c "import spconv.pytorch"
+
+# MinkowskiEngine at the commit the paper used, built from a clone: pip 23 removed
+# --install-option, so the flags go to setup.py directly. TORCH_CUDA_ARCH_LIST is read by
+# torch's CUDAExtension; MAX_JOBS (an ARG above, exported into ENV) caps the parallel
+# nvcc invocations.
+RUN git clone https://github.com/NVIDIA/MinkowskiEngine.git /opt/MinkowskiEngine \
+    && cd /opt/MinkowskiEngine \
+    && git checkout 02fc608bea4c0549b0a7b00ca1bf15dee4a0b228 \
+    && python setup.py install --blas=openblas --force_cuda \
+    && cd / && rm -rf /opt/MinkowskiEngine \
+    && python -c "import MinkowskiEngine as ME; print('MinkowskiEngine', ME.__version__)"
+
+# torch-cluster imports scipy at import time; install the pinned scipy before the
+# --no-deps extension builds below (the numeric-pins layer further down re-pins it).
+RUN pip install --no-cache-dir scipy==1.10.1
+
+# torch-scatter 2.1.1 and torch-cluster 1.6.1 from source (tags are unprefixed) for the
+# same arch list. --no-build-isolation so setup.py sees the image's torch.
+RUN git clone --depth 1 --branch 2.1.1 https://github.com/rusty1s/pytorch_scatter.git /opt/pytorch_scatter \
+    && cd /opt/pytorch_scatter \
+    && FORCE_CUDA=1 pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && cd / && rm -rf /opt/pytorch_scatter \
+    && git clone --depth 1 --branch 1.6.1 https://github.com/rusty1s/pytorch_cluster.git /opt/pytorch_cluster \
+    && cd /opt/pytorch_cluster \
+    && FORCE_CUDA=1 pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && cd / && rm -rf /opt/pytorch_cluster \
+    && python -c "import torch_scatter, torch_cluster; print('torch_scatter', torch_scatter.__version__, 'torch_cluster', torch_cluster.__version__)"
+
+# Numeric / IO pins carried over from Dockerfile.a100-cu116 (cu116-specific cumm/spconv and
+# the packages pip already resolved for spconv are dropped).
+RUN pip install --no-cache-dir --no-deps \
+        addict==2.4.0 \
+        yapf==0.33.0 \
+        termcolor==2.3.0 \
+        packaging==23.1 \
+        rich==13.3.5 \
+        opencv-python==4.7.0.72 \
+        pycocotools==2.0.6 \
+        Shapely==1.8.5 \
+        scipy==1.10.1 \
+        terminaltables==3.1.10 \
+        numba==0.57.0 \
+        llvmlite==0.40.0 \
+        pyquaternion==0.9.9 \
+        lyft-dataset-sdk==0.0.8 \
+        nuscenes-devkit==1.1.10 \
+        pandas==2.0.1 \
+        python-dateutil==2.8.2 \
+        matplotlib==3.5.2 \
+        pyparsing==3.0.9 \
+        cycler==0.11.0 \
+        kiwisolver==1.4.4 \
+        scikit-learn==1.2.2 \
+        joblib==1.2.0 \
+        threadpoolctl==3.1.0 \
+        cachetools==5.3.0 \
+        trimesh==3.21.6 \
+        open3d==0.17.0 \
+        plotly==5.18.0 \
+        dash==2.14.2 \
+        plyfile==1.0.2 \
+        flask==3.0.0 \
+        werkzeug==3.0.1 \
+        click==8.1.7 \
+        blinker==1.7.0 \
+        itsdangerous==2.1.2 \
+        importlib_metadata==2.1.2 \
+        zipp==3.17.0 \
+        tensorboard==2.15.1 \
+        tensorboard-data-server==0.7.2 \
+        protobuf \
+        absl-py \
+        future \
+        MarkupSafe==2.0.1 \
+        markdown \
+        grpcio \
+        google-auth-oauthlib \
+        google-auth \
+        requests-oauthlib \
+        oauthlib
+
+# torch-points-kernels 0.7.0 (oneformer3d/panoptic_losses.py imports instance_iou). PyPI has
+# only an sdist, so this is a source build; FORCE_CUDA makes it compile the CUDA kernels.
+RUN FORCE_CUDA=1 pip install --no-cache-dir --no-deps --no-build-isolation torch-points-kernels==0.7.0 \
+    && python -c "from torch_points_kernels import instance_iou; print('torch_points_kernels OK')"
+
+# ScanNet superpoint segmentator (data/ForAINetV2/batch_load_ForAINetV2_data.py imports it).
+# Built under /opt so the /workspace mount cannot hide it; `make install` only symlinks the
+# clone into site-packages, and docker/entrypoint.sh links csrc/build into the mounted
+# checkout because the repo's segmentator/main.py imports .csrc.build.libsegmentator.
+# sysconfig's LIBDIR resolves to /usr/lib/x86_64-linux-gnu on Ubuntu 22.04, where
+# python3-dev installs libpython3.10.so (there is no conda lib dir on this base image).
+RUN git clone https://github.com/Karbo123/segmentator.git /opt/segmentator \
+    && cd /opt/segmentator \
     && git reset --hard 76efe46d03dd27afa78df972b17d07f2c6cfb696 \
-    && mkdir build \
-    && cd build \
+    && mkdir -p csrc/build && cd csrc/build \
     && cmake .. \
-        -DCMAKE_PREFIX_PATH=$(python -c 'import torch;print(torch.utils.cmake_prefix_path())') \
-        -DPYTHON_INCLUDE_DIR=$(python -c "from distutils.sysconfig import get_python_inc; print(get_python_inc())") \
-        -DPYTHON_LIBRARY=$(python -c "import distutils.sysconfig as sysconfig; print(sysconfig.get_config_var('LIBDIR') + '/libpython3.10.so')") \
-        -DCMAKE_INSTALL_PREFIX=$(python -c 'from distutils.sysconfig import get_python_lib; print(get_python_lib())') \
-    && make \
-    && make install
+        -DCMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')" \
+        -DPYTHON_INCLUDE_DIR="$(python -c 'import sysconfig; print(sysconfig.get_paths()["include"])')" \
+        -DPYTHON_LIBRARY="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")')" \
+        -DCMAKE_INSTALL_PREFIX="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && make -j"$(nproc)" \
+    && make install \
+    && test -f /opt/segmentator/csrc/build/libsegmentator.so \
+    && cd / && python -c "import segmentator; print('segmentator OK')"
 
-# 安装剩余的 Python 包
-RUN pip install --no-deps \
-    spconv-cu116==2.3.6 \
-    addict==2.4.0 \
-    yapf==0.33.0 \
-    termcolor==2.3.0 \
-    packaging==23.1 \
-    numpy==1.24.1 \
-    rich==13.3.5 \
-    opencv-python==4.7.0.72 \
-    pycocotools==2.0.6 \
-    Shapely==1.8.5 \
-    scipy==1.10.1 \
-    terminaltables==3.1.10 \
-    numba==0.57.0 \
-    llvmlite==0.40.0 \
-    pccm==0.4.7 \
-    ccimport==0.4.2 \
-    pybind11==2.10.4 \
-    ninja==1.11.1 \
-    lark==1.1.5 \
-    cumm-cu116==0.4.9 \
-    pyquaternion==0.9.9 \
-    lyft-dataset-sdk==0.0.8 \
-    pandas==2.0.1 \
-    python-dateutil==2.8.2 \
-    matplotlib==3.5.2 \
-    pyparsing==3.0.9 \
-    cycler==0.11.0 \
-    kiwisolver==1.4.4 \
-    scikit-learn==1.2.2 \
-    joblib==1.2.0 \
-    threadpoolctl==3.1.0 \
-    cachetools==5.3.0 \
-    nuscenes-devkit==1.1.10 \
-    trimesh==3.21.6 \
-    open3d==0.17.0 \
-    plotly==5.18.0 \
-    dash==2.14.2 \
-    plyfile==1.0.2 \
-    flask==3.0.0 \
-    werkzeug==3.0.1 \
-    click==8.1.7 \
-    blinker==1.7.0 \
-    itsdangerous==2.1.2 \
-    importlib_metadata==2.1.2 \
-    zipp==3.17.0 \
-    tensorboard==2.15.1 \
-    tensorboard-data-server==0.7.2 \
-    protobuf \
-    absl-py \
-    future \
-    MarkupSafe==2.0.1 \
-    markdown \
-    grpcio \
-    google-auth-oauthlib \
-    google-auth \
-    requests-oauthlib \
-    oauthlib
+# Project extras: LAS/LAZ IO for Phase 3, progress bars, tests.
+RUN pip install --no-cache-dir laspy==2.5.3 lazrs==0.5.3 tqdm==4.66.1 pytest==7.4.4
 
-RUN apt-get update && apt-get install -y nvidia-utils-530
+# Pure-Python dependencies the conda-based pytorch base image used to provide implicitly
+# (found by importing every module in a probe of this image); pinned, no transitive pulls.
+RUN pip install --no-cache-dir --no-deps \
+        pyyaml==6.0.1 \
+        six==1.16.0 \
+        regex==2023.10.3 \
+        scikit-image==0.19.3 \
+        imageio==2.31.6 \
+        tifffile==2023.7.10 \
+        PyWavelets==1.4.1 \
+        pytz==2023.3 \
+        tzdata==2023.3 \
+        fonttools==4.42.1 \
+        markdown-it-py==3.0.0 \
+        mdurl==0.1.2 \
+        pygments==2.16.1 \
+        tenacity==8.2.3 \
+        prettytable==3.9.0 \
+        wcwidth==0.2.8 \
+        configargparse==1.7
 
-# 设置 PYTHONPATH 环境变量
-ENV PYTHONPATH=/workspace
+# Everything importable together (mmdet3d checks the mmcv/mmdet/mmengine version ranges).
+RUN python -c "import yaml, six, regex, skimage, pandas, torchvision, mmcv, mmengine, mmdet, mmdet3d, numpy, spconv.pytorch, MinkowskiEngine, torch_scatter, torch_cluster, segmentator, laspy, plyfile, open3d, tqdm; from torch_points_kernels import instance_iou; print('mmcv', mmcv.__version__, 'mmengine', mmengine.__version__, 'mmdet', mmdet.__version__, 'mmdet3d', mmdet3d.__version__, 'numpy', numpy.__version__)"
 
-# 保持容器运行
-CMD ["bash", "-c", "while true; do sleep 1000; done"]
-
-RUN pip install --no-deps --no-cache-dir\
-    torch-points-kernels==0.7.0
-
-RUN pip uninstall torch-cluster
-
-RUN pip install --no-deps --no-cache-dir\
-    torch-cluster
+WORKDIR /workspace
+# The checkout is normally mounted over /workspace; the copy only makes the image
+# self-contained when run without a mount.
+COPY docker/entrypoint.sh /workspace/docker/entrypoint.sh
+RUN chmod +x /workspace/docker/entrypoint.sh
+ENTRYPOINT ["/workspace/docker/entrypoint.sh"]
