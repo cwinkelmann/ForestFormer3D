@@ -190,6 +190,41 @@ ground-vs-non-ground agreement, the same way it excludes 255.
 Numbers for the Berlin tiles: `docs/benchmarks/2026-09-22-tegel-berlin-2021.md`,
 section "Buildings".
 
+## 4b. Terrain: per-tile DTM/DSM/CHM, and one merged surface
+
+Both stages read only the ALS's own **class 2 (ground)** -- never the model's predicted
+`ground` -- so the terrain stays an independent reference.
+
+```bash
+# per km tile -> ALS_Data/berlin_terrain/<tile>/{<tile>_dtm_1m,_dsm_50cm,_chm_50cm}.tif
+.venv-cpu/bin/python benchmark/export_terrain.py --las <tile>.las --out <dir>
+
+# the whole mosaic -> ALS_Data/berlin_terrain_mosaic/
+.venv-cpu/bin/python benchmark/terrain_mosaic.py \
+    --terrain /Volumes/2TB/winmol/ALS_Data/berlin_terrain \
+    --out /Volumes/2TB/winmol/ALS_Data/berlin_terrain_mosaic
+```
+
+`terrain_mosaic.py` writes `berlin_dtm_1m.tif` (one COG, 11,000 x 7,000 cells, 121 MB,
+overviews), `berlin_hillshade_1m.tif` (`gdaldem`, az 315 / alt 45, `-compute_edges`) and
+`berlin_mosaic.json`. 2 min 48 for 57 tiles on the Mac; needs the GDAL CLI
+(`--gdal-bin`, default `/opt/local/bin`) and `rasterio`. `--skip-seams` merges without
+reading the borders back.
+
+**Read the `seams` block before using the merged DTM.** `export_terrain` nearest-fills each
+tile's ground holes *inside that tile*, so a hole on a km border is filled from opposite
+directions in the two neighbours. Over the 57 Berlin tiles: 93 shared borders, median mean
+|dz| 6 cm, but **6 seams step by 0.31-0.80 m** because 42 % of the cells in those border
+strips hold no class-2 return at all (closed canopy in Grunewald). A hillshade shows such a
+step as a bright line on the km grid, so check `n_over_threshold` before publishing a
+figure. Filling after the merge instead of before would remove it by construction and needs
+one more min-z pass over the LAS tiles -- not done yet.
+
+Both products are registered as QGIS layers by `benchmark/make_qgis_project.py` (terrain
+group, `dtm_mosaic` and `hillshade`, the latter grey not viridis). The per-tile
+`derived/terrain_{dtm,dsm,chm}.vrt` stay for tile-level work -- but a VRT is 57 absolute
+paths, so hand out the COG, never the VRT.
+
 ## 5. Visual report figures
 
 ```bash

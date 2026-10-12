@@ -187,3 +187,51 @@ mosaic-wide `stitch.json`. The 20 m halo split of each km tile, the mosaic-wide 
 seam metrics, the instance agreement, the terrain rasters (DTM/DSM/CHM from the ALS), the
 Potree site and the QGIS project are all derived here and documented in the chapters that
 follow. Nothing was obtained from the NAS mirror or any third-party processed product.
+
+### 6a. The terrain model
+
+Two stages, both from the ALS points alone -- the laser's own **class 2 (ground)**, never
+the model's predicted `ground` semantic, so the terrain stays an independent reference
+rather than a product of the thing under test.
+
+**Per km tile** (`benchmark/export_terrain.py`, in `ALS_Data/berlin_terrain/<tile>/`):
+
+| product | cell | rule |
+| :--- | ---: | :--- |
+| `<tile>_dtm_1m.tif` | 1.0 m | lowest z of the class-2 points in the cell, empty cells nearest-filled |
+| `<tile>_dsm_50cm.tif` | 0.5 m | highest z of every point except class 7 (noise) |
+| `<tile>_chm_50cm.tif` | 0.5 m | DSM minus the DTM sampled at the DSM cells, clipped at 0 |
+
+float32, nodata -9999, EPSG:25833, LZW, tiled. All 57 tiles carry all three. The CHM here
+is the surface the reports' local-maxima baseline is measured on, so the two cannot drift.
+
+**Mosaic-wide** (`benchmark/terrain_mosaic.py`, in `ALS_Data/berlin_terrain_mosaic/`):
+
+```bash
+.venv-cpu/bin/python benchmark/terrain_mosaic.py \
+    --terrain <ALS_Data>/berlin_terrain --out <ALS_Data>/berlin_terrain_mosaic
+```
+
+`berlin_dtm_1m.tif` merges the 57 tile DTMs into **11,000 x 7,000 cells** (374000-385000 E,
+5825000-5832000 N), 121 MB as a Cloud Optimized GeoTIFF with overviews, elevations
+**28.6 to 69.2 m**; 26.9 % of that bounding box is nodata because the 57 tiles do not fill
+it. `berlin_hillshade_1m.tif` is `gdaldem hillshade` on it (az 315, alt 45, z 1,
+`-compute_edges`), 41 MB. Both are single files, unlike the per-tile `terrain_*.vrt` that
+`benchmark/make_qgis_project.py` builds for QGIS -- a VRT is 57 absolute paths and dies when
+the volume is unmounted. The merge is a paste: `ff3d_geo.grid.grid_extent` floors every
+tile's origin to a whole metre, so all 57 share one lattice and nothing is resampled;
+`mosaic_plan` refuses the job if that stops holding. 2 min 48 on the Mac.
+
+**What the seam check found.** Each tile's ground holes were nearest-filled *inside that
+tile*, so the script also compares the two cell columns either side of every shared border
+(93 of them). Median mean |dz| across a seam is **6 cm** and 87 of 93 are under 25 cm, but
+**6 seams carry a visible step**, the worst 0.80 m mean and 3.2 m at p99. The cause is
+measured, not guessed: in the 1 m strip either side of that worst border (Grunewald), only
+547 and 548 of 941 cells hold **any** class-2 return at all -- the canopy stops the laser --
+so ~42 % of the border cells were invented by `nearest_fill` on each side independently,
+from opposite directions. 369 cells differ by more than 0.5 m, and none of them lie on
+ALKIS water or a building footprint. Hillshade is the most unforgiving renderer for this:
+a 20 cm step reads as a bright line along the km grid. The fix is to fill **after** merging
+rather than before, which needs one more min-z pass over the 57 LAS tiles; until then the
+per-seam numbers are in `berlin_mosaic.json` (`seams`, `seam_detail`) and the 6 affected
+borders are named there.

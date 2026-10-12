@@ -244,6 +244,20 @@ def phase_derived(als: Path, out: Path, gdal_bin: Path) -> dict:
                 manifest["terrain"][key] = {"name": label, "vrt": v.name, "tiles": [f.parent.name for f in files]}
                 print(f"  terrain {label}: {len(files)} tiles")
 
+    mosaic = als / "berlin_terrain_mosaic"
+    mjson = mosaic / "berlin_mosaic.json"
+    if mjson.exists():
+        # Single merged files, not per-tile VRTs: benchmark/terrain_mosaic.py writes them,
+        # and its JSON already lists which tiles went in (for the layer extent).
+        m = json.loads(mjson.read_text())
+        for key, fname, label in (("dtm_mosaic", "berlin_dtm_1m.tif", "DTM 1 m merged"),
+                                  ("hillshade", "berlin_hillshade_1m.tif", "Hillshade 1 m")):
+            f = mosaic / fname
+            if f.exists():
+                manifest["terrain"][key] = {"name": label, "path": str(f.relative_to(als)),
+                                            "tiles": m["tiles"]}
+                print(f"  terrain {label}: {f.stat().st_size / 1e6:.0f} MB")
+
     b = als / "berlin_buildings" / "alkis_buildings.gpkg"
     if b.exists():
         manifest["buildings"] = {"path": str(b.relative_to(als)),
@@ -301,6 +315,14 @@ def renderer_pseudocolor(vmin: float, vmax: float, colors: list[str], label_fmt=
             f"<colorrampshader colorRampType=\"INTERPOLATED\" classificationMode=\"1\" clip=\"0\" "
             f"minimumValue=\"{vmin}\" maximumValue=\"{vmax}\" labelPrecision=\"0\">{items}"
             f"</colorrampshader></rastershader></rasterrenderer>")
+
+
+def renderer_gray(vmin: float = 0, vmax: float = 255) -> str:
+    """Single-band grey, for shaded relief (which is a brightness, not a measurement)."""
+    return (f"<rasterrenderer type=\"singlebandgray\" band=\"1\" opacity=\"1\" alphaBand=\"-1\" "
+            f"nodataColor=\"\" gradient=\"BlackToWhite\"><rasterTransparency/>{minmax_xml()}"
+            f"<contrastEnhancement><minValue>{vmin}</minValue><maxValue>{vmax}</maxValue>"
+            f"<algorithm>StretchToMinimumMaximum</algorithm></contrastEnhancement></rasterrenderer>")
 
 
 def renderer_paletted(entries) -> str:
@@ -645,10 +667,14 @@ def phase_project(als: Path, out: Path, manifest: dict, live_wfs: bool = False,
             for key, t in manifest["terrain"].items():
                 b = union_bounds(t["tiles"]); l = wgs84(b)
                 lid = layer_id(f"terrain_{key}")
-                vmin, vmax = (0, 40) if key == "chm" else (30, 70)
-                T.layer(raster_layer_xml(lid, f"{t['name']} ({len(t['tiles'])} tiles)", rel(derived / t["vrt"]),
-                                         renderer_pseudocolor(vmin, vmax, VIRIDIS, "{:.0f} m"), b, l, wkt),
-                        lid, f"{t['name']} ({len(t['tiles'])} tiles)", rel(derived / t["vrt"]), "gdal", False)
+                src = rel(als / t["path"]) if "path" in t else rel(derived / t["vrt"])
+                nm = f"{t['name']} ({len(t['tiles'])} tiles)"
+                if key == "hillshade":
+                    r = renderer_gray()
+                else:
+                    vmin, vmax = (0, 40) if key == "chm" else (30, 70)
+                    r = renderer_pseudocolor(vmin, vmax, VIRIDIS, "{:.0f} m")
+                T.layer(raster_layer_xml(lid, nm, src, r, b, l, wkt), lid, nm, src, "gdal", False)
         if manifest["terrain"]:
             T.group("Terrain (from the ALS, where exported)", False, False, body)
 

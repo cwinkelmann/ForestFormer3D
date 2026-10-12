@@ -27,6 +27,7 @@ from make_qgis_project import (  # noqa: E402
     layer_id,
     raster_layer_xml,
     renderer_categorized,
+    renderer_gray,
     renderer_multiband,
     renderer_paletted,
     renderer_pseudocolor,
@@ -74,6 +75,10 @@ def test_renderers_are_well_formed():
     assert [e.get("value") for e in pal] == ["0", "1", "2", "3"]
     mb = _parse(renderer_multiband(4, 1, 2))
     assert (mb.get("redBand"), mb.get("greenBand"), mb.get("blueBand")) == ("4", "1", "2")
+    # the hillshade is a brightness, not a measurement: grey, stretched 0..255
+    gr = _parse(renderer_gray())
+    assert gr.get("type") == "singlebandgray" and gr.get("gradient") == "BlackToWhite"
+    assert gr.findtext(".//minValue") == "0" and gr.findtext(".//maxValue") == "255"
 
 
 def test_vector_symbols_carry_the_data_defined_size():
