@@ -105,6 +105,18 @@ RUN git clone --depth 1 --branch 2.1.1 https://github.com/rusty1s/pytorch_scatte
 
 # Numeric / IO pins carried over from Dockerfile.a100-cu116 (cu116-specific cumm/spconv and
 # the packages pip already resolved for spconv are dropped).
+#
+# Gone since 2026-10-20: open3d and the eight packages it dragged in (pyquaternion and
+# configargparse, which it requires, and plotly/dash/flask/werkzeug/itsdangerous/blinker,
+# because open3d/visualization/draw_plotly.py imports plotly and dash at import time).
+# Nothing here imported open3d except one line of a dead ScanNet class; see
+# tests/test_import_hygiene.py. pyquaternion stays because mmdet3d needs it.
+#
+# What CANNOT go, measured rather than assumed: nuscenes-devkit, lyft-dataset-sdk,
+# pyquaternion and trimesh. `import mmdet3d` is not lazy -- its metrics package imports
+# `lyft_dataset_sdk.eval.detection.mAP_evaluation` at module scope, which pulls the
+# nuScenes SDK and pyquaternion with it. Uninstalling any of them breaks `import mmdet3d`
+# and collection of tests/gpu. They are dead weight for this project and still mandatory.
 RUN pip install --no-cache-dir --no-deps \
         addict==2.4.0 \
         yapf==0.33.0 \
@@ -132,15 +144,8 @@ RUN pip install --no-cache-dir --no-deps \
         threadpoolctl==3.1.0 \
         cachetools==5.3.0 \
         trimesh==3.21.6 \
-        open3d==0.17.0 \
-        plotly==5.18.0 \
-        dash==2.14.2 \
         plyfile==1.0.2 \
-        flask==3.0.0 \
-        werkzeug==3.0.1 \
         click==8.1.7 \
-        blinker==1.7.0 \
-        itsdangerous==2.1.2 \
         importlib_metadata==2.1.2 \
         zipp==3.17.0 \
         tensorboard==2.15.1 \
@@ -217,8 +222,7 @@ RUN pip install --no-cache-dir --no-deps \
         pygments==2.16.1 \
         tenacity==8.2.3 \
         prettytable==3.9.0 \
-        wcwidth==0.2.8 \
-        configargparse==1.7
+        wcwidth==0.2.8
 
 # Everything importable together (mmdet3d checks the mmcv/mmdet/mmengine version ranges),
 # both halves in one interpreter: if the geo wheels had been built against numpy 2 this is
