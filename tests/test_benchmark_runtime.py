@@ -132,3 +132,33 @@ def test_the_container_is_told_that_it_is_a_container_and_which_card_it_got(tmp_
     joined = " ".join(argv)
     assert "-e FF3D_IN_CONTAINER=1" in joined, argv
     assert "-e FF3D_GPU=5" in joined, argv
+
+
+def test_no_script_asks_for_every_gpu():
+    """`--gpus all` reserves every card on a shared host, and podman rejects it outright.
+
+    `docker/smoke.sh` used to pass it. Comments may still discuss it -- `common.sh` and
+    `wait_idle.sh` explain why not to -- so only executable lines count.
+    """
+    offenders = []
+    for path in sorted([*(REPO / "benchmark").glob("*.sh"), *(REPO / "docker").glob("*.sh")]):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "--gpus all" in stripped:
+                offenders.append(f"{path.name}:{i}: {stripped}")
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_smoke_runs_through_ff3d_docker_so_it_follows_the_runtime(tmp_path):
+    """docker/smoke.sh must honour FF3D_DOCKER, or it cannot run on a podman host."""
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FF3D_")}
+    env.update(FF3D_DRY_RUN="1", FF3D_DOCKER="podman", FF3D_GPU="1")
+    proc = subprocess.run(["bash", str(REPO / "docker" / "smoke.sh")],
+                          capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert "podman run" in out, out
+    assert "nvidia.com/gpu=1" in out, out
+    assert "tests/gpu/test_smoke.py" in out, out

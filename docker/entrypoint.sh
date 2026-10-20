@@ -44,7 +44,7 @@ fi
 
 python - <<'EOF'
 import torch
-assert torch.cuda.is_available(), "CUDA is not available in the container (run with --gpus all)"
+assert torch.cuda.is_available(), "CUDA is not available in the container (docker: --gpus device=N, podman: --device nvidia.com/gpu=N)"
 from torch_points_kernels import instance_iou  # noqa: F401
 import spconv.pytorch  # noqa: F401
 import MinkowskiEngine  # noqa: F401
