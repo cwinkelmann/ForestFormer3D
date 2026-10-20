@@ -66,7 +66,10 @@ def test_in_image_falls_back_to_podmans_marker_too(monkeypatch, tmp_path):
 
 
 def test_in_image_falls_back_to_the_dockerenv_marker(monkeypatch, tmp_path):
+    """Both markers have to be redirected: this test also runs INSIDE the image, where
+    podman's /run/.containerenv really exists and would answer True on its own."""
     monkeypatch.delenv("FF3D_IN_CONTAINER", raising=False)
+    monkeypatch.setattr(cli, "_CONTAINERENV", tmp_path / "no-containerenv")
     marker = tmp_path / "dockerenv"
     monkeypatch.setattr(cli, "_DOCKERENV", marker)
     assert _in_image() is False
@@ -114,3 +117,39 @@ def test_on_the_host_the_two_steps_still_go_through_ff3d_docker(monkeypatch, rep
         assert step.argv[2].startswith("source benchmark/common.sh; ff3d_docker ")
         assert step.env["FF3D_GPU"] == "3"
         assert "/workspace/work_dirs/out" in step.argv[2]
+
+
+def test_a_card_the_container_does_not_have_is_refused(monkeypatch, repo, tmp_path):
+    """`--gpu` cannot be honoured inside the container, so a mismatch must not be silent.
+
+    ff3d_docker starts the container for ONE card and renumbers it to device 0 inside
+    (measured on olive: --gpus device=1 -> /dev/nvidia0, nvidia-smi index 0,
+    NVIDIA_VISIBLE_DEVICES=void). So `ff3d_docker bash benchmark/berlin_run_gpu.sh 5 ...`
+    without FF3D_GPU=5 used to run on card 0 while every log line said 5 -- and four
+    workers launched that way for cards 4..7 all shared card 0. common.sh now carries
+    FF3D_GPU in, which is the only thing here that can be compared against.
+    """
+    monkeypatch.setenv("FF3D_IN_CONTAINER", "1")
+    monkeypatch.setenv("FF3D_GPU", "0")
+    with pytest.raises(ValueError) as exc:
+        plan_run(tmp_path / f"{STEM}.las", DEFAULT_CHECKPOINT, repo / "work_dirs/out",
+                 repo=repo, gpu="5")
+    assert "5" in str(exc.value) and "0" in str(exc.value)
+    assert "FF3D_GPU" in str(exc.value)
+
+
+def test_the_card_the_container_does_have_is_accepted(monkeypatch, repo, tmp_path):
+    monkeypatch.setenv("FF3D_IN_CONTAINER", "1")
+    monkeypatch.setenv("FF3D_GPU", "5")
+    steps = plan_run(tmp_path / f"{STEM}.las", DEFAULT_CHECKPOINT, repo / "work_dirs/out",
+                     repo=repo, gpu="5")
+    assert [s.name for s in _docker_steps(steps)] == ["preprocess", "inference"]
+
+
+def test_without_ff3d_gpu_there_is_nothing_to_check(monkeypatch, repo, tmp_path):
+    """A hand-rolled `docker run` tells the container nothing; that must still work."""
+    monkeypatch.setenv("FF3D_IN_CONTAINER", "1")
+    monkeypatch.delenv("FF3D_GPU", raising=False)
+    steps = plan_run(tmp_path / f"{STEM}.las", DEFAULT_CHECKPOINT, repo / "work_dirs/out",
+                     repo=repo, gpu="5")
+    assert [s.name for s in _docker_steps(steps)] == ["preprocess", "inference"]

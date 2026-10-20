@@ -215,6 +215,31 @@ def _run_per_tile(what: str, jobs: list[tuple[str, Callable[[], object]]]) -> No
         ) from failed[0][1]
 
 
+def _reject_a_card_this_container_does_not_have(gpu) -> None:
+    """Refuse a ``--gpu`` the container cannot possibly honour.
+
+    Inside the image the card was chosen by whoever started the container, and it is
+    renumbered: ``--gpus device=5`` arrives as ``/dev/nvidia0``, ``nvidia-smi`` index 0,
+    ``NVIDIA_VISIBLE_DEVICES=void`` (measured on olive, 2026-10-20). So an index passed in
+    here cannot select anything, and taking it silently is how
+    ``ff3d_docker bash benchmark/berlin_run_gpu.sh 5 <tile>`` came to run on card 0 with
+    every log line claiming card 5 -- four workers started that way for cards 4..7 would
+    all have shared card 0.
+
+    ``benchmark/common.sh`` passes ``FF3D_GPU`` into the container for exactly this check.
+    Without it (a hand-written ``docker run``) there is nothing to compare, and the request
+    is accepted: the container has one card either way.
+    """
+    told = os.environ.get("FF3D_GPU")
+    if told is None or str(gpu).strip() == told.strip():
+        return
+    raise ValueError(
+        f"--gpu {gpu} cannot be honoured: this container was started for GPU "
+        f"{told.strip()} (FF3D_GPU), and the card it holds is device 0 inside whatever "
+        f"its number is outside. Start the container for the card you want "
+        f"(FF3D_GPU={gpu} ff3d_docker ...) or ask for --gpu {told.strip()}."
+    )
+
 def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
     """A step that runs ``inner`` in the image: via ``ff3d_docker``, or in place.
 
@@ -226,6 +251,7 @@ def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
         # Already in the image: run the command in place. No FF3D_GPU either -- the card
         # was pinned by the `docker run --gpus` that started this container, and the
         # entrypoint has already patched transforms_3d.py into mmdet3d.
+        _reject_a_card_this_container_does_not_have(gpu)
         return Step(name=name, argv=["bash", "-c", inner], cwd=repo,
                     env={"PYTHONPATH": str(repo)})
     return Step(
