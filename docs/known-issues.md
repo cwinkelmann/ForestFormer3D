@@ -150,6 +150,46 @@ sampling, collate, nearest-neighbour and mask post-processing at 7-17 % each -- 
 hotspot for faster kernels to attack. `torch.compile` cannot reach the sparse convolutions,
 which are custom CUDA in spconv and MinkowskiEngine.
 
+### Replacing MinkowskiEngine was evaluated and rejected (2026-10-20)
+
+ME is used for voxelisation and the point->voxel inverse mapping only; the convolutions are
+spconv. Two drop-in replacements were implemented and checked against ME inside the image
+on a batch of random point sets, correctness judged the way the model uses it
+(`features[inverse_mapping]` per point). Both are **exactly equivalent** -- same voxel
+count, same coordinates, same `spatial_shape`, per-point features agreeing to 7.6e-06,
+which is float summation order rather than disagreement. Both are **slower on CPU**:
+
+| CPU, in the image | 1x193k (a sub-tile) | 8x80k (region_batch=8) | 1x640k (max_points) |
+|---|---|---|---|
+| MinkowskiEngine | 547 ms | 1651 ms | 633 ms |
+| packed-int64 `torch.unique` + `scatter_mean` | 650 ms | 2362 ms | 1571 ms |
+| spconv `PointToVoxel.generate_voxel_with_id` | 603 ms | 3801 ms | 1450 ms |
+
+spconv loses badly at the batch shape because `PointToVoxel` is per-sample, so
+`region_batch=8` builds eight hash maps. `torch.unique(coords, dim=0)` is worse again --
+it sorts 640k x 4 rows lexicographically; packing the batch index and the three coordinates
+into one int64 is what makes the torch variant competitive at all.
+
+The maintained fork (`alpsaur/MinkowskiEngine`) does not help: its wheels are built for
+torch 2.9.1+cu128 on glibc >= 2.38, and a source build needs torch >= 2.7. This image is
+Ubuntu 22.04 (glibc 2.35) with torch 2.0.1. `torchsparse` 2.0.0b0 does build against our
+torch, but it replaces the spconv *backbone* rather than the groupby, which would cost
+checkpoint compatibility for a claimed 1.25x on part of the time.
+
+### And mmcv stays, because training needs it (2026-10-20)
+
+Our own code imports exactly one thing from mmcv -- `BaseTransform` in
+`oneformer3d/transforms_3d.py`, a pure-Python base class. But `import oneformer3d` pulls
+**129** mmcv submodules including all of `mmcv.ops` and the compiled `mmcv._ext`, eagerly,
+via mmdet3d; and mmdet3d 1.1.0 declares `mmcv >= 2.0.0rc4, < 2.1.0`. That version box, not
+MinkowskiEngine, is what actually pins the stack.
+
+An inference-only path that bypassed mmdet3d was considered and rejected on the user's
+reasoning: **training still needs mmcv** (`tools/train.py`, `dist_train.sh`,
+`UnifiedSegMetric` validation, the registry-driven configs, the planned WINMOL
+retraining), so bypassing it for inference would mean two model-construction paths whose
+drift stays silent until a retrained checkpoint fails to load. One old box beats two paths.
+
 Two cheaper leads were noted at the same time and are NOT done:
 
 - torch logs `UserWarning: Converting mask without torch.bool dtype to bool; this will
