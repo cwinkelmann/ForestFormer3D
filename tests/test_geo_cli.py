@@ -44,6 +44,18 @@ from geo_fixtures import two_cone_points, write_two_cone_las  # noqa: E402
 STEM = "r12_tegel_E381300_N5828300_100m"
 
 
+@pytest.fixture(autouse=True)
+def _as_if_on_the_host(monkeypatch):
+    """Pin the HOST deployment for this module: the two GPU steps go through ff3d_docker.
+
+    These tests assert the docker-wrapped commands and the /workspace paths, which only
+    hold outside the image. The suite also runs INSIDE the image, where ff3d_geo detects
+    that and runs those steps in place (tests/test_geo_in_container.py covers that mode),
+    so without this the same assertions would fail there.
+    """
+    monkeypatch.setenv("FF3D_IN_CONTAINER", "0")
+
+
 @pytest.fixture
 def fake_repo(tmp_path):
     repo = tmp_path / "repo"

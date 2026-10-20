@@ -11,11 +11,44 @@ complements the runbooks (`docs/benchmarks/RUNBOOK-carrot.md` for the benchmark,
 |---|---|---|
 | GPU server carrot (`ssh carrot`, 8x H100) | every GPU step, the batch runs | Docker image `forestformer3d:cu118` (CUDA 11.8, torch 2.0.1, mmdet3d, MinkowskiEngine, spconv) started through `benchmark/common.sh`'s `ff3d_docker` with `FF3D_GPU=<n>`; checkout `/raid/cwinkelmann/ForestFormer3D`; host venv `/raid/cwinkelmann/ff3d-geo-venv` for the pure-Python `ff3d_geo` package |
 | Mac (no GPU) | conversion, merging, masks, reports, tests | `.venv-cpu` (numpy, laspy, shapely, geopandas, pyogrio, rasterio); no torch |
-| Lenovo T14 (RTX 4080 SUPER 16 GB) | optional second GPU worker | same image built from the `Dockerfile`; venv `~/ff3d-geo-venv`; setup started, build paused at step 12 of 19 |
+| Lenovo T14 (RTX 4080 SUPER, 15.6 GiB usable) | second GPU worker | same image, built there 2026-10-20 (`e6f60b96`, 18 GB, 40 min with `TORCH_CUDA_ARCH_LIST=8.9 MAX_JOBS=6`); geo venv `~/ff3d-geo-venv`; checkout `~/ForestFormer3D`. `region_batch=8` fits (7.3 GB peak measured, against 1.9 GB at `region_batch=1`), so no quality knob has to be lowered: 51.7 s per 100 m sub-tile against 36 s on an idle H100 |
 | olive (`ssh olive`, 2x RTX A6000 48 GB) | second GPU worker, booked/preemptible shares | same image, built there 2026-10-20 (`866a762f`); geo venv `~/ff3d-geo-venv`; checkout `~/ForestFormer3D` is a COPY, not a clone. See `.claude/skills/ff3d-carrot/SKILL.md` section 11 |
 
 The GPU steps never import `ff3d_geo`, and `ff3d_geo` never imports torch: the two
 halves talk through files only.
+
+## One container for the whole run
+
+The image carries the geo stack as well (shapely, pyproj, geopandas, rasterio; commit
+`6d4cd49`), so the host venv is optional: the whole pipeline can run inside one container.
+
+```bash
+source benchmark/common.sh
+FF3D_GPU=0 ff3d_docker bash benchmark/berlin_run_gpu.sh 0 3dm_33_381_5828_1_be
+FF3D_GPU=0 ff3d_docker bash benchmark/berlin_stitch.sh   3dm_33_381_5828_1_be
+```
+
+Inside the image, `ff3d_geo` runs its two GPU steps **in place** instead of wrapping them in
+`docker run` -- there is no docker inside the container to call. It detects this from
+`FF3D_IN_CONTAINER`, falling back to Docker's own `/.dockerenv` marker; `FF3D_IN_CONTAINER=0`
+forces the host behaviour. The two Berlin wrappers make the same check and skip activating a
+venv that the image does not have. Paths follow suit: on the host they are rewritten to the
+`/workspace` mount, inside the image they are used as they are, so a mount point other than
+`/workspace` also works.
+
+Which deployment to use is now a choice rather than a constraint:
+
+| | host venv + container | one container |
+|---|---|---|
+| Needs a geo venv per host | yes | no |
+| Steps that cross a process boundary | 2 of 8 | 0 |
+| numpy for the geo half | the venv's (2.4-2.5) | the image's 1.24.1 |
+| `docker run` calls per km tile | 2 | 1 |
+
+The numpy row is the reason the host venv still exists: the image's OpenMMLab pins hold numpy
+at 1.24.1, while the three host venvs run 2.4-2.5. Anything in `ff3d_geo` that depends on
+newer numpy, pyproj or geopandas behaviour must therefore be exercised in BOTH, which
+`tests/test_geo_in_container.py` and the CPU suite inside the image are for.
 
 Driving the two halves from outside the repo: `demo/ff3d_steps.py` in
 `cwinkelmann/hnee_slurm_deployment` (`1e20a8b`) defines the five per-sub-tile steps as a

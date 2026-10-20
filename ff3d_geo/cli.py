@@ -126,6 +126,37 @@ def _shell_literal(value: str) -> str:
     return value
 
 
+#: Docker writes this file into every container it starts; it is the fallback marker for
+#: "we are already inside the image" when FF3D_IN_CONTAINER says nothing. A module constant
+#: so a test can point it at a file it controls.
+_DOCKERENV = Path("/.dockerenv")
+
+
+def _in_image() -> bool:
+    """True when this process is ALREADY inside ``forestformer3d:cu118``.
+
+    The image carries both halves of the pipeline (the OpenMMLab stack and the geo stack),
+    so the whole run can happen in one container -- and then the two GPU steps must NOT
+    wrap themselves in ``docker run``, because there is no docker inside the container.
+    ``FF3D_IN_CONTAINER=1`` says so explicitly; otherwise Docker's own marker file answers
+    it. Set ``FF3D_IN_CONTAINER=0`` to force the host behaviour (what the tests do).
+    """
+    flag = os.environ.get("FF3D_IN_CONTAINER")
+    if flag is not None:
+        return flag.strip().lower() not in ("", "0", "false", "no")
+    return _DOCKERENV.exists()
+
+
+def _mount_root(repo: Path) -> PurePosixPath:
+    """Where the container sees ``repo``: its own path when we are already inside it.
+
+    On the host ``ff3d_docker`` bind-mounts the checkout at ``/workspace``, so paths handed
+    to the container must be rewritten. Inside the image the files are simply where they
+    are -- and assuming ``/workspace`` would be wrong for any other mount point.
+    """
+    return PurePosixPath(repo.as_posix()) if _in_image() else CONTAINER_ROOT
+
+
 def _under_repo(path: Path, repo: Path, what: str) -> Path:
     """Resolve ``path`` (relative ones against ``repo``) and require it inside ``repo``."""
     resolved = Path(path)
@@ -147,9 +178,9 @@ def _repo_relative(path: Path, repo: Path, what: str) -> str:
 
 
 def _container_path(path: Path, repo: Path, what: str) -> str:
-    """Absolute ``/workspace/...`` path of a host path under ``repo``."""
+    """Absolute path of ``path`` as the container addresses it (see :func:`_mount_root`)."""
     rel = _under_repo(path, repo, what).relative_to(repo)
-    return _shell_literal((CONTAINER_ROOT / rel).as_posix())
+    return _shell_literal((_mount_root(repo) / rel).as_posix())
 
 
 def _run_per_tile(what: str, jobs: list[tuple[str, Callable[[], object]]]) -> None:
@@ -180,12 +211,18 @@ def _run_per_tile(what: str, jobs: list[tuple[str, Callable[[], object]]]) -> No
 
 
 def _docker_step(name: str, inner: str, repo: Path, gpu) -> Step:
-    """A step that sources benchmark/common.sh and runs ``inner`` via ``ff3d_docker``.
+    """A step that runs ``inner`` in the image: via ``ff3d_docker``, or in place.
 
     ``FF3D_DRY_RUN`` is forced to ``"0"`` in the step env: the CLI has its own
     ``--dry-run`` flag, and a caller who still has ``FF3D_DRY_RUN=1`` exported from
     unrelated benchmark work must not silently turn this step into a no-op.
     """
+    if _in_image():
+        # Already in the image: run the command in place. No FF3D_GPU either -- the card
+        # was pinned by the `docker run --gpus` that started this container, and the
+        # entrypoint has already patched transforms_3d.py into mmdet3d.
+        return Step(name=name, argv=["bash", "-c", inner], cwd=repo,
+                    env={"PYTHONPATH": str(repo)})
     return Step(
         name=name,
         argv=["bash", "-c", f"source benchmark/common.sh; ff3d_docker {inner}"],
@@ -496,7 +533,7 @@ def plan_run(
         f" --test_scan_names_file {_container_path(scan_list, repo, 'scan list')}"
         f" --train_scan_names_file {_container_path(empty_list, repo, 'empty list')}"
         f" --val_scan_names_file {_container_path(empty_list, repo, 'empty list')}"
-        f" && cd {CONTAINER_ROOT} && python tools/create_data_forainetv2.py forainetv2"
+        f" && cd {_mount_root(repo)} && python tools/create_data_forainetv2.py forainetv2"
         f" --test-list {_container_path(scan_list, repo, 'scan list')}"
         " --splits test"
         f" --out-dir {_container_path(out, repo, '--out')}"
