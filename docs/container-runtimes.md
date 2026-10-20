@@ -131,6 +131,60 @@ only docker's would make a podman container look like a host; `ff3d_geo/cli.py`'
 `_in_image()` and both Berlin wrappers now check both
 (`tests/test_geo_in_container.py`, `tests/test_benchmark_in_container.py`).
 
+## Migrating a host that already ran root docker
+
+Switching the runtime does not fix the files the root daemon already wrote, and the first
+podman run on the T14 died on them 20 s in:
+
+```
+PermissionError: [Errno 13] Permission denied:
+  './data/ForAINetV2/points/3dm_33_382_5828_E382000_N5828000_100m.bin'
+RuntimeError: step 'preprocess' failed with exit 1
+```
+
+Note what did and did not break. A root-owned *file* at mode 644 is still readable, so
+nothing that only reads earlier results is affected -- the stitch can still read a km tile
+inferred under root docker. What blocks is a root-owned *directory* at mode 755: a new file
+cannot be created in it. `data/ForAINetV2/{points,instance_mask,semantic_mask}` are created
+on the first preprocess, so on this host they belonged to root and the podman container
+(mapped to `christian`) could not add to them:
+
+```
+drwxr-xr-x root:root       data/ForAINetV2/points
+drwxrwxr-x christian:...   data/ForAINetV2/forainetv2_instance_data
+```
+
+Those three are regenerable outputs of `tools/create_data_forainetv2.py`, and their parent
+directory is yours -- and unlinking needs write permission on the *parent*, not on the file
+-- so they can be cleared without sudo and the next run recreates them:
+
+```bash
+cd data/ForAINetV2
+for d in points instance_mask semantic_mask; do mv "$d" "root-owned-$d-$(date +%H%M%S)"; done
+```
+
+(910 MB, 25 MB and 210 KB on the T14; `mv` rather than `rm` so a mistake is recoverable --
+deleting them later needs sudo, because the files inside are root's.)
+
+For everything at once, including a `work_dirs/berlin-<tile>/` you want to re-run into:
+
+```bash
+sudo chown -R "$USER:$USER" ~/ForestFormer3D/{data,work_dirs,inputs}
+```
+
+How much is affected is worth checking before you start, since it decides whether you need
+sudo at all:
+
+```bash
+cd ~/ForestFormer3D
+for d in data work_dirs inputs; do echo "$d: $(find $d -user root | wc -l) of $(find $d | wc -l)"; done
+# T14 after two km tiles under root docker:
+# data: 2114 of 3127 / work_dirs: 862 of 1699 / inputs: 202 of 616
+```
+
+Everything podman writes from then on is yours, including the final LAS, tree GeoPackages
+and GeoTIFFs.
+
 ## What is still docker-only
 
 - `benchmark/wait_idle.sh` reads `.HostConfig.DeviceRequests` from `docker inspect` to work
