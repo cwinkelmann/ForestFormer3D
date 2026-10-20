@@ -14,7 +14,6 @@ from .tiling import (SemanticVotes, degenerate_region_reason,
                      split_batched_inverse_mapping)
 from .mask_matrix_nms import mask_matrix_nms
 from .ply_io import result_ply_element
-import open3d as o3d
 import os
 import numpy as np
 from tools.base_modules import Seq, MLP, FastBatchNorm1d
