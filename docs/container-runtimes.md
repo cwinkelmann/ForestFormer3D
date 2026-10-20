@@ -216,6 +216,7 @@ and GeoTIFFs.
 | geo steps try to `docker run` inside a container | `/run/.containerenv` not checked -- pre-`5583ac5` code; or set `FF3D_IN_CONTAINER=1` |
 | `--gpu N cannot be honoured: this container was started for GPU M` | right: the container holds M. Start it with `FF3D_GPU=N`, or ask for `--gpu M` |
 | a detached run dies at logout | `loginctl enable-linger` not set (podman has no daemon to outlive the session) |
+| an entrypoint change has no effect | ENTRYPOINT is the image's own COPY of it; rebuild, or `--entrypoint /src/docker/entrypoint.sh` with the checkout mounted at /src |
 
 **After every driver update, regenerate the CDI spec.** The spec pins the device list and
 library paths as they were at generation time; a mismatch surfaces as an unresolvable CDI

@@ -231,7 +231,10 @@ RUN python -c "import yaml, six, regex, skimage, pandas, torchvision, mmcv, mmen
 
 WORKDIR /workspace
 # The checkout is normally mounted over /workspace; the copy only makes the image
-# self-contained when run without a mount.
+# self-contained when run without a mount. ENTRYPOINT is this COPY, by absolute path, so a
+# change to docker/entrypoint.sh needs a rebuild to take effect -- mounting the new one
+# does not replace it. To try one without rebuilding:
+#   podman run --entrypoint /src/docker/entrypoint.sh -v $PWD:/src -w /src ...
 COPY docker/entrypoint.sh /workspace/docker/entrypoint.sh
 RUN chmod +x /workspace/docker/entrypoint.sh
 ENTRYPOINT ["/workspace/docker/entrypoint.sh"]
