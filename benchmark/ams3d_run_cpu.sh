@@ -17,8 +17,8 @@
 #
 # Environment: FF3D_ROOT, GEO_VENV, AMS3D_WORKERS (48), AMS3D_CONFIG (C), AMS3D_SUB (berlin/sub).
 set -uo pipefail
-FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
-GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
 AMS3D_WORKERS="${AMS3D_WORKERS:-48}"
 AMS3D_CONFIG="${AMS3D_CONFIG:-C}"
 AMS3D_SUB="${AMS3D_SUB:-berlin/sub}"

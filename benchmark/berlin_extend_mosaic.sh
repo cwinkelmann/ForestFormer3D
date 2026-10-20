@@ -30,8 +30,8 @@
 # default ams3d_run_cpu[.]sh), FF3D_BUILDINGS (footprint GeoPackage covering ALL tiles),
 # FF3D_ROOT, GEO_VENV. Detached on purpose: never run it inside a live ssh `bash -c`.
 set -uo pipefail
-FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
-GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
 EXTEND_TAG="${EXTEND_TAG:-44}"
 EXTEND_GPUS="${EXTEND_GPUS:-3 4 5 6 7}"
 EXTEND_MARKER="${EXTEND_MARKER:-}"

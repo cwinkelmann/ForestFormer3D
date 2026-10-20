@@ -24,7 +24,7 @@ set -euo pipefail
 
 FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ZENODO_API="${ZENODO_API:-https://zenodo.org/api/records/16742708}"
-FF3D_ZENODO_CACHE="${FF3D_ZENODO_CACHE:-/raid/cwinkelmann/zenodo-16742708}"
+FF3D_ZENODO_CACHE="${FF3D_ZENODO_CACHE:-$(dirname "$FF3D_ROOT")/zenodo-16742708}"
 
 FF3D_ZENODO_DIR="$FF3D_ROOT/work_dirs/.zenodo"
 FF3D_DOWNLOADS="${FF3D_DOWNLOADS:-$FF3D_ZENODO_DIR/downloads}"

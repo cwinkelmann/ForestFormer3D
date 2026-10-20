@@ -17,8 +17,10 @@
 # See .claude/skills/ff3d-inference-km-tiles/SKILL.md.
 set -uo pipefail
 GPU="$1"; shift
-cd /raid/cwinkelmann/ForestFormer3D || exit 1
-source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$FF3D_ROOT" || exit 1
+GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+source "$GEO_VENV/bin/activate"
 CK=work_dirs/clean_forestformer/epoch_3000_fix.pth
 for T in "$@"; do
   echo "=== $(date +%FT%T) $T: split ==="

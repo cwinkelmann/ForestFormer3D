@@ -16,8 +16,10 @@
 #
 # See .claude/skills/ff3d-inference-km-tiles/SKILL.md.
 set -uo pipefail
-cd /raid/cwinkelmann/ForestFormer3D || exit 1
-source /raid/cwinkelmann/ff3d-geo-venv/bin/activate
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "$FF3D_ROOT" || exit 1
+GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+source "$GEO_VENV/bin/activate"
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/berlin_stitch.sh <tile stem>..." >&2; exit 2; }
 OUT="${FF3D_MOSAIC_OUT:-work_dirs/berlin-mosaic}"   # override to keep an earlier mosaic intact
 MIN_H="${FF3D_MIN_HEIGHT:-2}"                       # drop instances shorter than this (m); 0 keeps all

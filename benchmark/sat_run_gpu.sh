@@ -37,10 +37,10 @@ set -uo pipefail
 
 GPU="${1:?usage: sat_run_gpu.sh <gpu> <tile>...}"
 shift
-FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
-SAT_ROOT="${SAT_ROOT:-/raid/cwinkelmann/SegmentAnyTree_infer}"
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SAT_ROOT="${SAT_ROOT:-$(dirname "$FF3D_ROOT")/SegmentAnyTree_infer}"
 SAT_IMAGE="${SAT_IMAGE:-segment-any-tree:cu118}"
-GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
+GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
 # Sub-tile set to read, relative to $FF3D_ROOT/inputs. Halo-free unless SAT_STITCH=1.
 SAT_SUB="${SAT_SUB:-berlin/sub}"
 # 1 = keep the per-sub-tile contract LAS so `ff3d_geo stitch` can unify ids over the halo.

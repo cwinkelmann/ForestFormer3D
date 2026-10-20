@@ -24,9 +24,9 @@
 # (http://10.188.1.1:8080), POTREE_CONTAINER (ff3d-potree).
 set -uo pipefail
 TAG="${1:?usage: potree_rebuild_mosaic.sh <tag, e.g. 44>}"
-FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
-GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
-SITE="${POTREE_SITE:-/raid/cwinkelmann/potree/berlin_potree_v2}"
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+SITE="${POTREE_SITE:-$(dirname "$FF3D_ROOT")/potree/berlin_potree_v2}"
 DOP21="${POTREE_DOP21:-inputs/berlin_dop/dop_2021_rgb}"
 DOP25="${POTREE_DOP25:-inputs/berlin_dop/dop_2025_sommer}"
 URL="${POTREE_URL:-http://10.188.1.1:8080}"

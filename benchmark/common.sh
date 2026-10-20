@@ -4,7 +4,12 @@
 # Every path variable can be overridden from the environment (tests do that).
 set -euo pipefail
 
-FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
+# The repo root is the parent of the directory holding this file, so the same scripts
+# work on carrot, the T14 and olive with no per-host environment -- on carrot it derives
+# to /raid/cwinkelmann/ForestFormer3D, the value this used to hardcode. A wrong root is
+# expensive to debug: ff3d_docker bind-mounts it onto /workspace, so a missing directory
+# surfaces as the container failing to stat docker/entrypoint.sh.
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 FF3D_IMAGE="${FF3D_IMAGE:-forestformer3d:cu118}"
 FF3D_DOCKER="${FF3D_DOCKER:-docker}"          # set to "sudo docker" if needed
 FF3D_SHM="${FF3D_SHM:-64g}"
@@ -16,13 +21,16 @@ FF3D_OLD_COMMIT="${FF3D_OLD_COMMIT:-6a75c37}"
 # mount (the container would see the old worktree inside its own work_dirs mount).
 # FF3D_OLD_ROOT is therefore a sibling directory of the checkout, independently
 # overridable (it does not derive from FF3D_ROOT).
-FF3D_OLD_ROOT="${FF3D_OLD_ROOT:-/raid/cwinkelmann/ff3d-old-main}"
+FF3D_OLD_ROOT="${FF3D_OLD_ROOT:-$(dirname "$FF3D_ROOT")/ff3d-old-main}"
 FF3D_OLD="$FF3D_OLD_ROOT"                     # alias: Tasks 3-5 scripts refer to FF3D_OLD
-export FF3D_OLD FF3D_OLD_ROOT
+export FF3D_OLD FF3D_OLD_ROOT FF3D_GEO_VENV
 FF3D_CONFIG="configs/oneformer3d_qs_radius16_qp300_2many.py"
 FF3D_DATA="${FF3D_ROOT}/data/ForAINetV2"
 FF3D_CKPT_DIR="${FF3D_ROOT}/work_dirs/clean_forestformer"
 FF3D_RELEASE_CKPT="${FF3D_CKPT_DIR}/epoch_3000_fix.pth"
+# The pure-Python host venv for ff3d_geo. On every host so far it is `ff3d-geo-venv`
+# beside the checkout (carrot /raid/cwinkelmann, the T14 and olive /home/christian).
+FF3D_GEO_VENV="${FF3D_GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
 FF3D_LOGS="${FF3D_ROOT}/work_dirs/logs"
 FF3D_BENCH_DIR="${FF3D_ROOT}/benchmark"
 FF3D_DRY_RUN="${FF3D_DRY_RUN:-0}"             # 1: print docker commands instead of running them

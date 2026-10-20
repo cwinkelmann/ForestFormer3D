@@ -11,8 +11,8 @@
 #   nohup bash benchmark/ams3d_stitch.sh $(ls -d inputs/berlin/sub/*/ | xargs -n1 basename) \
 #     > work_dirs/logs/ams3d/stitch-$(date +%Y%m%d-%H%M%S).log 2>&1 < /dev/null &
 set -uo pipefail
-FF3D_ROOT="${FF3D_ROOT:-/raid/cwinkelmann/ForestFormer3D}"
-GEO_VENV="${GEO_VENV:-/raid/cwinkelmann/ff3d-geo-venv}"
+FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
 cd "$FF3D_ROOT" || exit 1
 source "$GEO_VENV/bin/activate"
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/ams3d_stitch.sh <tile stem>..." >&2; exit 2; }
