@@ -129,3 +129,34 @@ Each is inherited from OneFormer3D or only matters once the benchmark shows it d
   and bare ground, which is the intent; if those points ever need a label, cast a ground vote
   (`votes.add_binary(pc1_indices, torch.zeros_like(pc1_indices, dtype=torch.bool))`) in the
   pre-filter branch instead of skipping outright.
+
+## The torch 2.0.1 pin stays (decided 2026-10-20)
+
+The question comes up whenever someone looks at the stack: torch 2.0.1 / mmcv 2.0.1 /
+mmdet 3.0.0 are from 2023, so would a newer torch be faster? The pin is kept deliberately.
+
+**MinkowskiEngine is the blocker and it is load-bearing.** The active model's `collate`
+(`oneformer3d/oneformer3d.py:1868-1884`, `ForAINetV2OneFormer3D_XAwarequery`) does not
+merely call a helper; it voxelises through `ME.TensorField(...).sparse()` and takes the
+point->voxel `inverse_mapping` from it, which the whole predict path depends on.
+MinkowskiEngine's last release is 0.5.4 (2021) and does not build against torch >= 2.1
+without patching. `mmcv 2.0.1`'s prebuilt wheels also stop at torch 2.1; beyond that its
+ops compile from source.
+
+**The expected gain is small.** The 2.90x already measured came from scheduling
+(`region_batch`, `batched_decoder`), not from kernels, and the profile addendum in
+`docs/benchmarks/2026-09-23-inference-profile.md` shows what is left spread over backbone,
+sampling, collate, nearest-neighbour and mask post-processing at 7-17 % each -- no single
+hotspot for faster kernels to attack. `torch.compile` cannot reach the sparse convolutions,
+which are custom CUDA in spconv and MinkowskiEngine.
+
+Two cheaper leads were noted at the same time and are NOT done:
+
+- torch logs `UserWarning: Converting mask without torch.bool dtype to bool; this will
+  negatively affect performance` from `torch._native_multi_head_attention`
+  (`attention.cpp:150`) during every inference run. `query_decoder.py:281` already casts
+  with `.bool()`, so it is a different call site; one run under `-W error::UserWarning`
+  would localise it. This is a slow attention path on the version already installed.
+- The `region_batch` sweep on the T14's RTX 4080 SUPER peaked at 7.3 GB of 15.6 GiB at the
+  default 8 and was only measured to 8 (`.claude/skills/ff3d-carrot/SKILL.md`), so 16 is
+  worth a measurement there even though it was flat from 8 to 32 on an H100.
