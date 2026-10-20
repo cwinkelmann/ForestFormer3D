@@ -67,9 +67,11 @@ ff3d_runtime_kind() {
   if [ -z "${_FF3D_RUNTIME_KIND:-}" ]; then
     # The name is not the runtime: the `podman-docker` package installs /usr/bin/docker AS
     # podman, so a switch made on the string hands podman a --gpus it may ignore, and the
-    # container comes up with no GPU and fails minutes later inside torch. Ask the binary,
-    # once per shell; fall back to the name if it cannot be run (a dry run on a host with
-    # no runtime installed, which the tests do).
+    # container comes up with no GPU and fails minutes later inside torch. So ask the
+    # binary, and fall back to the name when it cannot be run at all (a dry run on a host
+    # with no runtime installed, which the tests do). _FF3D_RUNTIME_KIND memoises it, but
+    # only within one shell: ff3d_docker calls this inside $(...), so in practice it is one
+    # extra `--version` per container start -- about 20 ms against a run of minutes.
     if $FF3D_DOCKER --version 2>/dev/null | grep -qi podman; then
       _FF3D_RUNTIME_KIND=podman
     else
