@@ -1,5 +1,11 @@
 # ForestFormer3D runtime image: PyTorch 2.0.1 / CUDA 11.8, extensions compiled for
 # compute 8.0 (A100), 8.6 (A10/A40), 8.9 (L4/L40) and 9.0 (H100).
+#
+# It holds BOTH halves of the pipeline -- the model stack and, since 2026-10-20, the
+# geospatial one (shapely/pyproj/pyogrio/geopandas/rasterio pinned to their last numpy 1.x
+# builds) -- so one container can run all eight steps of `python -m ff3d_geo run` on a host
+# that has only Docker. The host geo venv still works and stays the default on carrot;
+# nothing in the code changed, and the file-based contract between the halves is unaffected.
 # The previous CUDA 11.6 image is kept unchanged as Dockerfile.a100-cu116.
 #
 # Base image: pytorch/pytorch only ships a 2.0.1-cuda11.8-cudnn8-devel tag starting at
@@ -33,7 +39,7 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 # no toolchain PPA is needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential cmake ninja-build git rsync \
+        build-essential cmake ninja-build git rsync curl unzip \
         libopenblas-dev \
         libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
         python3 python3-dev python3-pip python3-venv python-is-python3 \
@@ -172,6 +178,21 @@ RUN git clone https://github.com/Karbo123/segmentator.git /opt/segmentator \
 # Project extras: LAS/LAZ IO for Phase 3, progress bars, tests.
 RUN pip install --no-cache-dir laspy==2.5.3 lazrs==0.5.3 tqdm==4.66.1 pytest==7.4.4
 
+# The geo half, so ONE container can run all eight pipeline steps (docs/inference-pipeline.md).
+# These are the last releases built against numpy 1.x: a wheel compiled against numpy 2
+# refuses numpy 1.24.1, and 1.24.1 is fixed here by numba 0.57 / mmdet3d. shapely moves
+# 1.8.5 -> 2.0.4, which geopandas and pyogrio require and mmdet3d does not mind (it only
+# wants shapely for the nuScenes/Lyft evaluators this project never calls). The -c pin is
+# what stops pip from "solving" the conflict by upgrading numpy under the model half.
+RUN printf 'numpy==1.24.1\n' > /tmp/geo-constraints.txt \
+    && pip install --no-cache-dir -c /tmp/geo-constraints.txt \
+        shapely==2.0.4 \
+        pyproj==3.6.1 \
+        pyogrio==0.8.0 \
+        geopandas==0.14.4 \
+        rasterio==1.3.10 \
+    && rm /tmp/geo-constraints.txt
+
 # Pure-Python dependencies the conda-based pytorch base image used to provide implicitly
 # (found by importing every module in a probe of this image); pinned, no transitive pulls.
 RUN pip install --no-cache-dir --no-deps \
@@ -193,8 +214,10 @@ RUN pip install --no-cache-dir --no-deps \
         wcwidth==0.2.8 \
         configargparse==1.7
 
-# Everything importable together (mmdet3d checks the mmcv/mmdet/mmengine version ranges).
-RUN python -c "import yaml, six, regex, skimage, pandas, torchvision, mmcv, mmengine, mmdet, mmdet3d, numpy, spconv.pytorch, MinkowskiEngine, torch_scatter, torch_cluster, segmentator, laspy, plyfile, open3d, tqdm; from torch_points_kernels import instance_iou; print('mmcv', mmcv.__version__, 'mmengine', mmengine.__version__, 'mmdet', mmdet.__version__, 'mmdet3d', mmdet3d.__version__, 'numpy', numpy.__version__)"
+# Everything importable together (mmdet3d checks the mmcv/mmdet/mmengine version ranges),
+# both halves in one interpreter: if the geo wheels had been built against numpy 2 this is
+# where it would fail, with "_ARRAY_API not found" rather than at run time in a tile.
+RUN python -c "import yaml, six, regex, skimage, pandas, torchvision, mmcv, mmengine, mmdet, mmdet3d, numpy, spconv.pytorch, MinkowskiEngine, torch_scatter, torch_cluster, segmentator, laspy, plyfile, open3d, tqdm, shapely, pyproj, pyogrio, geopandas, rasterio; from torch_points_kernels import instance_iou; print('mmcv', mmcv.__version__, 'mmengine', mmengine.__version__, 'mmdet', mmdet.__version__, 'mmdet3d', mmdet3d.__version__, 'numpy', numpy.__version__, 'shapely', shapely.__version__, 'geopandas', geopandas.__version__)"
 
 WORKDIR /workspace
 # The checkout is normally mounted over /workspace; the copy only makes the image

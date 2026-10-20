@@ -12,9 +12,19 @@ complements the runbooks (`docs/benchmarks/RUNBOOK-carrot.md` for the benchmark,
 | GPU server carrot (`ssh carrot`, 8x H100) | every GPU step, the batch runs | Docker image `forestformer3d:cu118` (CUDA 11.8, torch 2.0.1, mmdet3d, MinkowskiEngine, spconv) started through `benchmark/common.sh`'s `ff3d_docker` with `FF3D_GPU=<n>`; checkout `/raid/cwinkelmann/ForestFormer3D`; host venv `/raid/cwinkelmann/ff3d-geo-venv` for the pure-Python `ff3d_geo` package |
 | Mac (no GPU) | conversion, merging, masks, reports, tests | `.venv-cpu` (numpy, laspy, shapely, geopandas, pyogrio, rasterio); no torch |
 | Lenovo T14 (RTX 4080 SUPER 16 GB) | optional second GPU worker | same image built from the `Dockerfile`; venv `~/ff3d-geo-venv`; setup started, build paused at step 12 of 19 |
+| olive (`ssh olive`, 2x RTX A6000 48 GB) | second GPU worker, booked/preemptible shares | same image, built there 2026-10-20 (`866a762f`); geo venv `~/ff3d-geo-venv`; checkout `~/ForestFormer3D` is a COPY, not a clone. See `.claude/skills/ff3d-carrot/SKILL.md` section 11 |
 
 The GPU steps never import `ff3d_geo`, and `ff3d_geo` never imports torch: the two
 halves talk through files only.
+
+Driving the two halves from outside the repo: `demo/ff3d_steps.py` in
+`cwinkelmann/hnee_slurm_deployment` (`1e20a8b`) defines the five per-sub-tile steps as a
+table, each tagged `geo` (host venv) or `gpu` (the image), with a `docker_step` helper that
+also returns the command which *stops* the step -- needed because killing a `docker run`
+client does not stop the container, and a preempted booking must really hand the card back.
+It drove 100 sub-tiles of `3dm_33_381_5828_1_be` on olive through six preemptions at a cost
+of one sub-tile each. `docs/workflow-definition-refactor.md` argues from that run that the
+step table, not `ff3d_geo/cli.py`, is where the pipeline definition belongs.
 
 ## The model side (inside the container)
 

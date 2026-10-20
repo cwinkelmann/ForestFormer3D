@@ -5,8 +5,9 @@ description: Use when running anything on the carrot GPU server (or the T14 work
 
 # carrot: the GPU server for ForestFormer3D
 
-Every GPU step of this project runs on **carrot**, an 8x H100 80 GB box shared with
-other users. **Since 2026-10-06 the user has restricted this project to GPUs 0-3** ("for now"; lift
+Most GPU steps of this project run on **carrot**, an 8x H100 80 GB box shared with
+other users; **olive** (2x RTX A6000, section 11) is the second worker, and the T14
+(section 10) a third. **Since 2026-10-06 the user has restricted this project to GPUs 0-3** ("for now"; lift
 only when told): launch queues on those indices only, still skipping any card that is busy
 (`nvidia-smi`) or owned by one of our own queues (`pgrep -f`), e.g. `EXTEND_GPUS="0 1 2 3"`
 for `benchmark/berlin_extend_mosaic.sh`. Nothing GPU-related runs on the Mac. The Mac runs `ff3d_geo` conversions,
@@ -192,6 +193,52 @@ RTX 4080 SUPER, 16 GB — one GPU, so `FF3D_GPU=0` and one job at a time; lower 
 the `max_points` cap in `_predict_full_plot` if inference OOMs. Repo, checkpoint and a
 `~/ff3d-geo-venv` are already in place. **ComfyUI on that machine holds GPU memory**;
 stop it (or check `nvidia-smi` for its process) before starting an inference run.
+
+## 11. olive (second GPU host, 2x RTX A6000 48 GB)
+
+```bash
+ssh olive                 # ~/.ssh/config: HostName 10.188.2.1, User cwinkelmann
+                          # (VPN as for carrot; different subnet, 10.188.2.x)
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+#   0, NVIDIA RTX A6000, 49140 MiB
+#   1, NVIDIA RTX A6000, 49140 MiB
+```
+
+**Use the container here too.** The image built on olive on 2026-10-20 and is in place:
+
+```bash
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep forestformer3d
+# forestformer3d:cu118 866a762f0591   (17.7 GB)
+```
+
+Docker is rootless as on carrot. `docker` is at `/usr/bin/docker`; `hrm-worker` and
+`slurm-test-slurm` images also live there, from the booking/Slurm work.
+
+**The conda translation of the Dockerfile does NOT work on this host.** `~/ff3d-env-olive.sh`
+builds the same stack as a plain conda env at `~/envs/ff3d` (Python 3.10.22) and gets as far
+as the extensions, then fails configuring `segmentator` (`~/ff3d-env-build.log`:
+"Configuring incomplete, errors occurred" out of Caffe2/Torch cmake). Three host facts force
+that script's shape and are worth knowing before trying again: olive has **no host gcc and
+no cmake** (the toolchain comes from conda-forge), the **host CUDA is 13.4** -- far too new
+for torch 2.0.1/cu118, so nvcc 11.8 is installed into the env and `CUDA_HOME` points there
+-- and `python=3.10` alone resolves to **GraalPy** on that channel set, whose `ssl` is a JSSE
+shim that breaks pip, so the script pins `"python=3.10.*=*_cpython"`.
+
+**The checkout is a copy, not a clone.** `~/ForestFormer3D` has no `.git`, so there is no
+`git pull` here: code arrives by `rsync`/`scp` from the Mac, and `git log` cannot tell you
+which commit is running. Verify what you are about to run before trusting a result from this
+host. The checkpoint is in place at
+`~/ForestFormer3D/work_dirs/clean_forestformer/epoch_3000_fix.pth`; the geo venv is
+`~/ff3d-geo-venv` (Python 3.11.2, numpy 2.4.6, geopandas 1.2.0, pyproj 3.7.2 -- a DIFFERENT
+build from carrot's numpy 2.5.3 / geopandas 1.1.4, so geo outputs should be compared across
+hosts with that in mind).
+
+**Bookings here are preemptible.** Work through `~/hnee_slurm_deployment`'s
+`demo/ff3d_booked_run.py` + `demo/ff3d_steps.py`: one sub-tile per unit, and a `docker_step`
+that keeps the command needed to *stop* the container, because terminating the `docker run`
+client leaves the container holding the card. A run of 100 sub-tiles of
+`3dm_33_381_5828_1_be` survived six preemptions at a cost of one sub-tile each. See
+`docs/inference-pipeline.md` and `docs/workflow-definition-refactor.md`.
 
 ## Related skills
 
