@@ -181,18 +181,32 @@ python3 -m venv .venv-cpu && .venv-cpu/bin/pip install -r tests/requirements-cpu
 .venv-cpu/bin/python -m pytest -q tests
 ```
 
-## 10. Lenovo T14 (optional second worker)
+## 10. Lenovo T14 (second worker, the user's own machine)
 
 ```bash
-ssh christian@192.168.188.166
+ssh t14                   # ~/.ssh/config -> christian@192.168.188.88
 cd ~/ForestFormer3D
-docker build -t forestformer3d:cu118 .    # build is RESUMABLE; it was paused at step 12/19
+git pull --ff-only origin fix/review-findings   # the fork IS origin here, as on carrot
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep forestformer3d
+# forestformer3d:cu118 e6f60b967c2e   (18 GB, built 2026-10-20 in 40 min)
 ```
 
-RTX 4080 SUPER, 16 GB — one GPU, so `FF3D_GPU=0` and one job at a time; lower `radius` or
-the `max_points` cap in `_predict_full_plot` if inference OOMs. Repo, checkpoint and a
-`~/ff3d-geo-venv` are already in place. **ComfyUI on that machine holds GPU memory**;
-stop it (or check `nvidia-smi` for its process) before starting an inference run.
+RTX 4080 SUPER (16376 MiB), 12 cores, 46 GB RAM, driver 580.178.04, docker 27.1.1. One GPU,
+so `FF3D_GPU=0` and one job at a time. **No quality knob has to be lowered for 16 GB**: a
+`region_batch` sweep on one 100 m sub-tile peaked at 7.3 GB with the default 8 and never came
+near OOM (1 -> 50 s/1.9 GB, 2 -> 43 s/3.0 GB, 4 -> 41 s/4.1 GB, 8 -> 38 s/7.3 GB), so the
+documented 16.2 GB was an H100 letting the caching allocator grow, not a requirement.
+A full km tile (`3dm_33_381_5828_1_be`, 100 sub-tiles) took **1 h 42** against carrot's
+1 h 00 on an idle H100 -- 98.4 min of inference (median 57.8 s per sub-tile) plus 3 min for
+all 100 sub-tiles' host steps. **ComfyUI on that machine holds GPU memory**; stop it (or
+check `nvidia-smi` for its process) before starting a run.
+
+**Docker here is NOT rootless** (unlike carrot and olive), so container-written files come
+out `root:root` -- the result PLYs, and in one-container mode the LAS/GeoPackage/GeoTIFFs
+too. `--user` cannot fix it (`docker/entrypoint.sh` writes into site-packages). The clean fix
+is podman, which needs no change to `benchmark/common.sh` beyond `FF3D_DOCKER=podman`; the
+setup and the reason it beats rootless docker here are in `docs/inference-pipeline.md`,
+"Docker or podman: who owns the results".
 
 ## 11. olive (second GPU host, 2x RTX A6000 48 GB)
 

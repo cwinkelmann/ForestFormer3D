@@ -11,9 +11,9 @@ set -euo pipefail
 # surfaces as the container failing to stat docker/entrypoint.sh.
 FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 FF3D_IMAGE="${FF3D_IMAGE:-forestformer3d:cu118}"
-FF3D_DOCKER="${FF3D_DOCKER:-docker}"          # set to "sudo docker" if needed
+FF3D_DOCKER="${FF3D_DOCKER:-docker}"          # "podman", or "sudo docker" if needed
 FF3D_SHM="${FF3D_SHM:-64g}"
-FF3D_GPU="${FF3D_GPU:-0}"                     # explicit --gpus "device=$FF3D_GPU"
+FF3D_GPU="${FF3D_GPU:-0}"                     # ONE physical GPU, see ff3d_gpu_args
 FF3D_OLD_COMMIT="${FF3D_OLD_COMMIT:-6a75c37}"
 # The old-code worktree (main @ FF3D_OLD_COMMIT) MUST NOT live under
 # $FF3D_ROOT/work_dirs: ff3d_docker_old also bind-mounts $FF3D_ROOT/work_dirs onto
@@ -58,12 +58,27 @@ ff3d_count_ply() {
   find "$1" -maxdepth 1 -name '*.ply' | wc -l | tr -d ' '
 }
 
+# ff3d_gpu_args: how $FF3D_DOCKER pins exactly ONE physical GPU.
+# docker reaches the card through nvidia-container-runtime and spells it
+# `--gpus device=N`; podman reaches it through a CDI spec (`/etc/cdi/nvidia.yaml`, written
+# once by `nvidia-ctk cdi generate`) and spells it `--device nvidia.com/gpu=N`. podman also
+# accepts `--gpus`, but 4.x silently ignores it on some builds -- the container then starts
+# with no GPU at all and fails much later in torch, so name the device explicitly.
+# The value is read at call time because the queue scripts set FF3D_GPU after sourcing this
+# file, and the result is word-split at the call site, like $FF3D_DOCKER itself.
+ff3d_gpu_args() {
+  case "$FF3D_DOCKER" in
+    *podman*) echo "--device nvidia.com/gpu=${FF3D_GPU}" ;;
+    *)        echo "--gpus device=${FF3D_GPU}" ;;
+  esac
+}
+
 # Run <cmd...> inside the image with the main checkout mounted at /workspace.
-# --gpus "device=$FF3D_GPU" pins one explicit physical GPU (the server has 8, shared
-# with other users); never --gpus all with CUDA_VISIBLE_DEVICES masking, which still
+# ff3d_gpu_args pins one explicit physical GPU (the server has 8, shared with other
+# users); never --gpus all with CUDA_VISIBLE_DEVICES masking, which still
 # reserves/locks all devices for this container.
 ff3d_docker() {
-  ff3d_run $FF3D_DOCKER run --rm --gpus "device=${FF3D_GPU}" --shm-size="$FF3D_SHM" \
+  ff3d_run $FF3D_DOCKER run --rm $(ff3d_gpu_args) --shm-size="$FF3D_SHM" \
     -e PYTHONPATH=/workspace -w /workspace \
     -v "$FF3D_ROOT":/workspace \
     "$FF3D_IMAGE" "$@"
@@ -93,7 +108,7 @@ ff3d_docker_old() {
     [ -x "$FF3D_OLD_ROOT/docker/entrypoint.sh" ] \
       || ff3d_die "old worktree lacks docker/entrypoint.sh -- run benchmark/setup_old_worktree.sh"
   fi
-  ff3d_run $FF3D_DOCKER run --rm --gpus "device=${FF3D_GPU}" --shm-size="$FF3D_SHM" \
+  ff3d_run $FF3D_DOCKER run --rm $(ff3d_gpu_args) --shm-size="$FF3D_SHM" \
     -e PYTHONPATH=/workspace -w /workspace \
     -v "$FF3D_OLD_ROOT":/workspace \
     -v "$FF3D_ROOT/data":/workspace/data \
