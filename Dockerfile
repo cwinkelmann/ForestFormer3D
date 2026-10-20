@@ -25,7 +25,13 @@ ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 # Parallel nvcc invocations in the extension builds below. Each one can take a GB or more,
 # so lower it (--build-arg MAX_JOBS=4) on a host with little free RAM or few cores.
 ARG MAX_JOBS=16
-ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+# The wheel layers below pull ~3 GB (torch, mmcv, open3d). pip's default 15 s socket
+# timeout and 5 retries give up on a slow link mid-download and fail the whole layer --
+# seen on the T14 over the VPN, at the OpenMMLab layer, with "TimeoutError: The read
+# operation timed out". These make a hiccup cost a retry instead of the build.
+ENV PIP_DEFAULT_TIMEOUT=60 \
+    PIP_RETRIES=10 \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     MAX_JOBS=${MAX_JOBS} \
     CUDA_HOME=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:$PATH \
