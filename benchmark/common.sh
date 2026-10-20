@@ -4,12 +4,12 @@
 # Every path variable can be overridden from the environment (tests do that).
 set -euo pipefail
 
-# The repo root is the parent of the directory holding this file, so the same scripts
-# work on carrot, the T14 and olive with no per-host environment -- on carrot it derives
-# to /raid/cwinkelmann/ForestFormer3D, the value this used to hardcode. A wrong root is
+# FF3D_ROOT (the parent of this file's directory, so the same scripts work on carrot, the
+# T14 and olive with no per-host environment), FF3D_GEO_VENV and the in-image check all
+# come from geo_env.sh, which the standalone queue scripts source as well. A wrong root is
 # expensive to debug: ff3d_docker bind-mounts it onto /workspace, so a missing directory
 # surfaces as the container failing to stat docker/entrypoint.sh.
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 FF3D_IMAGE="${FF3D_IMAGE:-forestformer3d:cu118}"
 FF3D_DOCKER="${FF3D_DOCKER:-docker}"          # "podman", or "sudo docker" if needed
 FF3D_SHM="${FF3D_SHM:-64g}"
@@ -23,14 +23,11 @@ FF3D_OLD_COMMIT="${FF3D_OLD_COMMIT:-6a75c37}"
 # overridable (it does not derive from FF3D_ROOT).
 FF3D_OLD_ROOT="${FF3D_OLD_ROOT:-$(dirname "$FF3D_ROOT")/ff3d-old-main}"
 FF3D_OLD="$FF3D_OLD_ROOT"                     # alias: Tasks 3-5 scripts refer to FF3D_OLD
-export FF3D_OLD FF3D_OLD_ROOT FF3D_GEO_VENV
+export FF3D_OLD FF3D_OLD_ROOT
 FF3D_CONFIG="configs/oneformer3d_qs_radius16_qp300_2many.py"
 FF3D_DATA="${FF3D_ROOT}/data/ForAINetV2"
 FF3D_CKPT_DIR="${FF3D_ROOT}/work_dirs/clean_forestformer"
 FF3D_RELEASE_CKPT="${FF3D_CKPT_DIR}/epoch_3000_fix.pth"
-# The pure-Python host venv for ff3d_geo. On every host so far it is `ff3d-geo-venv`
-# beside the checkout (carrot /raid/cwinkelmann, the T14 and olive /home/christian).
-FF3D_GEO_VENV="${FF3D_GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
 FF3D_LOGS="${FF3D_ROOT}/work_dirs/logs"
 FF3D_BENCH_DIR="${FF3D_ROOT}/benchmark"
 FF3D_DRY_RUN="${FF3D_DRY_RUN:-0}"             # 1: print docker commands instead of running them
@@ -66,10 +63,29 @@ ff3d_count_ply() {
 # with no GPU at all and fails much later in torch, so name the device explicitly.
 # The value is read at call time because the queue scripts set FF3D_GPU after sourcing this
 # file, and the result is word-split at the call site, like $FF3D_DOCKER itself.
+ff3d_runtime_kind() {
+  if [ -z "${_FF3D_RUNTIME_KIND:-}" ]; then
+    # The name is not the runtime: the `podman-docker` package installs /usr/bin/docker AS
+    # podman, so a switch made on the string hands podman a --gpus it may ignore, and the
+    # container comes up with no GPU and fails minutes later inside torch. Ask the binary,
+    # once per shell; fall back to the name if it cannot be run (a dry run on a host with
+    # no runtime installed, which the tests do).
+    if $FF3D_DOCKER --version 2>/dev/null | grep -qi podman; then
+      _FF3D_RUNTIME_KIND=podman
+    else
+      case "$FF3D_DOCKER" in
+        *podman*) _FF3D_RUNTIME_KIND=podman ;;
+        *)        _FF3D_RUNTIME_KIND=docker ;;
+      esac
+    fi
+  fi
+  echo "$_FF3D_RUNTIME_KIND"
+}
+
 ff3d_gpu_args() {
-  case "$FF3D_DOCKER" in
-    *podman*) echo "--device nvidia.com/gpu=${FF3D_GPU}" ;;
-    *)        echo "--gpus device=${FF3D_GPU}" ;;
+  case "$(ff3d_runtime_kind)" in
+    podman) echo "--device nvidia.com/gpu=${FF3D_GPU}" ;;
+    *)      echo "--gpus device=${FF3D_GPU}" ;;
   esac
 }
 
@@ -78,8 +94,13 @@ ff3d_gpu_args() {
 # users); never --gpus all with CUDA_VISIBLE_DEVICES masking, which still
 # reserves/locks all devices for this container.
 ff3d_docker() {
+  # FF3D_IN_CONTAINER so nothing inside has to guess from a marker file, and FF3D_GPU
+  # because the card cannot be identified from inside: --gpus device=5 is renumbered to
+  # device 0 in the container (measured on olive). ff3d_geo compares its --gpu against it
+  # and refuses a mismatch, which is what stops four "different" workers sharing card 0.
   ff3d_run $FF3D_DOCKER run --rm $(ff3d_gpu_args) --shm-size="$FF3D_SHM" \
-    -e PYTHONPATH=/workspace -w /workspace \
+    -e PYTHONPATH=/workspace -e FF3D_IN_CONTAINER=1 -e FF3D_GPU="$FF3D_GPU" \
+    -w /workspace \
     -v "$FF3D_ROOT":/workspace \
     "$FF3D_IMAGE" "$@"
 }

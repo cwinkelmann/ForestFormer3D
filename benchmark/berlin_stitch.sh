@@ -16,28 +16,9 @@
 #
 # See .claude/skills/ff3d-inference-km-tiles/SKILL.md.
 set -uo pipefail
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 cd "$FF3D_ROOT" || exit 1
-GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
-# The image carries the geo stack too, so this whole script can run inside one container
-# (`ff3d_docker bash benchmark/<this script> ...`), and there is no venv there to activate.
-# ff3d_geo makes the same check and then runs its two GPU steps in place instead of
-# shelling out to a docker that does not exist inside the container.
-IN_IMAGE=0
-case "${FF3D_IN_CONTAINER-unset}" in
-  # docker touches /.dockerenv, podman writes /run/.containerenv -- check both, or a
-  # podman container looks like a host and tries to docker-run its GPU steps.
-  unset)         { [ -f /.dockerenv ] || [ -f /run/.containerenv ]; } && IN_IMAGE=1 ;;
-  ""|0|false|no) IN_IMAGE=0 ;;                         # forced host mode
-  *)             IN_IMAGE=1 ;;
-esac
-if [ "$IN_IMAGE" = 1 ]; then
-  export FF3D_IN_CONTAINER=1
-  echo "=== inside the image: no host venv, the GPU steps run in place ==="
-else
-  export FF3D_IN_CONTAINER=0      # pin it, so ff3d_geo cannot decide otherwise
-  source "$GEO_VENV/bin/activate"
-fi
+ff3d_activate_geo || exit 1
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/berlin_stitch.sh <tile stem>..." >&2; exit 2; }
 OUT="${FF3D_MOSAIC_OUT:-work_dirs/berlin-mosaic}"   # override to keep an earlier mosaic intact
 MIN_H="${FF3D_MIN_HEIGHT:-2}"                       # drop instances shorter than this (m); 0 keeps all

@@ -21,12 +21,11 @@
 set -uo pipefail
 GPU="${1:?usage: speed_benchmark.sh <gpu> <tile stem>...}"; shift
 [ "$#" -gt 0 ] || { echo "no tiles given" >&2; exit 2; }
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 BENCH_WORKERS="${BENCH_WORKERS:-48}"
 BENCH_METHODS="${BENCH_METHODS:-ff3d sat ams3d}"
 cd "$FF3D_ROOT" || exit 1
-source "$GEO_VENV/bin/activate"
+ff3d_activate_geo || exit 1
 CK=work_dirs/clean_forestformer/epoch_3000_fix.pth
 TS=$(date +%Y%m%d-%H%M%S)
 LOG=work_dirs/logs/bench; mkdir -p "$LOG"

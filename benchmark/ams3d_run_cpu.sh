@@ -17,13 +17,12 @@
 #
 # Environment: FF3D_ROOT, GEO_VENV, AMS3D_WORKERS (48), AMS3D_CONFIG (C), AMS3D_SUB (berlin/sub).
 set -uo pipefail
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 AMS3D_WORKERS="${AMS3D_WORKERS:-48}"
 AMS3D_CONFIG="${AMS3D_CONFIG:-C}"
 AMS3D_SUB="${AMS3D_SUB:-berlin/sub}"
 cd "$FF3D_ROOT" || exit 1
-source "$GEO_VENV/bin/activate"
+ff3d_activate_geo || exit 1
 mkdir -p work_dirs/logs/ams3d
 for T in "$@"; do
   if [[ ! "$T" =~ ^3dm_33_[0-9]+_[0-9]+_1_be$ ]]; then

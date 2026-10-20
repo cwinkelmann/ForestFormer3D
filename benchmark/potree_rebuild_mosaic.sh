@@ -24,15 +24,14 @@
 # (http://10.188.1.1:8080), POTREE_CONTAINER (ff3d-potree).
 set -uo pipefail
 TAG="${1:?usage: potree_rebuild_mosaic.sh <tag, e.g. 44>}"
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 SITE="${POTREE_SITE:-$(dirname "$FF3D_ROOT")/potree/berlin_potree_v2}"
 DOP21="${POTREE_DOP21:-inputs/berlin_dop/dop_2021_rgb}"
 DOP25="${POTREE_DOP25:-inputs/berlin_dop/dop_2025_sommer}"
 URL="${POTREE_URL:-http://10.188.1.1:8080}"
 CONTAINER="${POTREE_CONTAINER:-ff3d-potree}"
 cd "$FF3D_ROOT" || exit 1
-source "$GEO_VENV/bin/activate"
+ff3d_activate_geo || exit 1
 PC=work_dirs/logs/potree/PotreeConverter_linux_x64/PotreeConverter
 LOG=work_dirs/logs/potree
 mkdir -p "$LOG"

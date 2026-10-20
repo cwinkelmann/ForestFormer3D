@@ -30,14 +30,13 @@
 # default ams3d_run_cpu[.]sh), FF3D_BUILDINGS (footprint GeoPackage covering ALL tiles),
 # FF3D_ROOT, GEO_VENV. Detached on purpose: never run it inside a live ssh `bash -c`.
 set -uo pipefail
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 EXTEND_TAG="${EXTEND_TAG:-44}"
 EXTEND_GPUS="${EXTEND_GPUS:-3 4 5 6 7}"
 EXTEND_MARKER="${EXTEND_MARKER:-}"
 P="ams3d_run_cpu"; EXTEND_WAIT_FOR="${EXTEND_WAIT_FOR:-${P}[.]sh}"
 cd "$FF3D_ROOT" || exit 1
-source "$GEO_VENV/bin/activate"
+ff3d_activate_geo || exit 1
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/berlin_extend_mosaic.sh <new tile stem>..." >&2; exit 2; }
 NEW=("$@")
 for T in "${NEW[@]}"; do

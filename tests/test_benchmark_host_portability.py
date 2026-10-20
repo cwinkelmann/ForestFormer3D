@@ -47,7 +47,8 @@ def _source_common(tmp_path) -> dict:
     """Copy common.sh into a fresh checkout-shaped dir, source it, read the paths back."""
     root = tmp_path / "ForestFormer3D"
     (root / "benchmark").mkdir(parents=True)
-    shutil.copy(BENCH / "common.sh", root / "benchmark" / "common.sh")
+    for name in ("common.sh", "geo_env.sh"):
+        shutil.copy(BENCH / name, root / "benchmark" / name)
     env = {k: v for k, v in os.environ.items() if not k.startswith("FF3D_")}
     proc = subprocess.run(
         ["bash", "-c",

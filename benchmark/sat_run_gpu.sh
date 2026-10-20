@@ -37,10 +37,10 @@ set -uo pipefail
 
 GPU="${1:?usage: sat_run_gpu.sh <gpu> <tile>...}"
 shift
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 SAT_ROOT="${SAT_ROOT:-$(dirname "$FF3D_ROOT")/SegmentAnyTree_infer}"
 SAT_IMAGE="${SAT_IMAGE:-segment-any-tree:cu118}"
-GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+ff3d_activate_geo || exit 1
 # Sub-tile set to read, relative to $FF3D_ROOT/inputs. Halo-free unless SAT_STITCH=1.
 SAT_SUB="${SAT_SUB:-berlin/sub}"
 # 1 = keep the per-sub-tile contract LAS so `ff3d_geo stitch` can unify ids over the halo.
@@ -77,7 +77,7 @@ for T in "$@"; do
         echo "!!! $T sat run failed (rc=$rc, $M of $N result files in $RAW/final_results) after ${R}s"; continue
     fi
     echo "=== $(date -Is) $T: convert ($M files, run ${R}s) ==="
-    "$GEO_VENV/bin/python" "$FF3D_ROOT/benchmark/sat_to_ff3d.py" \
+    python "$FF3D_ROOT/benchmark/sat_to_ff3d.py" \
         --sat-las "$RAW"/final_results/*_out.la? --tile "$T" --out "$OUT" --runtime-s "$R" \
         ${KEEP_SUB[@]+"${KEEP_SUB[@]}"} \
         || { echo "!!! $T convert failed"; continue; }

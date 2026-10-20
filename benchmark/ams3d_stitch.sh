@@ -11,10 +11,9 @@
 #   nohup bash benchmark/ams3d_stitch.sh $(ls -d inputs/berlin/sub/*/ | xargs -n1 basename) \
 #     > work_dirs/logs/ams3d/stitch-$(date +%Y%m%d-%H%M%S).log 2>&1 < /dev/null &
 set -uo pipefail
-FF3D_ROOT="${FF3D_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/geo_env.sh"
 cd "$FF3D_ROOT" || exit 1
-source "$GEO_VENV/bin/activate"
+ff3d_activate_geo || exit 1
 [ "$#" -gt 0 ] || { echo "usage: bash benchmark/ams3d_stitch.sh <tile stem>..." >&2; exit 2; }
 OUT="${AMS3D_MOSAIC_OUT:-work_dirs/ams3d-mosaic}"   # override to keep an earlier mosaic intact
 MIN_H="${FF3D_MIN_HEIGHT:-2}"                       # drop instances shorter than this (m); 0 keeps all

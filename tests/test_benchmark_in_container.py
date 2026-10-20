@@ -32,7 +32,9 @@ def checkout(tmp_path):
     (root / "benchmark").mkdir(parents=True)
     (root / "work_dirs" / "logs").mkdir(parents=True)
     (root / "inputs" / "berlin").mkdir(parents=True)
-    for name in ("berlin_run_gpu.sh", "berlin_stitch.sh"):
+    # geo_env.sh too: the scripts source it for FF3D_ROOT, the venv default and the
+    # in-image check, so a checkout without it is not a checkout.
+    for name in ("berlin_run_gpu.sh", "berlin_stitch.sh", "geo_env.sh"):
         (root / "benchmark" / name).write_bytes((REPO / "benchmark" / name).read_bytes())
     (root / "inputs" / "berlin" / "3dm_33_381_5828_1_be.las").write_bytes(b"fake")
     bin_dir = tmp_path / "bin"
@@ -86,17 +88,18 @@ def test_an_explicit_zero_keeps_the_host_behaviour(checkout, tmp_path):
     assert "no-such-venv" in proc.stdout + proc.stderr   # it did try to activate it
 
 
-def test_both_scripts_detect_podmans_marker_as_well_as_dockers():
-    """podman writes /run/.containerenv, not /.dockerenv.
+def test_both_scripts_get_their_detection_from_the_shared_helper():
+    """The check lives in benchmark/geo_env.sh, once, for all eight scripts that need it.
 
-    A shell test cannot point `[ -f /.dockerenv ]` at a different path, so this asserts on
-    the detection line itself. Getting it wrong is silent in the worst way: a podman
-    container would look like a host, skip nothing, and try to `docker run` its GPU steps
-    from inside a container that has no docker.
+    It used to be an inline `case` statement copied into these two, which is how the two
+    copies came to disagree with ff3d_geo about mixed case. That the helper tests both
+    runtimes' markers is pinned in tests/test_benchmark_geo_env.py; what matters here is
+    that these scripts do not decide it for themselves any more.
     """
     for name in ("berlin_run_gpu.sh", "berlin_stitch.sh"):
-        lines = [l for l in (REPO / "benchmark" / name).read_text().splitlines()
-                 if l.strip().startswith("unset)")]
-        assert len(lines) == 1, (name, lines)
-        assert "/.dockerenv" in lines[0], (name, lines[0])
-        assert "/run/.containerenv" in lines[0], (name, lines[0])
+        text = (REPO / "benchmark" / name).read_text()
+        code = [l for l in text.splitlines() if not l.strip().startswith("#")]
+        assert any("geo_env.sh" in l for l in code), name
+        assert any("ff3d_activate_geo" in l for l in code), name
+        assert not any("dockerenv" in l or "containerenv" in l for l in code), \
+            f"{name} still decides for itself whether it is in a container"
