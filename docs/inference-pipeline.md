@@ -12,7 +12,7 @@ complements the runbooks (`docs/benchmarks/RUNBOOK-carrot.md` for the benchmark,
 | GPU server carrot (`ssh carrot`, 8x H100) | every GPU step, the batch runs | Docker image `forestformer3d:cu118` (CUDA 11.8, torch 2.0.1, mmdet3d, MinkowskiEngine, spconv) started through `benchmark/common.sh`'s `ff3d_docker` with `FF3D_GPU=<n>`; checkout `/raid/cwinkelmann/ForestFormer3D`; host venv `/raid/cwinkelmann/ff3d-geo-venv` for the pure-Python `ff3d_geo` package |
 | Mac (no GPU) | conversion, merging, masks, reports, tests | `.venv-cpu` (numpy, laspy, shapely, geopandas, pyogrio, rasterio); no torch |
 | Lenovo T14 (RTX 4080 SUPER, 15.6 GiB usable) | second GPU worker | same image, built there 2026-10-20 (`e6f60b96`, 18 GB, 40 min with `TORCH_CUDA_ARCH_LIST=8.9 MAX_JOBS=6`); geo venv `~/ff3d-geo-venv`; checkout `~/ForestFormer3D`. `region_batch=8` fits (7.3 GB peak measured, against 1.9 GB at `region_batch=1`), so no quality knob has to be lowered: 51.7 s per 100 m sub-tile against 36 s on an idle H100 |
-| olive (`ssh olive`, 2x RTX A6000 48 GB) | second GPU worker, booked/preemptible shares | same image, built there 2026-10-20 (`866a762f`); geo venv `~/ff3d-geo-venv`; checkout `~/ForestFormer3D` is a COPY, not a clone. See `.claude/skills/ff3d-carrot/SKILL.md` section 11 |
+| olive (`ssh olive`, 2x RTX A6000 48 GB) | second GPU worker, booked/preemptible shares | image `866a762f`, built there 2026-10-20 at 10:40 -- **before** the geo layer, so it has no geopandas and cannot run one-container mode; rebuild it for that. Host venv `~/ff3d-geo-venv` works today; checkout `~/ForestFormer3D` is a COPY, not a clone. See `.claude/skills/ff3d-carrot/SKILL.md` section 11 |
 
 The GPU steps never import `ff3d_geo`, and `ff3d_geo` never imports torch: the two
 halves talk through files only.
@@ -29,12 +29,25 @@ FF3D_GPU=0 ff3d_docker bash benchmark/berlin_stitch.sh   3dm_33_381_5828_1_be
 ```
 
 Inside the image, `ff3d_geo` runs its two GPU steps **in place** instead of wrapping them in
-`docker run` -- there is no docker inside the container to call. It detects this from
-`FF3D_IN_CONTAINER`, falling back to Docker's own `/.dockerenv` marker; `FF3D_IN_CONTAINER=0`
-forces the host behaviour. The two Berlin wrappers make the same check and skip activating a
-venv that the image does not have. Paths follow suit: on the host they are rewritten to the
-`/workspace` mount, inside the image they are used as they are, so a mount point other than
-`/workspace` also works.
+`docker run` -- there is no docker inside the container to call. `ff3d_docker` passes
+`FF3D_IN_CONTAINER=1` in, so nothing has to guess; without it the runtime's own marker answers
+(`/.dockerenv` for docker, `/run/.containerenv` for podman), and `FF3D_IN_CONTAINER=0` forces
+the host behaviour. The check lives once, in `benchmark/geo_env.sh` (`ff3d_in_image`), which
+every script that needs the geo half sources, and it agrees with `ff3d_geo.cli._in_image`
+value for value -- `tests/test_benchmark_geo_env.py` runs both over the same table. Paths
+follow suit: on the host they are rewritten to the `/workspace` mount, inside the image they
+are used as they are, so a mount point other than `/workspace` also works -- including for
+`docker/entrypoint.sh`, which looks for its `transforms_3d.py` patch under `$WORKSPACE`,
+`/workspace` and the working directory rather than only the middle one.
+
+**Which card.** `--gpus device=5` is renumbered inside: the container sees `/dev/nvidia0`,
+`nvidia-smi` index 0 and `NVIDIA_VISIBLE_DEVICES=void` (measured on olive, 2026-10-20), so a
+process in there cannot tell which physical GPU it holds and `--gpu` can select nothing.
+`ff3d_docker` therefore passes `FF3D_GPU` in as well, and `ff3d_geo` refuses a `--gpu` that
+disagrees with it. That is what stops the one mistake this mode invites:
+`ff3d_docker bash benchmark/berlin_run_gpu.sh 5 <tile>` without `FF3D_GPU=5` used to run on
+card 0 while every log line said 5 -- and four workers launched that way for cards 4..7 all
+shared card 0.
 
 Which deployment to use is now a choice rather than a constraint:
 
@@ -49,6 +62,16 @@ The numpy row is the reason the host venv still exists: the image's OpenMMLab pi
 at 1.24.1, while the three host venvs run 2.4-2.5. Anything in `ff3d_geo` that depends on
 newer numpy, pyproj or geopandas behaviour must therefore be exercised in BOTH, which
 `tests/test_geo_in_container.py` and the CPU suite inside the image are for.
+
+That is not hypothetical. The first run of the CPU suite inside the image (2026-10-20) failed
+two tests, and the cause was `merge_las` copying LAS point records between files with
+different header offsets: the integers are relative to their own header, so each sub-tile was
+displaced by the difference -- 13 m in the test, up to the size of a sub-tile in a km tile.
+laspy 2.6 began rescaling on write and hid it; the image pins laspy 2.5.3, where it was real.
+`merge_las` now rescales explicitly, so neither deployment depends on the laspy version for
+its coordinates, and `tests/requirements-cpu.txt`'s floors are the image's own versions --
+a floor above them is a requirement the image can never meet
+(`tests/test_dockerfile_consistency.py`).
 
 Driving the two halves from outside the repo: `demo/ff3d_steps.py` in
 `cwinkelmann/hnee_slurm_deployment` (`1e20a8b`) defines the five per-sub-tile steps as a
@@ -73,6 +96,9 @@ The T14 therefore runs **podman**, rootless and daemonless, which maps container
 invoking user. `FF3D_DOCKER=podman` is the whole switch -- `ff3d_gpu_args` in
 `benchmark/common.sh` swaps `--gpus device=N` for podman's `--device nvidia.com/gpu=N`, and
 one-container detection checks podman's `/run/.containerenv` beside docker's `/.dockerenv`.
+The swap is decided by asking the binary (`$FF3D_DOCKER --version`), not by its name: the
+`podman-docker` package installs `/usr/bin/docker` *as* podman, and a container handed a
+`--gpus` that podman ignores starts with no GPU and fails minutes later inside torch.
 Setup, the reason podman beats rootless docker here (it needs no edit to the global
 nvidia-container-runtime config, so the root daemon keeps working `--gpus`), the measured
 verification and the troubleshooting table are in **`docs/container-runtimes.md`**.

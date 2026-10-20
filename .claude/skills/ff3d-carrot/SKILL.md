@@ -234,6 +234,11 @@ docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep forestformer3d
 # forestformer3d:cu118 866a762f0591   (17.7 GB)
 ```
 
+That build is from **10:40**, before the geo layer: it has no geopandas, so olive can run
+the host-venv deployment but **not** one-container mode. Rebuild it there when you want the
+single-container path (`docker build -t forestformer3d:cu118 .`, ~40 min; the geo layer and
+the verification layer are the only new ones).
+
 Docker is rootless as on carrot. `docker` is at `/usr/bin/docker`; `hrm-worker` and
 `slurm-test-slurm` images also live there, from the booking/Slurm work.
 

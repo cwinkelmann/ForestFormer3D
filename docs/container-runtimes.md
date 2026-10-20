@@ -115,7 +115,7 @@ FF3D_GPU=0 ff3d_docker bash benchmark/berlin_run_gpu.sh 0 <tile>   # a whole km 
 
 No queue script changes. Two things inside the repo had to learn about podman:
 
-**The GPU flag.** `ff3d_gpu_args` in `benchmark/common.sh` derives it from `$FF3D_DOCKER`:
+**The GPU flag.** `ff3d_gpu_args` in `benchmark/common.sh` picks it per runtime:
 `--gpus device=N` for docker, `--device nvidia.com/gpu=N` for podman. podman nominally
 accepts `--gpus` for docker compatibility, but 4.9.3 does not even list it in
 `podman run --help`, and a container that starts with **no** GPU does not fail at `run` --
@@ -123,13 +123,25 @@ it fails a minute later inside torch, which reads like a broken image. So the de
 named explicitly. The value is read at call time, because the queue scripts
 `export FF3D_GPU=N` *after* sourcing `common.sh` (`tests/test_benchmark_runtime.py`).
 
+Which runtime it is comes from `$FF3D_DOCKER --version`, not from the name: the
+`podman-docker` package installs `/usr/bin/docker` *as* podman, so a host can call podman
+"docker" and get the `--gpus` that podman ignores -- the silent no-GPU start again, on a
+host where nothing looked unusual. The name is only the fallback for when the binary cannot
+be run at all (a dry run on a machine with no runtime installed).
+
 **The "am I already in a container?" marker.** One-container mode has to know not to wrap
 its GPU steps in a `docker run` that cannot exist inside the container. `FF3D_IN_CONTAINER`
 says so explicitly, but the fallback is a marker file -- and the two runtimes write
 different ones: docker touches `/.dockerenv`, podman writes `/run/.containerenv`. Checking
-only docker's would make a podman container look like a host; `ff3d_geo/cli.py`'s
-`_in_image()` and both Berlin wrappers now check both
-(`tests/test_geo_in_container.py`, `tests/test_benchmark_in_container.py`).
+only docker's would make a podman container look like a host. `ff3d_geo/cli.py`'s
+`_in_image()` checks both, and the shell side checks them once in
+`benchmark/geo_env.sh`'s `ff3d_in_image`, which every script that needs the geo half
+sources. The two implementations are held to the same answers, value for value, by
+`tests/test_benchmark_geo_env.py` -- including mixed case, where they used to disagree
+(`FF3D_IN_CONTAINER=False` meant host to Python and container to the shell).
+`ff3d_docker` also passes `FF3D_IN_CONTAINER=1` and `FF3D_GPU` in, so inside a container
+started by it nothing depends on a marker, and `ff3d_geo` can refuse a `--gpu` that
+disagrees with the card the container was actually given.
 
 ## Migrating a host that already ran root docker
 
@@ -202,6 +214,7 @@ and GeoTIFFs.
 | `newuidmap: command not found` | `uidmap` missing (normally a podman dependency) |
 | `potentially insufficient UIDs or GIDs` | `/etc/subuid`/`/etc/subgid` has no entry for the user |
 | geo steps try to `docker run` inside a container | `/run/.containerenv` not checked -- pre-`5583ac5` code; or set `FF3D_IN_CONTAINER=1` |
+| `--gpu N cannot be honoured: this container was started for GPU M` | right: the container holds M. Start it with `FF3D_GPU=N`, or ask for `--gpu M` |
 | a detached run dies at logout | `loginctl enable-linger` not set (podman has no daemon to outlive the session) |
 
 **After every driver update, regenerate the CDI spec.** The spec pins the device list and
