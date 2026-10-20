@@ -25,7 +25,7 @@ ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 # Parallel nvcc invocations in the extension builds below. Each one can take a GB or more,
 # so lower it (--build-arg MAX_JOBS=4) on a host with little free RAM or few cores.
 ARG MAX_JOBS=16
-# The wheel layers below pull ~3 GB (torch, mmcv, open3d). pip's default 15 s socket
+# The wheel layers below pull ~3 GB (torch, mmcv, the geo stack). pip's default 15 s socket
 # timeout and 5 retries give up on a slow link mid-download and fail the whole layer --
 # seen on the T14 over the VPN, at the OpenMMLab layer, with "TimeoutError: The read
 # operation timed out". These make a hiccup cost a retry instead of the build.
@@ -40,7 +40,7 @@ ENV PIP_DEFAULT_TIMEOUT=60 \
     DEBIAN_FRONTEND=noninteractive
 
 # Compilers and CMake for the CUDA extensions, OpenBLAS for MinkowskiEngine,
-# GL/X runtime libraries for the open3d and opencv wheels, and Python 3.10 itself (this
+# GL/X runtime libraries for the opencv wheel, and Python 3.10 itself (this
 # base has no conda environment). Ubuntu 22.04 ships gcc 11, which CUDA 11.8 supports, so
 # no toolchain PPA is needed.
 RUN apt-get update \
@@ -227,7 +227,7 @@ RUN pip install --no-cache-dir --no-deps \
 # Everything importable together (mmdet3d checks the mmcv/mmdet/mmengine version ranges),
 # both halves in one interpreter: if the geo wheels had been built against numpy 2 this is
 # where it would fail, with "_ARRAY_API not found" rather than at run time in a tile.
-RUN python -c "import yaml, six, regex, skimage, pandas, torchvision, mmcv, mmengine, mmdet, mmdet3d, numpy, spconv.pytorch, MinkowskiEngine, torch_scatter, torch_cluster, segmentator, laspy, plyfile, open3d, tqdm, shapely, pyproj, pyogrio, geopandas, rasterio; from torch_points_kernels import instance_iou; print('mmcv', mmcv.__version__, 'mmengine', mmengine.__version__, 'mmdet', mmdet.__version__, 'mmdet3d', mmdet3d.__version__, 'numpy', numpy.__version__, 'shapely', shapely.__version__, 'geopandas', geopandas.__version__)"
+RUN python -c "import yaml, six, regex, skimage, pandas, torchvision, mmcv, mmengine, mmdet, mmdet3d, numpy, spconv.pytorch, MinkowskiEngine, torch_scatter, torch_cluster, segmentator, laspy, plyfile, tqdm, shapely, pyproj, pyogrio, geopandas, rasterio; from torch_points_kernels import instance_iou; print('mmcv', mmcv.__version__, 'mmengine', mmengine.__version__, 'mmdet', mmdet.__version__, 'mmdet3d', mmdet3d.__version__, 'numpy', numpy.__version__, 'shapely', shapely.__version__, 'geopandas', geopandas.__version__)"
 
 WORKDIR /workspace
 # The checkout is normally mounted over /workspace; the copy only makes the image
