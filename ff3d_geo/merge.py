@@ -159,6 +159,15 @@ def merge_las(las_paths, out_las) -> dict:
                 ids = np.asarray(las.treeID, dtype=np.int32).copy()
                 ids[ids >= 0] += offset
                 las.treeID = ids
+                # A point record holds X/Y/Z as integers relative to ITS OWN header, and
+                # every sub-tile has a different offset (the floor of its own minimum)
+                # from the one written here (the floor of the global minimum). Copying the
+                # records across without this re-encodes nothing and displaces the whole
+                # sub-tile by the difference -- 114 m in tests/test_geo_merge.py's case.
+                # laspy 2.6 started rescaling on write, which hid it; the image pins
+                # 2.5.3, where it is real. change_scaling exists in both, so neither
+                # deployment depends on the laspy version for its coordinates.
+                las.change_scaling(scales=header.scales, offsets=header.offsets)
                 writer.write_points(las.points)
                 all_ids.append(ids)
         tmp_las.replace(out_las)

@@ -117,3 +117,43 @@ def test_the_parser_sees_what_the_image_really_has():
     checked = _checked_imports(DOCKERFILE.read_text())
     for expected in ("mmdet3d", "geopandas", "MinkowskiEngine", "torch_points_kernels"):
         assert expected in checked, (expected, sorted(checked))
+
+
+REQUIREMENTS_CPU = DOCKERFILE.parent / "tests" / "requirements-cpu.txt"
+
+_FLOOR = re.compile(r"^([A-Za-z][A-Za-z0-9._-]*)(?:\[[^\]]+\])?>=([0-9][0-9.]*)")
+_PIN = re.compile(r"\b([A-Za-z][A-Za-z0-9._-]*)==([0-9][0-9.]*)")
+
+
+def _version(text: str) -> tuple:
+    return tuple(int(part) for part in text.rstrip(".").split("."))
+
+
+def test_the_cpu_test_floors_are_met_by_the_image():
+    """The CPU suite also runs inside the image, so it cannot ask for more than it has.
+
+    `docs/inference-pipeline.md` names "the CPU suite inside the image" as the thing that
+    exercises ff3d_geo against numpy 1.24, and the image's OpenMMLab pins hold the geo
+    stack at its last numpy 1.x releases. A floor above those is a requirement the image
+    can never satisfy -- it said geopandas>=1.0 while the image pins 0.14.4 -- so either
+    the floor is wrong or the code genuinely cannot run in one container.
+    """
+    pins = {}
+    for line in _logical_lines(DOCKERFILE.read_text()):
+        if "pip install" not in line:
+            continue
+        for name, version in _PIN.findall(line):
+            pins[_normalise(name)] = version
+    floors = {}
+    for line in REQUIREMENTS_CPU.read_text().splitlines():
+        found = _FLOOR.match(line.strip())
+        if found:
+            floors[_normalise(found.group(1))] = found.group(2)
+    assert floors, "parsed no floors from tests/requirements-cpu.txt"
+
+    too_high = {name: (floor, pins[name]) for name, floor in floors.items()
+                if name in pins and _version(floor) > _version(pins[name])}
+    assert too_high == {}, (
+        "tests/requirements-cpu.txt asks for versions the image does not have "
+        f"{{name: (floor, image pin)}}: {too_high}"
+    )

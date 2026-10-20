@@ -1,10 +1,17 @@
-numpy
+# The CPU suite runs in two places with different numbers, and must pass in both:
+#   - a host venv (carrot, the T14, olive, the Mac): newest wheels, numpy 2.4-2.5
+#   - inside forestformer3d:cu118: the geo stack's last numpy 1.x releases, because the
+#     OpenMMLab pins hold numpy at 1.24.1 (see the Dockerfile's geo layer)
+# So every floor here is the version the IMAGE has, not the newest that works -- a higher
+# floor is a requirement the image can never meet, and
+# tests/test_dockerfile_consistency.py fails when one creeps up.
+numpy>=1.24
 plyfile
 scipy
 laspy[lazrs]>=2.5
 pytest
 shapely>=2.0
 pyproj>=3.6
-geopandas>=1.0
+geopandas>=0.14
 pyogrio>=0.7
 rasterio>=1.3

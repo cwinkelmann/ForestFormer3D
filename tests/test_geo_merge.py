@@ -128,3 +128,46 @@ def test_merge_trees_rejects_the_same_gpkg_twice(tmp_path):
     with pytest.raises(ValueError, match=r"a\.gpkg more than once"):
         merge_trees([ga, ga], out, {str(a): 0, "other": 3})
     assert not out.exists()
+
+
+def test_merge_las_keeps_the_coordinates_when_the_sub_tiles_disagree_on_the_offset(tmp_path):
+    """Sub-tiles each carry their own header offset; the merged file has one of its own.
+
+    ``results_to_las`` and ``sat_file_to_las`` both set a sub-tile's header offset to the
+    floor of that sub-tile's own minimum, so no two sub-tiles agree on it, and the merged
+    header uses the floor of the global minimum. A LAS point record stores X/Y/Z as
+    integers relative to its own header, so copying records between the two without
+    rescaling displaces every sub-tile by the difference of the offsets -- tens of metres,
+    silently, in a file that still looks well-formed.
+
+    laspy 2.6 began rescaling on write and hid this; the image pins laspy 2.5.3, where a
+    merged km tile came out with its sub-tiles shifted against each other (measured
+    2026-10-20 in forestformer3d:cu118). The fix must not depend on the laspy version, so
+    this test states the invariant: what goes in comes out, whatever the offsets were.
+    """
+    rng = np.random.default_rng(7)
+    parts = []
+    for i, (e, n) in enumerate(((381000.0, 5828000.0), (381100.0, 5828000.0))):
+        # The 13 m of slack is what makes the offsets differ between the sub-tiles.
+        x = e + rng.uniform(13.0 * i, 100.0, 40)
+        y = n + rng.uniform(13.0 * (1 - i), 100.0, 40)
+        z = rng.uniform(5.0, 30.0, 40)
+        path = write_result_las(
+            tmp_path / f"part{i}.las", x, y, z,
+            np.resize(np.asarray([-1, 0, 1], np.int32), 40),
+            np.resize(np.asarray([0, 1, 2], np.uint8), 40),
+            score=np.full(40, 0.5, np.float32),
+            offsets=np.floor([x.min(), y.min(), z.min()]),
+        )
+        parts.append((path, x, y, z))
+    offsets = [laspy.read(p).header.offsets for p, *_ in parts]
+    assert offsets[0][1] != offsets[1][1], "the sub-tiles must disagree, or nothing is tested"
+
+    out = tmp_path / "merged.las"
+    merge_las([p for p, *_ in parts], out)
+    m = laspy.read(out)
+    for axis, want in (("x", 1), ("y", 2), ("z", 3)):
+        np.testing.assert_allclose(
+            np.asarray(getattr(m, axis)),
+            np.concatenate([part[want] for part in parts]),
+            atol=0.002, err_msg=f"{axis} moved during the merge")
