@@ -69,40 +69,13 @@ GeoTIFFs land that way too. `--user` is not the fix: `docker/entrypoint.sh` writ
 `transforms_3d.py` into site-packages at every start, which needs root *inside* the
 container.
 
-The fix is a rootless runtime, which maps container root to the invoking user. Two ways:
-
-| | rootless docker | podman |
-|---|---|---|
-| daemon | a second, per-user `dockerd` (user systemd unit) | none; `podman run` is the process |
-| setup | `dockerd-rootless-setuptool.sh install` | `apt install podman` |
-| GPU | nvidia-container-runtime, which for a rootless daemon needs `no-cgroups = true` in the **global** `/etc/nvidia-container-runtime/config.toml` -- and that breaks `--gpus` for the root daemon, i.e. for every other project on the host | a CDI spec: `nvidia-ctk cdi generate` writes `/etc/cdi/nvidia.yaml`, an **additive** file that changes nothing already working |
-| GPU flag | `--gpus device=N` | `--device nvidia.com/gpu=N` |
-| images | its own store; copy with `docker save \| docker --context rootless load` | its own store; copy with `docker save \| podman load` |
-
-podman is the cleaner of the two precisely because of the GPU row: nothing that already runs
-on the host changes behaviour. `benchmark/common.sh` needs no edit either --
-`FF3D_DOCKER=podman` is enough, and `ff3d_gpu_args` switches the GPU flag with it
-(`tests/test_benchmark_runtime.py`).
-
-```bash
-# once, as root (podman pulls in uidmap, which rootless needs either way)
-sudo apt-get install -y podman
-sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml   # re-run after a driver update
-sudo loginctl enable-linger "$USER"      # so a detached run survives logout
-
-# once, as the user: 18 GB from the root daemon's store into podman's
-docker save forestformer3d:cu118 | podman load
-
-# then
-export FF3D_DOCKER=podman
-FF3D_GPU=0 ff3d_docker nvidia-smi -L
-```
-
-The CDI spec pins the device list at generation time, so it has to be regenerated after a
-driver update; `podman run` then fails with an unknown CDI device rather than silently
-running on the CPU. `benchmark/wait_idle.sh` reads `.HostConfig.DeviceRequests` from
-`docker inspect` to tell which card a container holds -- podman reports its CDI devices
-elsewhere, so that helper stays docker-only (it is a carrot queue tool).
+The T14 therefore runs **podman**, rootless and daemonless, which maps container root to the
+invoking user. `FF3D_DOCKER=podman` is the whole switch -- `ff3d_gpu_args` in
+`benchmark/common.sh` swaps `--gpus device=N` for podman's `--device nvidia.com/gpu=N`, and
+one-container detection checks podman's `/run/.containerenv` beside docker's `/.dockerenv`.
+Setup, the reason podman beats rootless docker here (it needs no edit to the global
+nvidia-container-runtime config, so the root daemon keeps working `--gpus`), the measured
+verification and the troubleshooting table are in **`docs/container-runtimes.md`**.
 
 ## The model side (inside the container)
 

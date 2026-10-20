@@ -129,7 +129,8 @@ def _shell_literal(value: str) -> str:
 #: Docker writes this file into every container it starts; it is the fallback marker for
 #: "we are already inside the image" when FF3D_IN_CONTAINER says nothing. A module constant
 #: so a test can point it at a file it controls.
-_DOCKERENV = Path("/.dockerenv")
+_DOCKERENV = Path("/.dockerenv")          # written by docker
+_CONTAINERENV = Path("/run/.containerenv")  # written by podman (and buildah, CRI-O)
 
 
 def _in_image() -> bool:
@@ -138,13 +139,17 @@ def _in_image() -> bool:
     The image carries both halves of the pipeline (the OpenMMLab stack and the geo stack),
     so the whole run can happen in one container -- and then the two GPU steps must NOT
     wrap themselves in ``docker run``, because there is no docker inside the container.
-    ``FF3D_IN_CONTAINER=1`` says so explicitly; otherwise Docker's own marker file answers
-    it. Set ``FF3D_IN_CONTAINER=0`` to force the host behaviour (what the tests do).
+    ``FF3D_IN_CONTAINER=1`` says so explicitly; otherwise the runtime's own marker file
+    answers it -- and the two runtimes write different ones: docker touches
+    ``/.dockerenv``, podman writes ``/run/.containerenv``. Checking only docker's would
+    leave a podman container looking like a host, so it would try to ``docker run`` its GPU
+    steps from inside the container, where there is no docker. Set ``FF3D_IN_CONTAINER=0``
+    to force the host behaviour (what the tests do).
     """
     flag = os.environ.get("FF3D_IN_CONTAINER")
     if flag is not None:
         return flag.strip().lower() not in ("", "0", "false", "no")
-    return _DOCKERENV.exists()
+    return _DOCKERENV.exists() or _CONTAINERENV.exists()
 
 
 def _mount_root(repo: Path) -> PurePosixPath:

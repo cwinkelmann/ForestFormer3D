@@ -26,7 +26,9 @@ GEO_VENV="${GEO_VENV:-$(dirname "$FF3D_ROOT")/ff3d-geo-venv}"
 # shelling out to a docker that does not exist inside the container.
 IN_IMAGE=0
 case "${FF3D_IN_CONTAINER-unset}" in
-  unset)         [ -f /.dockerenv ] && IN_IMAGE=1 ;;   # Docker's own marker
+  # docker touches /.dockerenv, podman writes /run/.containerenv -- check both, or a
+  # podman container looks like a host and tries to docker-run its GPU steps.
+  unset)         { [ -f /.dockerenv ] || [ -f /run/.containerenv ]; } && IN_IMAGE=1 ;;
   ""|0|false|no) IN_IMAGE=0 ;;                         # forced host mode
   *)             IN_IMAGE=1 ;;
 esac

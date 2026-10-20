@@ -50,6 +50,21 @@ def test_in_image_honours_the_explicit_flag(monkeypatch):
         assert _in_image() is expected, value
 
 
+def test_in_image_falls_back_to_podmans_marker_too(monkeypatch, tmp_path):
+    """podman writes /run/.containerenv instead of docker's /.dockerenv.
+
+    With only docker's marker checked, one container in a podman run would decide it was on
+    the host and wrap its GPU steps in a `docker run` that cannot exist there.
+    """
+    monkeypatch.delenv("FF3D_IN_CONTAINER", raising=False)
+    monkeypatch.setattr(cli, "_DOCKERENV", tmp_path / "no-dockerenv")
+    marker = tmp_path / "containerenv"
+    monkeypatch.setattr(cli, "_CONTAINERENV", marker)
+    assert _in_image() is False
+    marker.touch()
+    assert _in_image() is True
+
+
 def test_in_image_falls_back_to_the_dockerenv_marker(monkeypatch, tmp_path):
     monkeypatch.delenv("FF3D_IN_CONTAINER", raising=False)
     marker = tmp_path / "dockerenv"

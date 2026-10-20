@@ -84,3 +84,19 @@ def test_an_explicit_zero_keeps_the_host_behaviour(checkout, tmp_path):
                    {"FF3D_IN_CONTAINER": "0"})
     assert "inside the image" not in proc.stdout
     assert "no-such-venv" in proc.stdout + proc.stderr   # it did try to activate it
+
+
+def test_both_scripts_detect_podmans_marker_as_well_as_dockers():
+    """podman writes /run/.containerenv, not /.dockerenv.
+
+    A shell test cannot point `[ -f /.dockerenv ]` at a different path, so this asserts on
+    the detection line itself. Getting it wrong is silent in the worst way: a podman
+    container would look like a host, skip nothing, and try to `docker run` its GPU steps
+    from inside a container that has no docker.
+    """
+    for name in ("berlin_run_gpu.sh", "berlin_stitch.sh"):
+        lines = [l for l in (REPO / "benchmark" / name).read_text().splitlines()
+                 if l.strip().startswith("unset)")]
+        assert len(lines) == 1, (name, lines)
+        assert "/.dockerenv" in lines[0], (name, lines[0])
+        assert "/run/.containerenv" in lines[0], (name, lines[0])

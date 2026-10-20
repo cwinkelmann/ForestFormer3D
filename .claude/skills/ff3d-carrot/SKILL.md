@@ -204,9 +204,18 @@ check `nvidia-smi` for its process) before starting a run.
 **Docker here is NOT rootless** (unlike carrot and olive), so container-written files come
 out `root:root` -- the result PLYs, and in one-container mode the LAS/GeoPackage/GeoTIFFs
 too. `--user` cannot fix it (`docker/entrypoint.sh` writes into site-packages). The clean fix
-is podman, which needs no change to `benchmark/common.sh` beyond `FF3D_DOCKER=podman`; the
-setup and the reason it beats rootless docker here are in `docs/inference-pipeline.md`,
-"Docker or podman: who owns the results".
+is podman, installed and verified here on 2026-10-20 (rootless, GPU through a CDI spec,
+container-written files owned by `christian`). `FF3D_DOCKER=podman` is the whole switch:
+
+```bash
+source benchmark/common.sh
+export FF3D_DOCKER=podman
+FF3D_GPU=0 ff3d_docker nvidia-smi -L
+```
+
+Root docker is still there and untouched (37 images, 587 GB of volumes, its own store).
+`docs/container-runtimes.md` has the setup, why podman rather than rootless docker, and the
+troubleshooting table.
 
 ## 11. olive (second GPU host, 2x RTX A6000 48 GB)
 
