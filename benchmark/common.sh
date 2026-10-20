@@ -14,6 +14,12 @@ FF3D_IMAGE="${FF3D_IMAGE:-forestformer3d:cu118}"
 FF3D_DOCKER="${FF3D_DOCKER:-docker}"          # "podman", or "sudo docker" if needed
 FF3D_SHM="${FF3D_SHM:-64g}"
 FF3D_GPU="${FF3D_GPU:-0}"                     # ONE physical GPU, see ff3d_gpu_args
+# Optional container name. A preemption watcher cannot hand the card back by killing
+# the `docker run` client -- that leaves the container holding the GPU while the
+# booking says it was released -- so it has to run `docker stop -t <notice> <name>`,
+# and the name has to be something the caller chose. Empty means "let the runtime
+# pick one", which is right for every run nobody is waiting to stop.
+FF3D_NAME="${FF3D_NAME:-}"
 FF3D_OLD_COMMIT="${FF3D_OLD_COMMIT:-6a75c37}"
 # The old-code worktree (main @ FF3D_OLD_COMMIT) MUST NOT live under
 # $FF3D_ROOT/work_dirs: ff3d_docker_old also bind-mounts $FF3D_ROOT/work_dirs onto
@@ -84,6 +90,12 @@ ff3d_runtime_kind() {
   echo "$_FF3D_RUNTIME_KIND"
 }
 
+ff3d_name_args() {
+  if [ -n "${FF3D_NAME:-}" ]; then
+    echo "--name $FF3D_NAME"
+  fi
+}
+
 ff3d_gpu_args() {
   case "$(ff3d_runtime_kind)" in
     podman) echo "--device nvidia.com/gpu=${FF3D_GPU}" ;;
@@ -100,7 +112,7 @@ ff3d_docker() {
   # because the card cannot be identified from inside: --gpus device=5 is renumbered to
   # device 0 in the container (measured on olive). ff3d_geo compares its --gpu against it
   # and refuses a mismatch, which is what stops four "different" workers sharing card 0.
-  ff3d_run $FF3D_DOCKER run --rm $(ff3d_gpu_args) --shm-size="$FF3D_SHM" \
+  ff3d_run $FF3D_DOCKER run --rm $(ff3d_name_args) $(ff3d_gpu_args) --shm-size="$FF3D_SHM" \
     -e PYTHONPATH=/workspace -e FF3D_IN_CONTAINER=1 -e FF3D_GPU="$FF3D_GPU" \
     -w /workspace \
     -v "$FF3D_ROOT":/workspace \

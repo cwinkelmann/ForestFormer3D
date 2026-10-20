@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 COMMON = REPO / "benchmark" / "common.sh"
 
 
-def _dry_run_argv(tmp_path, docker: str, gpu: str = "0") -> list[str]:
+def _dry_run_argv(tmp_path, docker: str, gpu: str = "0", name: str | None = None) -> list[str]:
     """What `ff3d_docker python x.py` would run, as printed by FF3D_DRY_RUN=1."""
     root = tmp_path / "ForestFormer3D"
     (root / "benchmark").mkdir(parents=True, exist_ok=True)
@@ -29,6 +29,8 @@ def _dry_run_argv(tmp_path, docker: str, gpu: str = "0") -> list[str]:
     shutil.copy(REPO / "benchmark" / "geo_env.sh", root / "benchmark" / "geo_env.sh")
     env = {k: v for k, v in os.environ.items() if not k.startswith("FF3D_")}
     env.update(FF3D_DRY_RUN="1", FF3D_DOCKER=docker, FF3D_GPU=gpu)
+    if name is not None:
+        env["FF3D_NAME"] = name
     proc = subprocess.run(
         ["bash", "-c", f'source "{root}/benchmark/common.sh"; ff3d_docker python x.py'],
         capture_output=True, text=True, env=env, cwd=tmp_path)
@@ -162,3 +164,20 @@ def test_smoke_runs_through_ff3d_docker_so_it_follows_the_runtime(tmp_path):
     assert "podman run" in out, out
     assert "nvidia.com/gpu=1" in out, out
     assert "tests/gpu/test_smoke.py" in out, out
+
+
+def test_a_named_container_is_one_a_watcher_can_stop(tmp_path):
+    """Preemption needs the container stopped, and the name is the only handle.
+
+    Killing the `docker run` client does not stop the container -- it keeps the card while
+    the booking says it was handed back. A watcher therefore has to run
+    `docker stop -t <notice> <name>`, which means ff3d_docker must accept a name.
+    """
+    argv = _dry_run_argv(tmp_path, "docker", gpu="0", name="ff3d-booked-7")
+    assert "--name" in argv and "ff3d-booked-7" in argv, argv
+    assert argv.index("--name") + 1 == argv.index("ff3d-booked-7"), argv
+
+
+def test_an_unnamed_run_passes_no_name(tmp_path):
+    """Docker picks its own name when none is given; passing an empty one is an error."""
+    assert "--name" not in _dry_run_argv(tmp_path, "docker")
