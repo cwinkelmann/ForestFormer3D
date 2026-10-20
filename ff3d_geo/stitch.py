@@ -46,7 +46,7 @@ import laspy
 import numpy as np
 from shapely.geometry import MultiPoint, Point
 
-from ff3d_geo.convert import result_point_header
+from ff3d_geo.convert import SEMANTIC_MASKED, result_point_header
 from ff3d_geo.report import build_report, recommend, write_report
 from ff3d_geo.split import IDENT_DTYPE
 from ff3d_geo.trees import TREE_COLUMNS, ground_surface
@@ -392,6 +392,20 @@ def adjacent_pairs(mosaic: Mosaic) -> list[tuple[str, str]]:
     return sorted(pairs)
 
 
+def subtiles_by_source(mosaic: Mosaic) -> dict[str, list[dict]]:
+    """Sub-tiles grouped under their source key, each group in manifest order.
+
+    The write phase needs one source's sub-tiles at a time. Scanning every sub-tile once
+    per source is O(sources x sub-tiles): 301 k iterations for the 57-tile Berlin mosaic,
+    which costs nothing, but 3.8e10 for a 31 k-tile Brandenburg-sized one. Grouping once
+    keeps that phase linear in the sub-tile count.
+    """
+    groups: dict[str, list[dict]] = {}
+    for sub in mosaic.subtiles:
+        groups.setdefault(sub["source"], []).append(sub)
+    return groups
+
+
 @dataclass
 class _Subtile:
     """One sub-tile's decoded result, aligned with its ``_ident.npy`` sidecar."""
@@ -572,10 +586,30 @@ def _label_lookup(tables: dict[str, tuple[np.ndarray, np.ndarray]], stem: str,
     return np.where(hit, mapped[position], -1).astype(np.int32)
 
 
+@dataclass
+class _WrittenTile:
+    """What a freshly written km tile holds, kept so nothing has to read it back.
+
+    ``x``/``y``/``z`` are the values as WRITTEN -- taken off the record after the scales
+    and offsets of :func:`result_point_header` were applied -- so tree parts built from
+    them are bit-identical to parts built by decoding the file again.
+    """
+
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
+    classification: np.ndarray
+    crs: object
+
+
 def _write_source_las(source: dict, out_las: Path, tree_id: np.ndarray,
                       semantic: np.ndarray, score: np.ndarray,
-                      epsg: int = EPSG) -> None:
-    """Rewrite a source km tile with the stitched labels, in its own point order."""
+                      epsg: int = EPSG) -> _WrittenTile:
+    """Rewrite a source km tile with the stitched labels, in its own point order.
+
+    Returns the coordinates and classification it wrote, so the caller can build the
+    tile's tree parts without decoding the file a second time.
+    """
     source_path = Path(source["path"])
     out_las.parent.mkdir(parents=True, exist_ok=True)
     tmp_las = out_las.with_name(out_las.name + ".tmp")
@@ -586,6 +620,10 @@ def _write_source_las(source: dict, out_las: Path, tree_id: np.ndarray,
             source_dims = {d.name for d in reader.header.point_format.dimensions}
             copy_dims = [d for d in _COPY_DIMS if d in source_dims]
             start = 0
+            xs: list[np.ndarray] = []
+            ys: list[np.ndarray] = []
+            zs: list[np.ndarray] = []
+            classes: list[np.ndarray] = []
             with laspy.open(str(tmp_las), mode="w", header=header) as writer:
                 for points in reader.chunk_iterator(_CHUNK_POINTS):
                     n_chunk = len(points)
@@ -606,13 +644,29 @@ def _write_source_las(source: dict, out_las: Path, tree_id: np.ndarray,
                     record.semantic = semantic[start:stop]
                     record.score = score[start:stop]
                     writer.write_points(record)
+                    # Read back off the record, not off `points`: these are the values
+                    # the header's scales and offsets just quantised, i.e. what the file
+                    # now holds, so parts built from them cannot drift from the file.
+                    xs.append(np.asarray(record.x, dtype=np.float64))
+                    ys.append(np.asarray(record.y, dtype=np.float64))
+                    zs.append(np.asarray(record.z, dtype=np.float64))
+                    classes.append(np.asarray(record.classification))
                     start = stop
             if start != len(tree_id):
                 raise ValueError(
                     f"stitch: {source_path} yielded {start} points but its manifest "
                     f"entry records {len(tree_id)}"
                 )
+            written = _WrittenTile(
+                x=np.concatenate(xs) if xs else np.empty(0, dtype=np.float64),
+                y=np.concatenate(ys) if ys else np.empty(0, dtype=np.float64),
+                z=np.concatenate(zs) if zs else np.empty(0, dtype=np.float64),
+                classification=(np.concatenate(classes) if classes
+                                else np.empty(0, dtype=np.uint8)),
+                crs=header.parse_crs(),
+            )
         tmp_las.replace(out_las)
+        return written
     except BaseException:
         tmp_las.unlink(missing_ok=True)
         raise
@@ -648,8 +702,9 @@ def _hull_area(points: np.ndarray) -> float:
     return float(hull.area) if hull.geom_type == "Polygon" else 0.0
 
 
-def _tile_tree_parts(las_path: Path, ground_grid_m: float = 1.0):
-    """Per-tree partial aggregates for one km tile, plus its ground grid and CRS.
+def tree_parts_from_arrays(x, y, z, tree_id, semantic, classification, score,
+                           ground_grid_m: float = 1.0):
+    """Per-tree partial aggregates for one km tile, plus its ground grid and extent.
 
     The aggregates are chosen so that two tiles' parts for the same global id can be
     merged EXACTLY (see :func:`_mosaic_tree_rows`): counts and score sums add, ``top_z``
@@ -657,15 +712,18 @@ def _tile_tree_parts(las_path: Path, ground_grid_m: float = 1.0):
     as points because the stem position is a median over it. The band is taken at this
     tile's own ``min_z``, which is always at or above the global one, so it is a superset
     of the points the merged band needs.
+
+    Takes arrays rather than a path so :func:`stitch` can build a tile's parts from what
+    it just wrote. Every input is cast here, so a caller may pass the compact dtypes the
+    LAS holds (int32 ids, uint8 semantics, float32 scores) or the decoded float64 ones.
     """
-    las = laspy.read(str(las_path))
-    x = np.asarray(las.x, dtype=np.float64)
-    y = np.asarray(las.y, dtype=np.float64)
-    z = np.asarray(las.z, dtype=np.float64)
-    tree_id = np.asarray(las.treeID, dtype=np.int64)
-    semantic = np.asarray(las.semantic, dtype=np.int64)
-    classification = np.asarray(las.classification, dtype=np.int64)
-    score = np.asarray(las.score, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    z = np.asarray(z, dtype=np.float64)
+    tree_id = np.asarray(tree_id, dtype=np.int64)
+    semantic = np.asarray(semantic, dtype=np.int64)
+    classification = np.asarray(classification, dtype=np.int64)
+    score = np.asarray(score, dtype=np.float64)
 
     ground, extent = ground_surface(x, y, z, semantic, classification, ground_grid_m)
 
@@ -690,7 +748,7 @@ def _tile_tree_parts(las_path: Path, ground_grid_m: float = 1.0):
             "low": np.column_stack([tx[low], ty[low], tz[low]]),
             "hull": _hull_vertices(tx, ty),
         }
-    return parts, ground, extent, las.header.parse_crs()
+    return parts, ground, extent
 
 
 def _mosaic_tree_rows(parts_by_tile: dict, ground_by_tile: dict, extent_by_tile: dict):
@@ -866,6 +924,11 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
     neighbour_only = [s["key"] for s in mosaic.sources if s["key"] not in owning_sources]
 
     tiles: dict[str, dict] = {}
+    # Grouped once: scanning every sub-tile per source is quadratic, see
+    # subtiles_by_source.
+    subs_by_source = subtiles_by_source(mosaic)
+    parts_by_tile, ground_by_tile, extent_by_tile, crs_by_tile = {}, {}, {}, {}
+    n_masked_by_tile: dict[str, int] = {}
     for source in mosaic.sources:
         if source["key"] not in owning_sources:
             continue
@@ -876,9 +939,7 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
         score = np.full(n_points, NODATA_SCORE, dtype=np.float32)
         global_tile = np.int64(mosaic.source_index(source["key"]))
 
-        for sub in mosaic.subtiles:
-            if sub["source"] != source["key"]:
-                continue
+        for sub in subs_by_source.get(source["key"], ()):
             data = load(sub["stem"])
             # A core point always comes from this source, but the halo does not, so the
             # ownership mask is core AND "from this km tile" before indexing by index.
@@ -902,7 +963,21 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
             score[index] = data.score[own]
 
         out_las = out_dir / f"{source_stem}.las"
-        _write_source_las(source, out_las, tree_id, semantic, score, epsg=epsg)
+        written = _write_source_las(source, out_las, tree_id, semantic, score, epsg=epsg)
+        # Parts, ground grid and CRS come from the arrays just written -- decoding the
+        # file again is a second full pass over the tile for values already in hand.
+        (parts_by_tile[source_stem], ground_by_tile[source_stem],
+         extent_by_tile[source_stem]) = tree_parts_from_arrays(
+            written.x, written.y, written.z, tree_id, semantic,
+            written.classification, score)
+        crs_by_tile[source_stem] = written.crs
+        # Freed before the next tile allocates its own: the coordinates of a 25 M point
+        # tile are ~600 MB, and holding two tiles' worth would double the peak for
+        # nothing.
+        del written
+        # The premask block only needs this count, and the height filter below changes
+        # treeID and score but never semantic, so counting here stays correct.
+        n_masked_by_tile[source_stem] = int(np.count_nonzero(semantic == SEMANTIC_MASKED))
         tiles[source_stem] = {
             "las": str(out_las),
             "gpkg": str(out_dir / f"{source_stem}_trees.gpkg"),
@@ -911,12 +986,7 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
 
     # The tree table is built ONCE over the whole mosaic and then split by owner tile:
     # a tree unified across a km border has points in two km tiles and must be counted,
-    # and measured, once. Only after every km LAS is on disk, since the parts are read
-    # back from them.
-    parts_by_tile, ground_by_tile, extent_by_tile, crs_by_tile = {}, {}, {}, {}
-    for source_stem, tile in tiles.items():
-        (parts_by_tile[source_stem], ground_by_tile[source_stem],
-         extent_by_tile[source_stem], crs_by_tile[source_stem]) = _tile_tree_parts(tile["las"])
+    # and measured, once. The parts were collected per tile above, as each was written.
     rows_by_tile, n_cross_km_trees = _mosaic_tree_rows(
         parts_by_tile, ground_by_tile, extent_by_tile)
 
@@ -933,8 +1003,23 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
             short.update(short_instance_ids(rows, min_height))
         for source_stem, tile in tiles.items():
             in_tile = [gid for gid in short if gid in parts_by_tile[source_stem]]
-            filter_by_tile[source_stem] = drop_instances(tile["las"], tile["las"], in_tile,
-                                                         min_height=min_height)
+            if in_tile:
+                filter_by_tile[source_stem] = drop_instances(
+                    tile["las"], tile["las"], in_tile, min_height=min_height)
+            else:
+                # Nothing to unassign: reading the tile back and rewriting it byte for
+                # byte would be a full pass to change nothing. The counts drop_instances
+                # would return are already known -- its instance set is the tile's parts.
+                n_in_tile = len(parts_by_tile[source_stem])
+                filter_by_tile[source_stem] = {
+                    "las": str(tile["las"]),
+                    "n_points": int(tile["n_points"]),
+                    "instances_before": n_in_tile,
+                    "instances_removed": 0,
+                    "instances_after": n_in_tile,
+                    "points_unassigned": 0,
+                    "min_height": float(min_height),
+                }
             filter_by_tile[source_stem]["instances_removed_owned"] = sum(
                 1 for r in rows_by_tile[source_stem] if r["tree_id"] in short)
             rows_by_tile[source_stem] = [r for r in rows_by_tile[source_stem]
@@ -948,12 +1033,9 @@ def stitch(manifests, results_dirs, out_dir, iou_threshold: float = 0.5,
             rows_by_tile[source_stem], crs_by_tile[source_stem], out_gpkg)
         premask = None
         if premask_polygons:
-            from ff3d_geo.convert import SEMANTIC_MASKED
-
-            sem = np.asarray(laspy.read(str(out_las)).semantic)
-            n_masked = int((sem == SEMANTIC_MASKED).sum())
             premask = {"polygons": [str(spec) for spec in premask_polygons],
-                       "n_masked": n_masked, "n_points": int(sem.size),
+                       "n_masked": n_masked_by_tile[source_stem],
+                       "n_points": int(tile["n_points"]),
                        "applied": "before inference"}
         report = build_report(out_las, out_gpkg, runtime_s=runtime_s,
                               height_filter=filter_by_tile.get(source_stem),

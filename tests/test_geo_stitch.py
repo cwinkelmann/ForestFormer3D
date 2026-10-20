@@ -490,3 +490,124 @@ def test_premask_polygons_put_a_premask_block_in_the_reports(tmp_path):
     assert "buildings" not in rep                  # not inferred from the semantic-3 points
     assert plain["n_trees"] == 3                   # the mosaic itself is unchanged
     assert rep["n_trees"] == rep_plain["n_trees"]
+
+
+def _count_las_reads(monkeypatch):
+    """Count ``laspy.read`` calls per resolved path, for the whole process.
+
+    Every module decodes through the ``laspy.read`` module attribute, so patching it on
+    laspy itself catches stitch, filter, report and baseline alike. ``_write_source_las``
+    streams through ``laspy.open`` and is deliberately NOT counted: this budget is about
+    how often a tile that stitch has already written gets decoded again.
+    """
+    from pathlib import Path as _Path
+
+    counts: dict[str, int] = {}
+    real = laspy.read
+
+    def counting(path, *args, **kwargs):
+        key = str(_Path(str(path)).resolve())
+        counts[key] = counts.get(key, 0) + 1
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(laspy, "read", counting)
+    return counts
+
+
+def test_subtiles_by_source_groups_every_subtile_under_its_source(tmp_path):
+    """The write phase must index sub-tiles by source, not rescan all of them per source.
+
+    The scan is O(sources x sub-tiles): harmless for 57 km tiles (301 k iterations),
+    3.8e10 for a Brandenburg-sized mosaic of 31 k tiles and 1.2 M sub-tiles.
+    """
+    import ff3d_geo.stitch as stitch_module
+
+    manifest, res, xyz, tree = _mosaic(tmp_path)
+    mosaic = load_mosaic([manifest])
+    groups = stitch_module.subtiles_by_source(mosaic)
+
+    assert sum(len(v) for v in groups.values()) == len(mosaic.subtiles)
+    assert len(groups["3dm_33_381_5829"]) == 2
+    for key, subs in groups.items():
+        assert [s["source"] for s in subs] == [key] * len(subs)
+
+
+def test_stitch_decodes_a_written_km_tile_at_most_twice(tmp_path, monkeypatch):
+    """Tree parts come from the arrays stitch just wrote, not from reading them back."""
+    manifest, res, xyz, tree = _mosaic(tmp_path)
+    out = tmp_path / "out"
+    counts = _count_las_reads(monkeypatch)
+
+    info = stitch([manifest], [res], out)
+
+    written = str((out / "3dm_33_381_5829_1_be.las").resolve())
+    assert counts.get(written, 0) <= 2, counts
+    assert info["n_trees"] == 3
+
+
+def test_stitch_counts_premask_points_without_rereading_the_tile(tmp_path, monkeypatch):
+    """The premask block counts semantic-3 points stitch already holds in memory."""
+    manifest, res, xyz, tree = _mosaic(tmp_path)
+    out = tmp_path / "pm"
+    counts = _count_las_reads(monkeypatch)
+
+    stitch([manifest], [res], out, premask_polygons=["alkis_buildings.gpkg"])
+
+    written = str((out / "3dm_33_381_5829_1_be.las").resolve())
+    assert counts.get(written, 0) <= 2, counts
+    rep = json.loads((out / "3dm_33_381_5829_1_be_report.json").read_text())
+    assert rep["premask"]["n_points"] == len(xyz)
+
+
+def test_stitch_skips_the_height_filter_rewrite_when_no_tree_is_short(tmp_path, monkeypatch):
+    """With nothing to unassign, the tile is not read and rewritten to change nothing.
+
+    The fixture's trees are 5-20 m tall, so a 2 m minimum drops none of them; the report
+    still carries the height_filter block, with the same counts the rewrite would report.
+    """
+    manifest, res, xyz, tree = _mosaic(tmp_path)
+    out = tmp_path / "mh"
+    counts = _count_las_reads(monkeypatch)
+
+    info = stitch([manifest], [res], out, min_height=2.0)
+
+    written = str((out / "3dm_33_381_5829_1_be.las").resolve())
+    assert counts.get(written, 0) <= 2, counts
+    assert info["n_trees"] == 3 and info["n_short_removed"] == 0
+    rep = json.loads((out / "3dm_33_381_5829_1_be_report.json").read_text())
+    assert rep["height_filter"]["instances_removed"] == 0
+    assert rep["height_filter"]["instances_before"] == 3
+    assert rep["height_filter"]["points_unassigned"] == 0
+
+
+def test_in_memory_tree_parts_equal_parts_decoded_from_the_written_tile(tmp_path):
+    """Every tree attribute must be what the written LAS itself yields.
+
+    stitch now builds a tile's parts from the arrays it wrote instead of reading the
+    file back, taking x/y/z off the record AFTER the header's scales and offsets were
+    applied. Were it to use the source coordinates instead, heights and crown areas
+    could drift from the file by a quantisation step; recomputing the whole table from
+    the file and comparing it to the one stitch wrote is what catches that.
+    """
+    import ff3d_geo.stitch as stitch_module
+
+    manifest, res, xyz, tree = _mosaic(tmp_path)
+    out = tmp_path / "out"
+    stitch([manifest], [res], out)
+    stem = "3dm_33_381_5829_1_be"
+
+    las = laspy.read(str(out / f"{stem}.las"))
+    parts, ground, extent = stitch_module.tree_parts_from_arrays(
+        las.x, las.y, las.z, las.treeID, las.semantic, las.classification, las.score)
+    rows_by_tile, _ = stitch_module._mosaic_tree_rows(
+        {stem: parts}, {stem: ground}, {stem: extent})
+    from_file = {int(r["tree_id"]): r for r in rows_by_tile[stem]}
+
+    table = gpd.read_file(str(out / f"{stem}_trees.gpkg"), layer="trees")
+    assert len(table) == len(from_file) > 0
+    for _, written in table.iterrows():
+        recomputed = from_file[int(written["tree_id"])]
+        for col in ("x", "y", "top_z", "height", "crown_area_m2", "n_points", "mean_score"):
+            np.testing.assert_allclose(float(written[col]), float(recomputed[col]),
+                                       rtol=0, atol=1e-9, err_msg=f"{col} of tree "
+                                       f"{int(written['tree_id'])}")
