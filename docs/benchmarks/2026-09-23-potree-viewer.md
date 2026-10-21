@@ -1,0 +1,169 @@
+# Potree web viewer for the Berlin ALS 2021 tiles (2026-09-23)
+
+**Status 2026-10-08.** The production site on carrot (`http://10.188.1.1:8080/`, last
+section) carries the 57-tile mosaic, rebuilt by `benchmark/potree_rebuild_mosaic.sh` after
+the re-stitch (octrees for every tile and method, base build plus the variants, swap, HTTP
+checks; the 44-tile site is kept beside it as `berlin_potree_v2_44tiles`). The octree
+conversion and the per-tile stitch now run six at a time (`CONVERT_JOBS`,
+`AMS3D_STITCH_JOBS`), which turns the rebuild from hours into minutes.
+
+Five segmentations are selectable: **ForestFormer3D** (the building-masked product, which is
+what the base build serves -- until 2026-10-08 the site showed the raw model output here,
+so roofs and the Tegeler See jetties appeared as trees), **ForestFormer3D raw (before the
+building mask)** as the `ff3d_raw` variant for exactly that comparison, SegmentAnyTree,
+AMS3D and PointTreeFormer. All 57 tiles carry every overlay (CHM, DTM, instance raster,
+DOP 2021 leaf-off, DOP 2025 leaf-on): the thirteen new tiles reached the site without
+orthophotos, because the rebuild carries existing overlays over and their GeoTIFFs were not
+on carrot, and were filled in afterwards with `build_potree_site.py --refresh --tiles ...`,
+which rebuilds the named tiles and merges them back into `tiles.json` instead of replacing
+it (the other tiles and the rebuilt tiles' `variants` survive). The masked product marks
+removed points as semantic class 3
+(building, red in the semantic colouring, legend entry "building / masked"), so the
+difference between the two is visible point by point: on 379_5826, 13,233 trees masked
+against 15,117 raw. Since 2026-10-07 Stefan Reder's PointTreeFormer results (15 Tegel
+tiles) are the fifth method (`ptf`, `benchmark/ptf_to_ff3d.py`, `--variant ptf`). Since 2026-10-06 the WINMOL 2025 drone orthomosaics of R12 and R13 are a further drape
+(`drone2025`, where the survey flew; `--drone2025-dir`). The rest of this chapter is the
+2026-09-23/25 write-up.
+
+**What.** An offline Potree site for exploring the ForestFormer3D segmentation of the
+Berlin ALS 2021 tiles around Tegel at full resolution: the per-tile point clouds as
+Potree 2 octrees coloured by tree id / semantic class / elevation / instance score /
+ALS class, plus draped CHM, instance mask and the 2021 (leaf-off) and 2025 (leaf-on)
+orthophotos, crown outlines and clickable tree markers.
+
+**Where.** `/Volumes/2TB/winmol/ALS_Data/berlin_potree/` on the 2 TB volume; its
+`README.md` documents every control, the attribute mapping and how to add a tile.
+
+```bash
+cd /Volumes/2TB/winmol/ALS_Data/berlin_potree && python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree
+# then http://localhost:8080/
+```
+
+## Build
+
+| step | script |
+|---|---|
+| LAS → Potree 2 octree (on carrot) | `benchmark/potree_convert_tile.py` + PotreeConverter 2.1.1 (Linux x64 release) |
+| overlays, manifest, `index.html`  | `benchmark/build_potree_site.py` |
+| viewer page (template)            | `benchmark/potree_index.html` |
+
+```bash
+# on carrot, per tile (seconds each; the octree is ~ the size of the LAS)
+python3 benchmark/potree_convert_tile.py \
+    --las work_dirs/berlin-<tile>/<tile>.las \
+    --out work_dirs/logs/potree/out/<tile> \
+    --potree-converter work_dirs/logs/potree/PotreeConverter_linux_x64/PotreeConverter
+
+# on the Mac, after rsyncing out/<tile>/ into <site>/pointclouds/<tile>/
+.venv-cpu/bin/python benchmark/build_potree_site.py \
+    --site /Volumes/2TB/winmol/ALS_Data/berlin_potree \
+    --ff3d-dir /Volumes/2TB/winmol/ALS_Data/berlin_als_2021_ff3d \
+    --dop2021-dir /Volumes/2TB/winmol/ALS_Data/berlin_dop_2021/dop_2021_rgb \
+    --dop2025-dir /Volumes/2TB/winmol/ALS_Data/berlin_dop_2025_sommer
+```
+
+## Findings worth keeping
+
+* **Extra attributes survive the conversion.** PotreeConverter 2.1.1 carries the LAS
+  extra bytes through into the octree, so `treeID` (int32, −1 = none), `semantic`
+  (uint8) and `score` (float) are native Potree attributes and appear in
+  `metadata.json`. No `point_source_id` / `user_data` fallback encoding was needed.
+* **PotreeConverter aborts on our LAS files** with
+  `nlohmann::detail::type_error … invalid UTF-8 byte at index 32: 0xC0`. Cause: the
+  `treeID` extra-bytes description `ForestFormer3D instance, -1 none` is exactly 32
+  bytes and fills the field with no null terminator, and the converter reads past it
+  into the binary that follows. `potree_convert_tile.py` streams a copy of the LAS with
+  those descriptions null-terminated and converts that; the originals are untouched.
+  Worth fixing at the source in the writer that produces these LAS files.
+* **Categorical colouring in Potree needs a texture trick.** Potree colours a scalar
+  attribute by sampling a 1-D gradient texture, and its point-cloud renderer only
+  uploads textures created by its own bundled three.js build (`instanceof` checks). The
+  viewer therefore takes a texture Potree made itself and swaps in a 1-row, 8192-wide
+  canvas of random colours with nearest filtering. Tiles hold 15–25 k trees, so 2–3
+  consecutive ids share a colour slot; consecutive ids are ~50 m apart (median), so
+  trees sharing a colour are essentially never adjacent.
+
+## Coverage
+
+All eleven km² tiles are in the site: 379_5828, 379_5829, 380_5828, 380_5829,
+381_5828, 381_5829, 381_5830, 382_5828, 382_5829, 383_5828, 383_5829 — the last one
+finished inferring on carrot while the site was being built and was converted last.
+227 M points, 300 452 trees, 8.5 GB of octrees and 374 MB of overlays; conversion took
+4–10 s per tile on carrot and the octree came out roughly the size of the source LAS.
+
+## Not verified
+
+The page was checked by serving the folder over `python3 -m http.server` and fetching
+`index.html`, `data/tiles.json` and an octree `metadata.json`, and by reading the Potree
+1.8.2 sources for every API it calls. It has **not** been opened in a browser, so the
+rendering itself — octree display, the LUT texture upload, the draped planes and the
+marker picking — is unverified.
+
+## Serving and two viewer fixes (verified in a browser)
+
+The site must be served by something that answers HTTP Range requests. Potree 2.0 reads every
+octree node as a byte range out of one large `octree.bin`; `python3 -m http.server` ignores the
+`Range` header and returns the whole file with `200`, so the viewer decodes the wrong bytes and
+the cloud appears as scattered blobs with no error anywhere.
+
+The supported server is the nginx container in `docker/potree/` (2026-09-25): the image is
+`nginx:1.27-alpine` plus one config, no site content, and `compose.yaml` bind-mounts the site
+folder read-only at `/usr/share/nginx/html`. nginx answers ranges natively; the config keeps
+them byte-exact (`gzip off` on `*.bin`, `max_ranges 1`), sets the `geojson`/`wasm` MIME
+types and hides the exFAT volume's `._*` sidecars. `tests/test_potree_docker.py` pins all of
+that against a throwaway site (the container tests skip when the daemon is down).
+
+```bash
+cd docker/potree && cp .env.example .env     # POTREE_SITE = site root, POTREE_PORT, POTREE_BIND
+docker compose up -d --build                  # http://localhost:8080/
+docker compose logs -f                        # errors only; access log is off
+docker compose down
+```
+
+**Docker Desktop on the Mac cannot bind-mount the 2TB exFAT volume.** Any `-v /Volumes/2TB/...`
+hangs the container in `Created` (VirtioFS and gRPC FUSE alike; a `/Users` or `/private/tmp`
+mount of the same files starts instantly) and the hung start wedges the daemon until Docker
+Desktop is force-quit. The volume is exFAT mounted through macOS FSKit (`fskit` in `mount`).
+Workarounds: rsync the site (23 GB for the 33-tile v2 site) onto the internal APFS disk and
+point `POTREE_SITE` there; run the container on a Linux host (carrot, T14) where the mount is
+native; or fall back to the Python server, which reads the volume directly. Whichever copy
+you make, open the modes: the exFAT tree is 0700 throughout, `rsync -a` keeps that, and
+nginx's worker (uid 101, not root) then gets 403 on every file. Use
+`rsync -r --size-only --chmod=Da+rx,Fa+r --exclude '._*' <site>/ <dest>/`
+(or `chmod -R a+rX <dest>` afterwards). `.env.example` therefore leaves `POTREE_SITE` empty
+so `docker compose up` refuses to start until a real path is chosen.
+
+```bash
+python3 benchmark/serve_potree.py --root /Volumes/2TB/winmol/ALS_Data/berlin_potree_v2 --port 8080
+```
+
+Verified 2026-09-25 against an APFS copy of the v2 site (page, `build/`, `libs/`, `data/`, one
+tile's octree): manifest, `metadata.json`, a `206` byte range out of the 700 MB `octree.bin`,
+`application/wasm` and `application/geo+json` all served correctly; the page initialises Potree
+1.8 and lists the 33 tiles with no console errors.
+
+**Production deployment: carrot, `http://10.188.1.1:8080/` over the VPN** (2026-09-25). The
+site root is `/raid/cwinkelmann/potree/berlin_potree_v2` (33 GB): the three octree sets are
+hard links (`cp -al`, no extra space) of `work_dirs/logs/potree/out_v2_33` (33 tiles),
+`out_sat` (11) and `out_ams3d` (3), which PotreeConverter had written on carrot in the first
+place; `index.html`, `build/`, `libs/` and `data/` were rsynced from the Mac with
+`--chmod=Da+rx,Fa+r`. `docker/potree/.env` on carrot binds to the VPN address
+(`POTREE_BIND=10.188.1.1`), not `0.0.0.0`, because a Docker-published port bypasses the host
+firewall. Rootless Docker on carrot serves the files fine (the octrees are 0664, owned by the
+user). Checked from carrot and from the Mac through the VPN: 33 tiles with `sat` and `ams3d`
+variants in the manifest, `metadata.json` from all three octree directories, a `206` range out
+of `octree.bin`, `wasm`/`geojson` MIME types, container healthy.
+
+Two fixes in `benchmark/potree_index.html`, both found by driving the page in a headless browser:
+
+- **proj4 has no EPSG:25833.** Potree's per-frame update passes the point cloud's CRS to proj4 for
+  its map view; an unknown code throws, the exception kills the requestAnimationFrame loop, and the
+  page freezes after a few frames. The page now registers the definition before the viewer starts.
+- **Extra attributes are not normalised.** Potree 1.8.2 assumes extra attributes arrive in [0,1],
+  but its decoder only rescales types larger than four bytes, so `treeID` (int32), `semantic`
+  (uint8) and `score` (float) reach the shader raw and every tree clamps to a single colour.
+  Setting the attribute's `initialRange` to [0,1] makes the renderer compute the right scale and
+  offset, and the per-tree colours appear.
+
+Empty crown geometries (24 to 155 per tile, trees whose hull degenerates) also aborted the vector
+build; the crown loop now skips them.

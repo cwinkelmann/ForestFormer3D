@@ -1,0 +1,241 @@
+# How inference works in this checkout
+
+This page explains the end-to-end inference path as it is used today: from a raw
+ALS tile to a georeferenced LAS, a tree table, raster masks and a report. It
+complements the runbooks (`docs/benchmarks/RUNBOOK-carrot.md` for the benchmark,
+`docs/benchmarks/RUNBOOK-tegel.md` for ALS tiles) which hold the exact commands.
+
+## Machines and environments
+
+| Where | What runs there | Environment |
+|---|---|---|
+| GPU server carrot (`ssh carrot`, 8x H100) | every GPU step, the batch runs | Docker image `forestformer3d:cu118` (CUDA 11.8, torch 2.0.1, mmdet3d, MinkowskiEngine, spconv) started through `benchmark/common.sh`'s `ff3d_docker` with `FF3D_GPU=<n>`; checkout `/raid/cwinkelmann/ForestFormer3D`; host venv `/raid/cwinkelmann/ff3d-geo-venv` for the pure-Python `ff3d_geo` package |
+| Mac (no GPU) | conversion, merging, masks, reports, tests | `.venv-cpu` (numpy, laspy, shapely, geopandas, pyogrio, rasterio); no torch |
+| Lenovo T14 (RTX 4080 SUPER, 15.6 GiB usable) | second GPU worker | same image, built there 2026-10-20 (`e6f60b96`, 18 GB, 40 min with `TORCH_CUDA_ARCH_LIST=8.9 MAX_JOBS=6`); geo venv `~/ff3d-geo-venv`; checkout `~/ForestFormer3D`. `region_batch=8` fits (7.3 GB peak measured, against 1.9 GB at `region_batch=1`), so no quality knob has to be lowered: 51.7 s per 100 m sub-tile against 36 s on an idle H100 |
+| olive (`ssh olive`, 2x RTX A6000 48 GB) | second GPU worker, booked/preemptible shares | image `866a762f`, built there 2026-10-20 at 10:40 -- **before** the geo layer, so it has no geopandas and cannot run one-container mode; rebuild it for that. Host venv `~/ff3d-geo-venv` works today; checkout `~/ForestFormer3D` is a COPY, not a clone. See `.claude/skills/ff3d-carrot/SKILL.md` section 11 |
+
+The GPU steps never import `ff3d_geo`, and `ff3d_geo` never imports torch: the two
+halves talk through files only.
+
+**The image is per host, not portable between these hosts.** Each is built for the card it
+runs on (`TORCH_CUDA_ARCH_LIST`: 8.9 on the T14, 8.6 on olive, the full
+`8.0;8.6;8.9;9.0` only where several cards matter), and the extensions carry cubins for
+those arches with **no PTX** -- `cuobjdump --list-elf` on the T14's
+`torch_points_kernels/points_cuda.so` shows `sm_89` and nothing else. Copying that image to
+olive's `sm_86` A6000 would start, mount and then fail at the first kernel launch with "no
+kernel image is available for execution on the device"; PTX is forward-compatible only, so
+even a `+PTX` build of 8.9 could not JIT down to 8.6. Rebuild on the host instead -- on
+olive's 64 cores that is the cheaper half of the choice anyway.
+
+## One container for the whole run
+
+The image carries the geo stack as well (shapely, pyproj, geopandas, rasterio; commit
+`6d4cd49`), so the host venv is optional: the whole pipeline can run inside one container.
+
+```bash
+source benchmark/common.sh
+FF3D_GPU=0 ff3d_docker bash benchmark/berlin_run_gpu.sh 0 3dm_33_381_5828_1_be
+FF3D_GPU=0 ff3d_docker bash benchmark/berlin_stitch.sh   3dm_33_381_5828_1_be
+```
+
+Inside the image, `ff3d_geo` runs its two GPU steps **in place** instead of wrapping them in
+`docker run` -- there is no docker inside the container to call. `ff3d_docker` passes
+`FF3D_IN_CONTAINER=1` in, so nothing has to guess; without it the runtime's own marker answers
+(`/.dockerenv` for docker, `/run/.containerenv` for podman), and `FF3D_IN_CONTAINER=0` forces
+the host behaviour. The check lives once, in `benchmark/geo_env.sh` (`ff3d_in_image`), which
+every script that needs the geo half sources, and it agrees with `ff3d_geo.cli._in_image`
+value for value -- `tests/test_benchmark_geo_env.py` runs both over the same table. Paths
+follow suit: on the host they are rewritten to the `/workspace` mount, inside the image they
+are used as they are, so a mount point other than `/workspace` also works -- including for
+`docker/entrypoint.sh`, which looks for its `transforms_3d.py` patch under `$WORKSPACE`,
+`/workspace` and the working directory rather than only the middle one.
+
+**Which card.** `--gpus device=5` is renumbered inside: the container sees `/dev/nvidia0`,
+`nvidia-smi` index 0 and `NVIDIA_VISIBLE_DEVICES=void` (measured on olive, 2026-10-20), so a
+process in there cannot tell which physical GPU it holds and `--gpu` can select nothing.
+`ff3d_docker` therefore passes `FF3D_GPU` in as well, and `ff3d_geo` refuses a `--gpu` that
+disagrees with it. That is what stops the one mistake this mode invites:
+`ff3d_docker bash benchmark/berlin_run_gpu.sh 5 <tile>` without `FF3D_GPU=5` used to run on
+card 0 while every log line said 5 -- and four workers launched that way for cards 4..7 all
+shared card 0.
+
+Which deployment to use is now a choice rather than a constraint:
+
+| | host venv + container | one container |
+|---|---|---|
+| Needs a geo venv per host | yes | no |
+| Steps that cross a process boundary | 2 of 8 | 0 |
+| numpy for the geo half | the venv's (2.4-2.5) | the image's 1.24.1 |
+| `docker run` calls per km tile | 2 | 1 |
+
+The numpy row is the reason the host venv still exists: the image's OpenMMLab pins hold numpy
+at 1.24.1, while the three host venvs run 2.4-2.5. Anything in `ff3d_geo` that depends on
+newer numpy, pyproj or geopandas behaviour must therefore be exercised in BOTH, which
+`tests/test_geo_in_container.py` and the CPU suite inside the image are for.
+
+That is not hypothetical. The first run of the CPU suite inside the image (2026-10-20) failed
+two tests, and the cause was `merge_las` copying LAS point records between files with
+different header offsets: the integers are relative to their own header, so each sub-tile was
+displaced by the difference -- 13 m in the test, up to the size of a sub-tile in a km tile.
+laspy 2.6 began rescaling on write and hid it; the image pins laspy 2.5.3, where it was real.
+`merge_las` now rescales explicitly, so neither deployment depends on the laspy version for
+its coordinates, and `tests/requirements-cpu.txt`'s floors are the image's own versions --
+a floor above them is a requirement the image can never meet
+(`tests/test_dockerfile_consistency.py`).
+
+Driving the two halves from outside the repo: `demo/ff3d_steps.py` in
+`cwinkelmann/hnee_slurm_deployment` (`1e20a8b`) defines the five per-sub-tile steps as a
+table, each tagged `geo` (host venv) or `gpu` (the image), with a `docker_step` helper that
+also returns the command which *stops* the step -- needed because killing a `docker run`
+client does not stop the container, and a preempted booking must really hand the card back.
+It drove 100 sub-tiles of `3dm_33_381_5828_1_be` on olive through six preemptions at a cost
+of one sub-tile each. `docs/workflow-definition-refactor.md` argues from that run that the
+step table, not `ff3d_geo/cli.py`, is where the pipeline definition belongs.
+
+### Docker or podman: who owns the results
+
+A root docker daemon writes every file the container creates as `root:root`. On carrot and
+olive docker is rootless, so this never came up; on the T14 it is not, and the result PLYs of
+the first km tile came out root-owned -- harmless until the host half of the pipeline (or the
+next `rsync`) has to rewrite them, and in one-container mode the final LAS, GeoPackage and
+GeoTIFFs land that way too. `--user` is not the fix: `docker/entrypoint.sh` writes
+`transforms_3d.py` into site-packages at every start, which needs root *inside* the
+container.
+
+The T14 therefore runs **podman**, rootless and daemonless, which maps container root to the
+invoking user. `FF3D_DOCKER=podman` is the whole switch -- `ff3d_gpu_args` in
+`benchmark/common.sh` swaps `--gpus device=N` for podman's `--device nvidia.com/gpu=N`, and
+one-container detection checks podman's `/run/.containerenv` beside docker's `/.dockerenv`.
+The swap is decided by asking the binary (`$FF3D_DOCKER --version`), not by its name: the
+`podman-docker` package installs `/usr/bin/docker` *as* podman, and a container handed a
+`--gpus` that podman ignores starts with no GPU and fails minutes later inside torch.
+Setup, the reason podman beats rootless docker here (it needs no edit to the global
+nvidia-container-runtime config, so the root daemon keeps working `--gpus`), the measured
+verification and the troubleshooting table are in **`docs/container-runtimes.md`**.
+
+## The model side (inside the container)
+
+`tools/test.py <config> <checkpoint> --work-dir <out> --cfg-options test_dataloader.dataset.ann_file=<pkl>`
+
+1. mmengine builds `ForAINetV2OneFormer3D_XAwarequery` from
+   `configs/oneformer3d_qs_radius16_qp300_2many.py` and loads
+   `work_dirs/clean_forestformer/epoch_3000_fix.pth` (the released checkpoint, already in
+   the converted spconv layout; `tools/fix_spconv_checkpoint.py` converts a raw one).
+2. The test dataset reads the info pkl, one entry per scan; each entry points at the
+   per-scan `.npy` exports under `data/ForAINetV2/forainetv2_instance_data/`
+   (`<scan>_vert.npy`, `_sem_label.npy`, `_ins_label.npy`, `_offsets.npy`, ...).
+3. `predict()` runs `_predict_full_plot` (`oneformer3d/oneformer3d.py`): the whole scan is
+   tiled into overlapping cylinders (`oneformer3d/tiling.py::generate_cylindrical_regions`,
+   radius 16 m, step radius/4 = 4 m: 625 cylinders for a 100 m tile, so every point is
+   processed about 44 times), each cylinder is sampled to at most
+   640,000 points, run through the sparse-conv backbone and the query decoder
+   (300 instance queries + 3 semantic queries), and the per-cylinder instance masks are
+   merged across cylinders by score (`tiling.merge_instances_by_score`, overlap threshold
+   0.3, score threshold 0.4). Semantics are per-point votes (`tiling.SemanticVotes`).
+4. The result is written as `<out>/<scan>.ply` with `x y z` (float32, centered by
+   `<scan>_offsets.npy` = `[mean_x, mean_y, min_z]`), `semantic_pred` (0 ground, 1 wood,
+   2 leaf, -1 no vote), `instance_pred` (tree id, -1 none) and `score`.
+5. The mmengine evaluator then scores the scan against its labels. For unlabeled ALS
+   scans the labels are constants, so its numbers are meaningless but harmless.
+
+Validation during training uses the non-tiled path (`tools/train.py` forces
+`full_plot=False`).
+
+## The geo side (`ff3d_geo`, host Python)
+
+`python -m ff3d_geo run --las <tile>.las [...] --checkpoint <pth> --out <dir> --gpu <n>`
+executes eight steps and prints each one before running it (`--dry-run` prints only):
+
+1. `las_to_ply`: every input LAS (local coordinates 0..100 m, origin encoded in the file
+   name as `E<easting>_N<northing>`) becomes `data/ForAINetV2/test_data/<stem>.ply` with
+   `x y z` only, plus `<out>/<stem>.sidecar.json` (origin, EPSG, point count, source
+   format) and `<stem>_classification.npy` (the ALS classes, kept for the report).
+2. `prepare_inputs`: writes a private scan list `<out>/scan_list.txt` (one stem per line)
+   and removes stale exports for those stems. The tracked
+   `data/ForAINetV2/meta_data/test_list.txt` is never touched.
+3. `preprocess` (container): `batch_load_ForAINetV2_data.py --unlabeled` exports the
+   `.npy` files and superpoints for the listed stems, then
+   `create_data_forainetv2.py --test-list <scan list> --splits test --out-dir <out>`
+   writes `<out>/forainetv2_oneformer3d_infos_test.pkl` (the benchmark pkls under
+   `data/ForAINetV2/` stay untouched).
+4. `check_preprocess`: every stem has `_vert.npy` and `_offsets.npy`, and the pkl is
+   newer than the scan list.
+5. `inference` (container): one `tools/test.py` call for all stems (one model load,
+   N result PLYs).
+6. `results_to_las`: `<out>/<stem>.ply` + offsets + sidecar -> `<out>/<stem>.las`
+   (LAS 1.4, point format 6, EPSG:25833 WKT, extra dims `treeID` int32 (-1 none),
+   `semantic` uint8 (255 no vote), `score` float32; the ALS classification restored).
+7. `trees_to_gpkg`: one point row per tree (`tree_id, x, y, top_z, height,
+   crown_area_m2, n_points, mean_score`) in `<out>/<stem>_trees.gpkg`, height measured
+   against a 1 m ground grid.
+8. `report`: `<out>/<stem>_report.json/.md` with the model-vs-ALS ground agreement, the
+   CHM local-maxima baseline (`ff3d_geo.baseline`), height statistics and the decision
+   rule (`ff3d_geo.report.recommend`: tree count within 50 % of the CHM count and median
+   height within 3 m of the CHM median).
+
+Host steps isolate failures per tile; a failed docker step stops the run.
+
+### km tiles
+
+Berlin ALS 2021 tiles are 1 km squares with 23-25 M points, too big for one run. The
+production path gives every tree a SEAMLESS id across the whole mosaic, sub-tile borders
+and km-tile borders alike, by splitting with a 20 m halo and stitching over the overlap
+instead of offsetting each sub-tile's ids into a disjoint range:
+
+- `python -m ff3d_geo split --las <km tile> --out <dir> --buffer 20 --neighbours <km tiles>`
+  cuts 100 m sub-tiles in local coordinates named `<prefix>_E<x>_N<y>_100m.las` (about 5 s
+  per tile, sparse sub-tiles below 1000 points skipped, point count checked), each carrying
+  a 20 m halo of extra points beyond its core. `--neighbours` names whichever of the eight
+  surrounding km tiles are on disk, so a sub-tile on the source tile's border can fill its
+  halo from the neighbour's own points instead of stopping at the km-tile line; a missing
+  neighbour is simply skipped (the halo goes unfilled there). Also written:
+  `<dir>/split_manifest.json` and, per sub-tile, `<stem>_ident.npy` (the point identity
+  `ff3d_geo.stitch` needs).
+- `run` takes all sub-tiles of a km tile as one batch, as before.
+- Once every tile of the mosaic has been split and run (however many GPUs that took),
+  `python -m ff3d_geo stitch --manifest <split_manifest.json of every split> --results
+  <per-tile run --out dirs> --out <dir> --runtime-s <s>` matches instances across every
+  adjacent sub-tile pair by their IoU over the shared halo points and unions the matches,
+  so the SAME physical tree gets the SAME id in every sub-tile (and every km tile) that saw
+  it. It rewrites each source km tile that owns at least one sub-tile core as one seamless
+  `<T>.las` / `<T>_trees.gpkg` / `<T>_report.json/.md` (a km tile that only supplied halo
+  points to a neighbour is not written). A tree spanning a km-tile border gets one tree-table
+  row, in the tile holding most of its points, computed over all of its points. This is a single call over the WHOLE mosaic being
+  stitched, not per km tile, so ids stay unique and dense across all of it; benchmark's
+  production wrapper is `benchmark/berlin_stitch.sh`, run once all of `berlin_run_gpu.sh`'s
+  per-GPU queues have finished.
+- `python -m ff3d_geo border-check --las <stitched km tile> --json <out>.json` measures what
+  is left of the seams: the strip of unlabelled vegetation along the sub-tile grid lines and
+  how many crowns still get cut by them (should be near zero with the halo, unlike the old
+  offset-id `merge` path).
+- `python -m ff3d_geo masks --las <stitched km tile> --out <dir>` writes the instance GeoTIFF
+  (int32 tree id of the highest point per 0.5 m cell, nodata -1), the semantic GeoTIFF
+  (uint8 majority class, 255 empty) and the crown polygons (`<T>_crowns.gpkg`).
+
+`python -m ff3d_geo merge` (offset each sub-tile's ids into a disjoint range, no halo) still
+exists for a single split without `--buffer`, but is no longer part of the Berlin production
+path.
+
+Measured on carrot (H100) with `--buffer 20`, eleven Berlin km tiles
+(`docs/benchmarks/2026-09-24-seamless-ids.md` sections 6 and 1): **68.4 s per 100 m
+sub-tile, 1 h 54 per km tile** on one uncontended GPU, against 34.3 s / 57 min for the
+same tile split with no halo - **1.99x**, which is what the measured point ratio predicts
+(45.1 M points per km tile in `inputs/berlin/sub/` against 23.2 M core points = 1.941x,
+a 140x140 m halo box vs. a 100x100 m core); the `inputs/berlin/sub/` disk footprint
+scales the same way. Whole mosaic on five to six GPUs in parallel: 1,066 sub-tiles,
+18 h 42 of GPU time, **3 h 57 wall**, 51.5-74.8 s per sub-tile. `stitch` is host-only and
+cheap: **331 s for that whole mosaic**. The profile of where the per-sub-tile time goes is
+in `docs/benchmarks/2026-09-23-inference-profile.md`.
+
+## Where the results are
+
+- carrot: `work_dirs/tegel-r12`, `work_dirs/tegel-r13` (Phase 3 tiles),
+  `work_dirs/berlin-<km tile>/` (per-sub-tile run results, `<T>.las`/`_trees.gpkg` output by
+  `run --out`), `work_dirs/berlin-mosaic/` (the stitched, seamless-id km tiles and their
+  masks/border-check JSON, written by `benchmark/berlin_stitch.sh`), inputs under `inputs/`
+  and `inputs/berlin/`.
+- Mac: `~/work/hnee/ForestFormer3D_runs/berlin_out/` (copied merged files, reports,
+  masks; per-tile subdirectories under `berlin-2021/`).
+- Reports in this repo: `docs/benchmarks/2026-09-22-tegel-als.md` (r12/r13),
+  `docs/benchmarks/2026-09-22-tegel-berlin-2021.md` (three km tiles around Revier 12),
+  `docs/benchmarks/2026-09-22-carrot-ff3d.md` (benchmark old vs fixed code).

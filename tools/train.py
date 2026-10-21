@@ -79,6 +79,12 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
+    # Validation during training scores the cropped cylinders directly;
+    # tiled full-plot inference is for tools/test.py.
+    if cfg.model.get('test_cfg') is not None and not any(
+            'full_plot' in key for key in (args.cfg_options or {})):
+        cfg.model.test_cfg['full_plot'] = False
+
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
         # update configs according to CLI args if args.work_dir is not None
