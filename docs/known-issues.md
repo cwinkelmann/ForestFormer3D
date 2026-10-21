@@ -135,13 +135,19 @@ Each is inherited from OneFormer3D or only matters once the benchmark shows it d
 The question comes up whenever someone looks at the stack: torch 2.0.1 / mmcv 2.0.1 /
 mmdet 3.0.0 are from 2023, so would a newer torch be faster? The pin is kept deliberately.
 
-**MinkowskiEngine is the blocker and it is load-bearing.** The active model's `collate`
+**MinkowskiEngine is the blocker.** The active model's `collate`
 (`oneformer3d/oneformer3d.py:1868-1884`, `ForAINetV2OneFormer3D_XAwarequery`) does not
 merely call a helper; it voxelises through `ME.TensorField(...).sparse()` and takes the
 point->voxel `inverse_mapping` from it, which the whole predict path depends on.
 MinkowskiEngine's last release is 0.5.4 (2021) and does not build against torch >= 2.1
 without patching. `mmcv 2.0.1`'s prebuilt wheels also stop at torch 2.1; beyond that its
 ops compile from source.
+
+It is a blocker, but not an immovable one: the two subsections below measured both halves of
+the problem, and found ME replaceable by ~30 lines of pure torch at no cost in correctness
+or GPU speed, and mmcv's compiled ops never called at all. So the reason the pin stays is
+the next paragraph, not an impossibility -- if a future torch is ever *needed* (a new GPU
+architecture, a dependency that demands it), the path exists and is written down.
 
 **The expected gain is small.** The 2.90x already measured came from scheduling
 (`region_batch`, `batched_decoder`), not from kernels, and the profile addendum in
@@ -150,20 +156,37 @@ sampling, collate, nearest-neighbour and mask post-processing at 7-17 % each -- 
 hotspot for faster kernels to attack. `torch.compile` cannot reach the sparse convolutions,
 which are custom CUDA in spconv and MinkowskiEngine.
 
-### Replacing MinkowskiEngine was evaluated and rejected (2026-10-20)
+### Replacing MinkowskiEngine: equivalent, and faster where it runs (2026-10-20)
 
 ME is used for voxelisation and the point->voxel inverse mapping only; the convolutions are
 spconv. Two drop-in replacements were implemented and checked against ME inside the image
 on a batch of random point sets, correctness judged the way the model uses it
 (`features[inverse_mapping]` per point). Both are **exactly equivalent** -- same voxel
 count, same coordinates, same `spatial_shape`, per-point features agreeing to 7.6e-06,
-which is float summation order rather than disagreement. Both are **slower on CPU**:
+which is float summation order rather than disagreement. On CPU both are slower, which is
+what the first version of this section concluded from; **on the GPU, where this code
+actually runs, the torch replacement wins**:
 
 | CPU, in the image | 1x193k (a sub-tile) | 8x80k (region_batch=8) | 1x640k (max_points) |
 |---|---|---|---|
 | MinkowskiEngine | 547 ms | 1651 ms | 633 ms |
 | packed-int64 `torch.unique` + `scatter_mean` | 650 ms | 2362 ms | 1571 ms |
 | spconv `PointToVoxel.generate_voxel_with_id` | 603 ms | 3801 ms | 1450 ms |
+
+| **CUDA (RTX 4080 SUPER), in the image** | 1x193k | 8x80k (region_batch=8) | 1x640k |
+|---|---|---|---|
+| MinkowskiEngine | 1.7 ms | 2.7 ms | 2.1 ms |
+| packed-int64 `torch.unique` + `scatter_mean` | **0.4 ms** | **1.0 ms** | **0.7 ms** |
+| spconv `PointToVoxel.generate_voxel_with_id` | 3.5 ms | 12.7 ms | 10.8 ms |
+
+So the performance argument for keeping ME does not survive contact with the device: the
+pure-torch groupby is 2.5-4x faster there, and spconv's hash map 4-6x slower. Do not read
+the torch column as a speed opportunity either -- 2.7 ms per batched pass, ~8 passes per
+sub-tile, 100 sub-tiles is **about 1.5 s of a 5,220 s km tile**. The swap is
+performance-neutral in the run; what it buys is the removal of a build dependency, not
+time. CPU numbers are kept above because they are what a Mac test run would measure, and
+they are 100-1000x the GPU ones for every implementation -- never benchmark this on CPU
+and conclude anything about the run.
 
 spconv loses badly at the batch shape because `PointToVoxel` is per-sample, so
 `region_batch=8` builds eight hash maps. `torch.unique(coords, dim=0)` is worse again --
@@ -176,7 +199,12 @@ Ubuntu 22.04 (glibc 2.35) with torch 2.0.1. `torchsparse` 2.0.0b0 does build aga
 torch, but it replaces the spconv *backbone* rather than the groupby, which would cost
 checkpoint compatibility for a claimed 1.25x on part of the time.
 
-### And mmcv stays, because training needs it (2026-10-20)
+Net: ME is replaceable by the packed-int64 groupby at no cost in correctness or speed, and
+that is the move if the stack is ever unpinned (it is the only piece with no wheel for
+torch >= 2.1 and no maintained upstream). It is not worth doing on its own, because nothing
+downstream of it changes while torch stays at 2.0.1.
+
+### mmcv's compiled half is replaceable; its Python half is the stack (2026-10-20)
 
 Our own code imports exactly one thing from mmcv -- `BaseTransform` in
 `oneformer3d/transforms_3d.py`, a pure-Python base class. But `import oneformer3d` pulls
@@ -190,13 +218,41 @@ reasoning: **training still needs mmcv** (`tools/train.py`, `dist_train.sh`,
 retraining), so bypassing it for inference would mean two model-construction paths whose
 drift stays silent until a retrained checkpoint fails to load. One old box beats two paths.
 
+That settled the *bypass*. The follow-up question -- whether mmcv could be replaced rather
+than bypassed -- was then measured, and the compiled half turns out not to be load-bearing
+at all:
+
+- Of the **71** mmcv symbols that `import oneformer3d` binds, **18** come from modules that
+  reference `_ext`. All but two of those arrive through model-zoo modules this config never
+  builds; the two live ones are `mmcv.utils.ext_loader` (via
+  `mmdet3d.models.data_preprocessors.voxelize`, whose `voxel` flag is False in our config)
+  and `mmcv.ops.box_iou_rotated` (via `BaseInstance3DBoxes`, which we construct but never
+  ask for a rotated IoU).
+- With `sys.modules["mmcv._ext"]` seeded by a ~20-line `sitecustomize.py` stub whose every
+  attribute raises `RuntimeError("MMCV_EXT_CALLED: ...")`, the model builds
+  (`ForAINetV2OneFormer3D_XAwarequery`, 17.50 M parameters) and **`docker/smoke.sh` passes
+  unchanged** -- one `loss()` step and one full-plot `predict()`, i.e. both paths, 2 passed
+  in 6.12 s against 6.90 s for the control. No op was ever called.
+
+So the ~150 CUDA ops in `mmcv._ext` are dead weight for this project, and the real
+dependency is mmengine's registry plus mmdet3d's pure-Python classes. Nothing is changed on
+the strength of this: the stub lives in the session scratchpad, not the image, because
+shipping a stub that lies about a C extension is a trap for the next person who enables
+`voxel=True` or a rotated box. What it establishes is the *order of the blockers* -- mmcv is
+soft, mmdet3d's `mmcv < 2.1.0` box is a declaration rather than a kernel, and
+MinkowskiEngine (above) is the only piece with no path to torch >= 2.1 at all.
+
 Two cheaper leads were noted at the same time and are NOT done:
 
 - torch logs `UserWarning: Converting mask without torch.bool dtype to bool; this will
   negatively affect performance` from `torch._native_multi_head_attention`
   (`attention.cpp:150`) during every inference run. `query_decoder.py:281` already casts
-  with `.bool()`, so it is a different call site; one run under `-W error::UserWarning`
-  would localise it. This is a slow attention path on the version already installed.
+  with `.bool()`, so it is a different call site. The 2026-10-20 smoke run narrows it: the
+  warning is raised from `torch/nn/modules/activation.py:1160`, i.e. an
+  `nn.MultiheadAttention.forward` fast path, NOT the hand-written
+  `scaled_dot_product_attention` cross-attention in `forward_padded`. It also reproduces in
+  `docker/smoke.sh` in 7 s, so `-W error::UserWarning` on that gate is the cheap way to get
+  the stack. This is a slow attention path on the version already installed.
 - The `region_batch` sweep on the T14's RTX 4080 SUPER peaked at 7.3 GB of 15.6 GiB at the
   default 8 and was only measured to 8 (`.claude/skills/ff3d-carrot/SKILL.md`), so 16 is
   worth a measurement there even though it was flat from 8 to 32 on an H100.
