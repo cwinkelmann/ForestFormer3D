@@ -147,7 +147,8 @@ It is a blocker, but not an immovable one: the two subsections below measured bo
 the problem, and found ME replaceable by ~30 lines of pure torch at no cost in correctness
 or GPU speed, and mmcv's compiled ops never called at all. So the reason the pin stays is
 the next paragraph, not an impossibility -- if a future torch is ever *needed* (a new GPU
-architecture, a dependency that demands it), the path exists and is written down.
+architecture, a dependency that demands it), the path exists and is written down. `docs/torch-upgrade-path.md`
+has the three routes, what each one costs and the trigger conditions.
 
 **The expected gain is small.** The 2.90x already measured came from scheduling
 (`region_batch`, `batched_decoder`), not from kernels, and the profile addendum in

@@ -27,7 +27,9 @@ The image is `forestformer3d:cu118` (`Dockerfile`): `nvidia/cuda:11.8.0-cudnn8-d
   end to end, a full smoke scenario). `docker/smoke.sh` runs a one-loss-step + one-full-plot
   smoke test on a synthetic plot and is the quickest way to check a fresh image/GPU host.
 - `docs/known-issues.md` lists findings that were deliberately left unfixed; read it before
-  treating any of them as a new bug.
+  treating any of them as a new bug. `docs/torch-upgrade-path.md` is the companion for the
+  question it raises most often -- why the 2023 stack is pinned, and what moving off it
+  would actually take.
 
 ## Common commands
 
