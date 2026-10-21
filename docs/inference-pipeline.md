@@ -17,6 +17,16 @@ complements the runbooks (`docs/benchmarks/RUNBOOK-carrot.md` for the benchmark,
 The GPU steps never import `ff3d_geo`, and `ff3d_geo` never imports torch: the two
 halves talk through files only.
 
+**The image is per host, not portable between these hosts.** Each is built for the card it
+runs on (`TORCH_CUDA_ARCH_LIST`: 8.9 on the T14, 8.6 on olive, the full
+`8.0;8.6;8.9;9.0` only where several cards matter), and the extensions carry cubins for
+those arches with **no PTX** -- `cuobjdump --list-elf` on the T14's
+`torch_points_kernels/points_cuda.so` shows `sm_89` and nothing else. Copying that image to
+olive's `sm_86` A6000 would start, mount and then fail at the first kernel launch with "no
+kernel image is available for execution on the device"; PTX is forward-compatible only, so
+even a `+PTX` build of 8.9 could not JIT down to 8.6. Rebuild on the host instead -- on
+olive's 64 cores that is the cheaper half of the choice anyway.
+
 ## One container for the whole run
 
 The image carries the geo stack as well (shapely, pyproj, geopandas, rasterio; commit
